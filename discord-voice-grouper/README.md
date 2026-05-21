@@ -353,6 +353,10 @@ Renderでは `.env` ファイルを使わず、画面上のEnvironment Variables
 `PORT` はRenderが自動で渡すため、自分で設定しなくて大丈夫です。
 このBotは `PORT` がある場合、そのポートで `/health` を公開します。
 
+Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment Variablesに `DISCORD_TOKEN` が入っていません。
+ログに `No package.json found` や `ENOENT` が出る場合は、Root Directoryの指定がずれている可能性が高いです。
+ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
+
 ### 5. デプロイする
 
 設定が終わったら `Create Web Service` を押します。
