@@ -38,8 +38,8 @@ export const settingCommand = new SlashCommandBuilder()
       .setDescription("PB連携設定を保存します")
       .addRoleOption((option) =>
         option
-          .setName("temp_role")
-          .setDescription("一時的に付与するロール")
+          .setName("participant_role")
+          .setDescription("参加者に付与するロール")
           .setRequired(false),
       )
       .addChannelOption((option) =>
@@ -61,6 +61,27 @@ export const settingCommand = new SlashCommandBuilder()
           .setName("finish_message")
           .setDescription("終了通知で送信する内容")
           .setMaxLength(1000)
+          .setRequired(false),
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("transfer_wait_seconds")
+          .setDescription("転送開始までの待機秒数。省略時は30秒")
+          .setMinValue(0)
+          .setRequired(false),
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("notice_wait_minutes")
+          .setDescription("終了通知までの待機分数。省略時は25分")
+          .setMinValue(0)
+          .setRequired(false),
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("role_remove_wait_minutes")
+          .setDescription("終了通知後のロール解除待機分数。省略時は3分")
+          .setMinValue(0)
           .setRequired(false),
       ),
   )

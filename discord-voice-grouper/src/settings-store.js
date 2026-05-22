@@ -54,12 +54,24 @@ function getEnvironmentSettings(guildId) {
     return null;
   }
 
-  const tempRoleId = process.env.PB_TEMP_ROLE_ID;
+  const tempRoleId =
+    process.env.PB_PARTICIPANT_ROLE_ID ?? process.env.PB_TEMP_ROLE_ID;
   const parentChannelId = process.env.PB_PARENT_CHANNEL_ID;
   const childCategoryId = process.env.PB_CHILD_CATEGORY_ID;
   const finishMessage = process.env.PB_FINISH_MESSAGE;
+  const transferWaitSeconds = process.env.PB_TRANSFER_WAIT_SECONDS;
+  const noticeWaitMinutes = process.env.PB_NOTICE_WAIT_MINUTES;
+  const roleRemoveWaitMinutes = process.env.PB_ROLE_REMOVE_WAIT_MINUTES;
 
-  if (!tempRoleId && !parentChannelId && !childCategoryId && !finishMessage) {
+  if (
+    !tempRoleId &&
+    !parentChannelId &&
+    !childCategoryId &&
+    !finishMessage &&
+    !transferWaitSeconds &&
+    !noticeWaitMinutes &&
+    !roleRemoveWaitMinutes
+  ) {
     return null;
   }
 
@@ -68,6 +80,18 @@ function getEnvironmentSettings(guildId) {
     parentChannelId,
     childCategoryId,
     finishMessage,
+    transferWaitSeconds: parseOptionalInteger(transferWaitSeconds),
+    noticeWaitMinutes: parseOptionalInteger(noticeWaitMinutes),
+    roleRemoveWaitMinutes: parseOptionalInteger(roleRemoveWaitMinutes),
     updatedAt: "environment",
   };
+}
+
+function parseOptionalInteger(value) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : undefined;
 }

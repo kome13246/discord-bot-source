@@ -16,9 +16,10 @@ import { getGuildSettings, saveGuildSettings } from "./settings-store.js";
 
 const { DISCORD_TOKEN, KEEP_ALIVE_PORT, PORT } = process.env;
 
-const TRANSFER_WAIT_MS = 30 * 1000;
-const END_NOTICE_WAIT_MS = 25 * 60 * 1000;
-const ROLE_CLEANUP_WAIT_MS = 10 * 60 * 1000;
+const DEFAULT_TRANSFER_WAIT_SECONDS = 30;
+const DEFAULT_NOTICE_WAIT_MINUTES = 25;
+const DEFAULT_ROLE_REMOVE_WAIT_MINUTES = 3;
+const COUNTDOWN_UPDATE_MS = 1000;
 const PB_CHILD_WAIT_MS = 20 * 1000;
 const DEFAULT_FINISH_MESSAGE = "終了時間です。";
 const MESSAGE_LIMIT = 1900;
@@ -97,10 +98,22 @@ async function handleSetting(interaction) {
     return;
   }
 
-  const tempRole = interaction.options.getRole("temp_role", false);
+  const tempRole = interaction.options.getRole("participant_role", false);
   const parentChannel = interaction.options.getChannel("parent_channel", false);
   const childCategory = interaction.options.getChannel("child_category", false);
   const finishMessage = interaction.options.getString("finish_message", false);
+  const transferWaitSeconds = interaction.options.getInteger(
+    "transfer_wait_seconds",
+    false,
+  );
+  const noticeWaitMinutes = interaction.options.getInteger(
+    "notice_wait_minutes",
+    false,
+  );
+  const roleRemoveWaitMinutes = interaction.options.getInteger(
+    "role_remove_wait_minutes",
+    false,
+  );
   const patch = {};
 
   if (tempRole) {
@@ -117,6 +130,18 @@ async function handleSetting(interaction) {
 
   if (finishMessage?.trim()) {
     patch.finishMessage = finishMessage.trim();
+  }
+
+  if (transferWaitSeconds !== null) {
+    patch.transferWaitSeconds = transferWaitSeconds;
+  }
+
+  if (noticeWaitMinutes !== null) {
+    patch.noticeWaitMinutes = noticeWaitMinutes;
+  }
+
+  if (roleRemoveWaitMinutes !== null) {
+    patch.roleRemoveWaitMinutes = roleRemoveWaitMinutes;
   }
 
   if (Object.keys(patch).length === 0) {
@@ -194,6 +219,21 @@ async function handleSplitVoice(interaction) {
 
   const settings = await getGuildSettings(interaction.guildId);
   const config = await resolveProcessConfig(interaction, settings, botMember);
+  const transferWaitMs = secondsToMs(
+    getNonNegativeInteger(
+      settings?.transferWaitSeconds,
+      DEFAULT_TRANSFER_WAIT_SECONDS,
+    ),
+  );
+  const noticeWaitMs = minutesToMs(
+    getNonNegativeInteger(settings?.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES),
+  );
+  const roleRemoveWaitMs = minutesToMs(
+    getNonNegativeInteger(
+      settings?.roleRemoveWaitMinutes,
+      DEFAULT_ROLE_REMOVE_WAIT_MINUTES,
+    ),
+  );
 
   if (config.errors.length > 0) {
     await interaction.followUp({
@@ -228,8 +268,8 @@ async function handleSplitVoice(interaction) {
   const transferCanceled = await runCountdown({
     channel: operationChannel,
     ownerId: interaction.user.id,
-    totalMs: TRANSFER_WAIT_MS,
-    updateEveryMs: 5 * 1000,
+    totalMs: transferWaitMs,
+    updateEveryMs: COUNTDOWN_UPDATE_MS,
     buttonLabel: "転送キャンセル",
     cancelText: "転送はキャンセルされました。終了通知の待機は続行します。",
     render: (remainingMs) =>
@@ -257,6 +297,8 @@ async function handleSplitVoice(interaction) {
     roleId: config.tempRole.id,
     memberIds: targetMembers.map((member) => member.id),
     finishMessage: settings.finishMessage || DEFAULT_FINISH_MESSAGE,
+    noticeWaitMs,
+    roleRemoveWaitMs,
   }).catch((error) => {
     console.error(error);
   });
@@ -266,7 +308,7 @@ async function resolveProcessConfig(interaction, settings, botMember) {
   const errors = [];
 
   if (!settings?.tempRoleId) {
-    errors.push("/setting set で一時ロールを設定してください。");
+    errors.push("/setting set で参加者ロールを設定してください。");
   }
 
   if (!settings?.parentChannelId) {
@@ -284,7 +326,7 @@ async function resolveProcessConfig(interaction, settings, botMember) {
     : null;
 
   if (settings?.tempRoleId && !tempRole) {
-    errors.push("設定済みの一時ロールが見つかりません。");
+    errors.push("設定済みの参加者ロールが見つかりません。");
   }
 
   if (settings?.parentChannelId && !parentChannel?.isVoiceBased()) {
@@ -297,11 +339,11 @@ async function resolveProcessConfig(interaction, settings, botMember) {
 
   if (tempRole) {
     if (tempRole.managed || tempRole.id === interaction.guild.id) {
-      errors.push("その一時ロールはBotから付与できません。");
+      errors.push("その参加者ロールはBotから付与できません。");
     }
 
     if (tempRole.position >= botMember.roles.highest.position) {
-      errors.push("一時ロールはBotの最上位ロールより下に置いてください。");
+      errors.push("参加者ロールはBotの最上位ロールより下に置いてください。");
     }
   }
 
@@ -345,7 +387,7 @@ async function addRoleToMembers(members, role) {
 
   for (const member of members) {
     try {
-      await member.roles.add(role, "Temporary role for voice grouping session");
+      await member.roles.add(role, "Participant role for voice grouping session");
     } catch {
       failed.push(member.displayName);
     }
@@ -437,24 +479,34 @@ async function runEndNotificationFlow(options) {
   const notificationCanceled = await runCountdown({
     channel: options.channel,
     ownerId: options.ownerId,
-    totalMs: END_NOTICE_WAIT_MS,
-    updateEveryMs: 60 * 1000,
+    totalMs: options.noticeWaitMs,
+    updateEveryMs: COUNTDOWN_UPDATE_MS,
     buttonLabel: "終了通知キャンセル",
-    cancelText: "終了通知はキャンセルされました。一時ロール解除は予定通り行います。",
+    cancelText: "終了通知はキャンセルされました。参加者ロールをすぐ解除します。",
     render: (remainingMs) =>
       `終了通知まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
   });
 
-  if (!notificationCanceled) {
-    await options.channel.send({
-      content: `<@&${options.roleId}> ${options.finishMessage}`,
-      allowedMentions: { roles: [options.roleId] },
-    });
-  } else {
-    await options.channel.send("終了通知をキャンセルしました。");
+  if (notificationCanceled) {
+    await options.channel.send("終了通知をキャンセルしました。参加者ロールを解除します。");
+    const cleanupResult = await removeRoleFromMembers(
+      options.guild,
+      options.roleId,
+      options.memberIds,
+    );
+
+    await options.channel.send(
+      `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
+    );
+    return;
   }
 
-  await sleep(ROLE_CLEANUP_WAIT_MS);
+  await options.channel.send({
+    content: `<@&${options.roleId}> ${options.finishMessage}`,
+    allowedMentions: { roles: [options.roleId] },
+  });
+
+  await sleep(options.roleRemoveWaitMs);
 
   const cleanupResult = await removeRoleFromMembers(
     options.guild,
@@ -463,7 +515,7 @@ async function runEndNotificationFlow(options) {
   );
 
   await options.channel.send(
-    `一時ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
+    `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
   );
 }
 
@@ -476,7 +528,7 @@ async function removeRoleFromMembers(guild, roleId, memberIds) {
       const member = await guild.members.fetch(memberId);
 
       if (member.roles.cache.has(roleId)) {
-        await member.roles.remove(roleId, "Remove temporary voice grouping role");
+        await member.roles.remove(roleId, "Remove participant voice grouping role");
         removed += 1;
       }
     } catch {
@@ -488,6 +540,10 @@ async function removeRoleFromMembers(guild, roleId, memberIds) {
 }
 
 async function runCountdown(options) {
+  if (options.totalMs <= 0) {
+    return false;
+  }
+
   const sessionId = createSessionId();
   const session = {
     ownerId: options.ownerId,
@@ -575,10 +631,13 @@ function formatSettings(settings) {
 
   return [
     "現在のPB連携設定:",
-    `一時ロール: ${settings.tempRoleId ? `<@&${settings.tempRoleId}>` : "未設定"}`,
+    `参加者ロール: ${settings.tempRoleId ? `<@&${settings.tempRoleId}>` : "未設定"}`,
     `PB親チャンネル: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
     `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
     `終了通知内容: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
+    `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
+    `終了通知前待機: ${getNonNegativeInteger(settings.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES)}分`,
+    `通知後ロール解除待機: ${getNonNegativeInteger(settings.roleRemoveWaitMinutes, DEFAULT_ROLE_REMOVE_WAIT_MINUTES)}分`,
   ].join("\n");
 }
 
@@ -703,11 +762,19 @@ function formatDuration(ms) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
 
-  if (minutes === 0) {
-    return `${seconds}秒`;
-  }
+  return `${minutes}分${seconds.toString().padStart(2, "0")}秒`;
+}
 
-  return `${minutes}分${seconds}秒`;
+function getNonNegativeInteger(value, fallback) {
+  return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function secondsToMs(seconds) {
+  return seconds * 1000;
+}
+
+function minutesToMs(minutes) {
+  return minutes * 60 * 1000;
 }
 
 function sleep(ms) {
