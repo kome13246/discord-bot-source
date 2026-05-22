@@ -276,16 +276,19 @@ async function handleSplitVoice(interaction) {
       `PB親チャンネルへの転送開始まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
   });
 
+  let childChannelIds = [];
+
   if (transferCanceled) {
     await operationChannel.send("転送をキャンセルしました。");
   } else {
-    const transferLines = await transferGroups(groups, {
+    const transferResult = await transferGroups(groups, {
       parentChannel: config.parentChannel,
       childCategoryId: config.childCategoryId,
       sourceChannelId: sourceChannel.id,
     });
+    childChannelIds = transferResult.childChannelIds;
 
-    await sendChunked(operationChannel, `転送結果\n${transferLines.join("\n")}`, {
+    await sendChunked(operationChannel, `転送結果\n${transferResult.lines.join("\n")}`, {
       allowedMentions: { parse: [] },
     });
   }
@@ -299,6 +302,7 @@ async function handleSplitVoice(interaction) {
     finishMessage: settings.finishMessage || DEFAULT_FINISH_MESSAGE,
     noticeWaitMs,
     roleRemoveWaitMs,
+    childChannelIds,
   }).catch((error) => {
     console.error(error);
   });
@@ -398,6 +402,7 @@ async function addRoleToMembers(members, role) {
 
 async function transferGroups(groups, config) {
   const lines = [];
+  const childChannelIds = new Set();
 
   for (const [index, group] of groups.entries()) {
     const groupNumber = index + 1;
@@ -420,6 +425,8 @@ async function transferGroups(groups, config) {
         lines.push(`グループ ${groupNumber}: PBの子VCを検出できませんでした。`);
         continue;
       }
+
+      childChannelIds.add(childChannel.id);
 
       let movedCount = 1;
       const failed = [];
@@ -451,7 +458,10 @@ async function transferGroups(groups, config) {
     }
   }
 
-  return lines;
+  return {
+    lines,
+    childChannelIds: [...childChannelIds],
+  };
 }
 
 async function waitForPbChildChannel(member, config) {
@@ -483,12 +493,21 @@ async function runEndNotificationFlow(options) {
     updateEveryMs: COUNTDOWN_UPDATE_MS,
     buttonLabel: "終了通知キャンセル",
     cancelText: "終了通知はキャンセルされました。参加者ロールをすぐ解除します。",
+    autoCancelWhen:
+      options.childChannelIds.length > 0
+        ? () => areAllChannelsGone(options.guild, options.childChannelIds)
+        : undefined,
     render: (remainingMs) =>
       `終了通知まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
   });
 
   if (notificationCanceled) {
-    await options.channel.send("終了通知をキャンセルしました。参加者ロールを解除します。");
+    const cancelText =
+      notificationCanceled === "auto"
+        ? "PBの子VCがすべて削除されたため、終了通知を自動キャンセルしました。参加者ロールを解除します。"
+        : "終了通知をキャンセルしました。参加者ロールを解除します。";
+
+    await options.channel.send(cancelText);
     const cleanupResult = await removeRoleFromMembers(
       options.guild,
       options.roleId,
@@ -539,6 +558,30 @@ async function removeRoleFromMembers(guild, roleId, memberIds) {
   return { removed, failed };
 }
 
+async function areAllChannelsGone(guild, channelIds) {
+  if (channelIds.length === 0) {
+    return false;
+  }
+
+  for (const channelId of channelIds) {
+    const cachedChannel = guild.channels.cache.get(channelId);
+
+    if (cachedChannel) {
+      return false;
+    }
+
+    const fetchedChannel = await guild.channels
+      .fetch(channelId)
+      .catch(() => null);
+
+    if (fetchedChannel) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 async function runCountdown(options) {
   if (options.totalMs <= 0) {
     return false;
@@ -570,6 +613,20 @@ async function runCountdown(options) {
     const elapsedMs = Date.now() - startedAt;
     const remainingMs = Math.max(0, options.totalMs - elapsedMs);
     await sleep(Math.min(options.updateEveryMs, remainingMs));
+
+    if (!session.canceled && options.autoCancelWhen) {
+      const shouldAutoCancel = await options.autoCancelWhen();
+
+      if (shouldAutoCancel) {
+        activeSessions.delete(sessionId);
+        await editSafely(message, {
+          content: "PBの子VCがすべて削除されたため、終了通知を自動キャンセルします。",
+          components: [],
+        });
+        await deleteLater(message);
+        return "auto";
+      }
+    }
 
     if (!session.canceled) {
       await editSafely(message, {
