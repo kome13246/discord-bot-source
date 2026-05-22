@@ -11,11 +11,18 @@ import {
   MessageFlags,
   PermissionsBitField,
 } from "discord.js";
+import {
+  deleteBumpReminder,
+  getBumpReminders,
+  saveBumpReminder,
+} from "./bump-reminder-store.js";
 import { buildGroups, describeGroups, shuffle } from "./grouping.js";
 import { getGuildSettings, saveGuildSettings } from "./settings-store.js";
 
-const { DISCORD_TOKEN, KEEP_ALIVE_PORT, PORT } = process.env;
+const { DISCORD_TOKEN, DISBOARD_BOT_ID, KEEP_ALIVE_PORT, PORT } = process.env;
 
+const DISBOARD_DEFAULT_BOT_ID = "302050872383242240";
+const BUMP_REMINDER_WAIT_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_TRANSFER_WAIT_SECONDS = 30;
 const DEFAULT_NOTICE_WAIT_MINUTES = 25;
 const DEFAULT_ROLE_REMOVE_WAIT_MINUTES = 3;
@@ -25,13 +32,18 @@ const DEFAULT_FINISH_MESSAGE = "終了時間です。";
 const MESSAGE_LIMIT = 1900;
 
 const activeSessions = new Map();
+const bumpReminderTimers = new Map();
 
 if (!DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is required.");
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
 });
 
 const healthPort = Number(PORT ?? KEEP_ALIVE_PORT);
@@ -42,6 +54,17 @@ if (Number.isInteger(healthPort) && healthPort > 0) {
 
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
+  void restoreBumpReminders().catch((error) => {
+    console.error(error);
+  });
+});
+
+client.on(Events.MessageCreate, async (message) => {
+  try {
+    await handleDisboardBumpMessage(message);
+  } catch (error) {
+    console.error(error);
+  }
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -158,6 +181,80 @@ async function handleSetting(interaction) {
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
+}
+
+async function handleDisboardBumpMessage(message) {
+  if (!message.inGuild() || !isDisboardBumpMessage(message)) {
+    return;
+  }
+
+  const user = message.interactionMetadata?.user ?? message.interaction?.user;
+
+  if (!user || user.bot) {
+    return;
+  }
+
+  const reminder = {
+    id: message.id,
+    guildId: message.guildId,
+    channelId: message.channelId,
+    userId: user.id,
+    dueAt: new Date(Date.now() + BUMP_REMINDER_WAIT_MS).toISOString(),
+    sourceMessageId: message.id,
+  };
+
+  await saveBumpReminder(reminder);
+  scheduleBumpReminder(reminder);
+}
+
+function isDisboardBumpMessage(message) {
+  const disboardBotId = DISBOARD_BOT_ID || DISBOARD_DEFAULT_BOT_ID;
+  const commandName = message.interaction?.commandName;
+
+  return (
+    message.author?.id === disboardBotId &&
+    commandName === "bump" &&
+    Boolean(message.interactionMetadata?.user ?? message.interaction?.user)
+  );
+}
+
+async function restoreBumpReminders() {
+  const reminders = await getBumpReminders();
+
+  for (const reminder of reminders) {
+    scheduleBumpReminder(reminder);
+  }
+}
+
+function scheduleBumpReminder(reminder) {
+  if (bumpReminderTimers.has(reminder.id)) {
+    clearTimeout(bumpReminderTimers.get(reminder.id));
+  }
+
+  const delayMs = Math.max(0, new Date(reminder.dueAt).getTime() - Date.now());
+  const timer = setTimeout(() => {
+    bumpReminderTimers.delete(reminder.id);
+    void sendBumpReminder(reminder).catch((error) => {
+      console.error(error);
+    });
+  }, delayMs);
+
+  bumpReminderTimers.set(reminder.id, timer);
+}
+
+async function sendBumpReminder(reminder) {
+  const channel = await client.channels.fetch(reminder.channelId).catch(() => null);
+
+  if (!channel || typeof channel.send !== "function") {
+    await deleteBumpReminder(reminder.id);
+    return;
+  }
+
+  await channel.send({
+    content: `<@${reminder.userId}> 前回のbumpから２時間が経過しました`,
+    allowedMentions: { users: [reminder.userId] },
+  });
+  await deleteBumpReminder(reminder.id);
 }
 
 async function handleSplitVoice(interaction) {

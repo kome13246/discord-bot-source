@@ -19,6 +19,7 @@
 - 終了通知の3分後に参加者ロールを解除できます。
 - 転送前待機、終了通知前待機、通知後ロール解除待機をコマンドで変更できます。
 - PBが作成した子VCがすべて削除されたら、終了通知を自動キャンセルして参加者ロールを解除できます。
+- DISBOARDの `/bump` 成功メッセージを検知し、2時間後に実行者へリマインドできます。
 
 ## グループ分けのルール
 
@@ -66,6 +67,7 @@ discord-voice-grouper/
 ├─ README.md
 └─ src/
    ├─ bot.js
+   ├─ bump-reminder-store.js
    ├─ commands.js
    ├─ grouping.js
    ├─ settings-store.js
@@ -75,6 +77,7 @@ discord-voice-grouper/
 主な役割:
 
 - `src/bot.js`: Bot本体です。Discordに接続し、`/splitvc` を処理します。
+- `src/bump-reminder-store.js`: DISBOARD bumpリマインドの予約を保存します。
 - `src/commands.js`: スラッシュコマンドの定義です。
 - `src/grouping.js`: 3人組・4人組に分ける計算ロジックです。
 - `src/settings-store.js`: `/setting` で保存したPB連携設定を読み書きします。
@@ -119,6 +122,7 @@ Bot Permissions:
 - メンバーをPB親VCや子VCへ移動するため、Move Members権限が必要です。
 - 参加者ロールを付与・解除するため、Manage Roles権限が必要です。
 - 参加者ロールはBotの最上位ロールより下に置いてください。
+- DISBOARD bumpリマインドのため、DISBOARDがbump成功メッセージを投稿するチャンネルをBotが閲覧できる必要があります。
 
 ## 3. `.env` を作る
 
@@ -133,6 +137,7 @@ copy .env.example .env
 ```env
 DISCORD_TOKEN=your_bot_token_here
 DISCORD_CLIENT_ID=your_application_client_id_here
+# DISBOARD_BOT_ID=302050872383242240
 # DISCORD_GUILD_ID=123456789012345678
 # PB_PARTICIPANT_ROLE_ID=123456789012345678
 # PB_PARENT_CHANNEL_ID=123456789012345678
@@ -149,6 +154,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | --- | --- | --- |
 | `DISCORD_TOKEN` | 必須 | Discord Developer Portalで取得したBot Tokenです。 |
 | `DISCORD_CLIENT_ID` | 必須 | アプリのClient IDです。 |
+| `DISBOARD_BOT_ID` | 任意 | DISBOARD BotのIDです。未設定時は公開DISBOARD Bot IDを使います。 |
 | `DISCORD_GUILD_ID` | 任意 | テスト用サーバーのIDです。指定すると、そのサーバーだけにコマンドを登録します。 |
 | `PB_PARTICIPANT_ROLE_ID` | 任意 | Renderなどで固定設定したい場合の参加者ロールIDです。 |
 | `PB_PARENT_CHANNEL_ID` | 任意 | Renderなどで固定設定したい場合のPB親VCのIDです。 |
@@ -373,6 +379,7 @@ RenderのEnvironment Variablesに次を登録します。
 | --- | --- |
 | `DISCORD_TOKEN` | Discord Developer Portalで取得したBot Token |
 | `DISCORD_CLIENT_ID` | Discord ApplicationのClient ID |
+| `DISBOARD_BOT_ID` | 任意。通常は未設定でOK |
 | `DISCORD_GUILD_ID` | テスト用サーバーだけに登録したい場合のみ設定 |
 
 Renderでは `.env` ファイルを使わず、画面上のEnvironment Variablesへ入れます。
@@ -551,6 +558,7 @@ PBが作成した子VCをBotが検出できている場合、その子VCがす�
 コードでは次のGateway Intentを使っています。
 
 - `Guilds`
+- `GuildMessages`
 - `GuildVoiceStates`
 
 Botに必要な主な権限:
@@ -569,6 +577,37 @@ Role Hierarchyの注意:
 
 Message Content Intentは不要です。
 このBotは通常メッセージを読み取らず、スラッシュコマンドの入力だけを使います。
+DISBOARD bumpリマインドも、DISBOARDのメッセージ本文ではなく、Discordのコマンド実行メタ情報を見て判定します。
+
+## DISBOARD bumpリマインド
+
+DISBOARDの `/bump` が成功し、DISBOARD Botがメッセージを投稿したら、2時間後に同じチャンネルへリマインドを送ります。
+
+送信内容:
+
+```text
+@実行者 前回のbumpから２時間が経過しました
+```
+
+この機能は、このBot自身のスラッシュコマンドではありません。
+他Botの `/bump` 実行イベントは直接受け取れないため、DISBOARDが投稿するbump成功メッセージを監視します。
+
+必要な条件:
+
+- DISBOARDのbump成功メッセージが公開チャンネルに投稿されること
+- このBotがそのチャンネルを見られること
+- このBotがそのチャンネルへメッセージを送信できること
+- Discord側のメッセージに `/bump` 実行者情報が付いていること
+
+予約は `data/bump-reminders.json` に保存します。
+Botが再起動しても、ファイルが残っていれば未送信のリマインドを復元します。
+Renderの無料環境などでは再デプロイ時にファイルが消える場合があるため、その場合は再起動前の予約も消える可能性があります。
+
+通常は設定不要ですが、DISBOARD Bot IDを明示したい場合はEnvironment Variablesに入れます。
+
+```env
+DISBOARD_BOT_ID=302050872383242240
+```
 
 ## よくあるトラブル
 
