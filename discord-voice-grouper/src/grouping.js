@@ -58,7 +58,10 @@ export function describeGroups(total, groups) {
 
   const threeCount = groups.filter((group) => group.length === 3).length;
   const fourCount = groups.filter((group) => group.length === 4).length;
-  const overThirty = total > 30 ? " 30人を超えていますが、そのまま処理しました。" : "";
+  const underSix =
+    total < 6
+      ? " 推奨人数は6人以上ですが、このまま転送プロセスを続行します。"
+      : "";
 
-  return `${total}人を${groups.length}グループに分けました。3人グループ: ${threeCount}、4人グループ: ${fourCount}。${overThirty}`;
+  return `${total}人を${groups.length}グループに分けました。3人グループ: ${threeCount}、4人グループ: ${fourCount}。${underSix}`;
 }

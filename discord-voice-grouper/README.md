@@ -13,6 +13,10 @@
 - ランダム分けと、表示名順での固定分けを切り替えられます。
 - Botを対象に含めるかどうかを選べます。
 - 結果をチャンネル全体に出すか、自分だけに表示するかを選べます。
+- 一時ロールを対象メンバーへ付与できます。
+- PBの親VCへ代表者を移動し、PBが作成した子VCへ同じグループの残りメンバーを移動できます。
+- 25分後に一時ロールへメンションして終了通知を送信できます。
+- 終了通知の10分後に一時ロールを解除できます。
 
 ## グループ分けのルール
 
@@ -62,6 +66,7 @@ discord-voice-grouper/
    ├─ bot.js
    ├─ commands.js
    ├─ grouping.js
+   ├─ settings-store.js
    └─ register-commands.js
 ```
 
@@ -70,6 +75,7 @@ discord-voice-grouper/
 - `src/bot.js`: Bot本体です。Discordに接続し、`/splitvc` を処理します。
 - `src/commands.js`: スラッシュコマンドの定義です。
 - `src/grouping.js`: 3人組・4人組に分ける計算ロジックです。
+- `src/settings-store.js`: `/setting` で保存したPB連携設定を読み書きします。
 - `src/register-commands.js`: Discordへスラッシュコマンドを登録します。
 - `.env.example`: `.env` を作るための見本です。
 
@@ -97,6 +103,9 @@ Bot Permissions:
 
 - `View Channels`
 - `Send Messages`
+- `Connect`
+- `Move Members`
+- `Manage Roles`
 
 生成されたURLをブラウザで開き、Botを使いたいサーバーへ招待します。
 
@@ -105,6 +114,9 @@ Bot Permissions:
 - `/splitvc` の結果を投稿するため、テキスト送信権限が必要です。
 - ボイスチャンネル内のメンバーを見るため、対象チャンネルを閲覧できる必要があります。
 - チャンネルごとの権限でBotが見えないVCは対象にできません。
+- メンバーをPB親VCや子VCへ移動するため、Move Members権限が必要です。
+- 一時ロールを付与・解除するため、Manage Roles権限が必要です。
+- 一時ロールはBotの最上位ロールより下に置いてください。
 
 ## 3. `.env` を作る
 
@@ -120,6 +132,10 @@ copy .env.example .env
 DISCORD_TOKEN=your_bot_token_here
 DISCORD_CLIENT_ID=your_application_client_id_here
 # DISCORD_GUILD_ID=123456789012345678
+# PB_TEMP_ROLE_ID=123456789012345678
+# PB_PARENT_CHANNEL_ID=123456789012345678
+# PB_CHILD_CATEGORY_ID=123456789012345678
+# PB_FINISH_MESSAGE=終了時間です。
 ```
 
 環境変数:
@@ -129,6 +145,10 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `DISCORD_TOKEN` | 必須 | Discord Developer Portalで取得したBot Tokenです。 |
 | `DISCORD_CLIENT_ID` | 必須 | アプリのClient IDです。 |
 | `DISCORD_GUILD_ID` | 任意 | テスト用サーバーのIDです。指定すると、そのサーバーだけにコマンドを登録します。 |
+| `PB_TEMP_ROLE_ID` | 任意 | Renderなどで固定設定したい場合の一時ロールIDです。 |
+| `PB_PARENT_CHANNEL_ID` | 任意 | Renderなどで固定設定したい場合のPB親VCのIDです。 |
+| `PB_CHILD_CATEGORY_ID` | 任意 | PBが子VCを作るカテゴリIDです。未設定でも自動検出します。 |
+| `PB_FINISH_MESSAGE` | 任意 | 終了通知の文面です。 |
 
 テスト中は `DISCORD_GUILD_ID` を入れるのがおすすめです。
 サーバー単位のコマンド登録は反映が速く、動作確認がしやすいです。
@@ -357,6 +377,9 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `No package.json found` や `ENOENT` が出る場合は、Root Directoryの指定がずれている可能性が高いです。
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
+Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_TEMP_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_FINISH_MESSAGE` として入れてください。
+
 ### 5. デプロイする
 
 設定が終わったら `Create Web Service` を押します。
@@ -418,6 +441,28 @@ push後、RenderのEventsやLogsでデプロイ状況を確認してください
 
 ## コマンド仕様
 
+### `/setting`
+
+PB連携に使う一時ロール、PB親VC、子VCカテゴリ、終了通知文を設定します。
+
+```text
+/setting set temp_role:@一時ロール parent_channel:PB親VC child_category:PB子VCカテゴリ finish_message:終了時間です。
+```
+
+現在の設定を見る場合:
+
+```text
+/setting show
+```
+
+`child_category` は任意です。
+設定すると、PBが作った子VCをそのカテゴリ内だけから探します。
+未設定の場合は、代表者がPB親VCから別のVCへ移動したことを見て自動検出します。
+
+`/setting set` を使うにはサーバー管理権限が必要です。
+
+### `/splitvc`
+
 ```text
 /splitvc
 ```
@@ -438,6 +483,22 @@ push後、RenderのEventsやLogsでデプロイ状況を確認してください
 - 表示名順で固定分けする: `/splitvc shuffle:false`
 - 結果を自分だけに表示する: `/splitvc private:true`
 - Botも含めて分ける: `/splitvc include_bots:true`
+
+PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も行います。
+
+1. 振り分け結果を送信します。
+2. 対象メンバーへ一時ロールを付与します。
+3. 30秒待機し、待機中だけ転送キャンセルボタンを表示します。
+4. 各グループから1人をPB親VCへ移動します。
+5. PBが作成した子VCを検出し、同じグループの残りメンバーを移動します。
+6. 25分後に一時ロールへメンションして終了通知を送信します。
+7. 終了通知の10分後に一時ロールを解除します。
+
+転送キャンセルボタンを押した場合、VC移動だけをキャンセルします。
+終了通知の待機と一時ロール解除は続行します。
+
+終了通知キャンセルボタンを押した場合、終了通知だけをキャンセルします。
+一時ロール解除は予定通り行います。
 
 ## 結果表示
 
@@ -474,6 +535,14 @@ Botに必要な主な権限:
 - 対象サーバーでスラッシュコマンドを使えること
 - 結果を投稿するチャンネルにメッセージを送れること
 - 対象ボイスチャンネルを閲覧できること
+- PB親VCへ接続できること
+- メンバーをVC間で移動できること
+- 一時ロールを付与・解除できること
+
+Role Hierarchyの注意:
+
+- Botのロールは、一時ロールより上に置いてください。
+- Botのロールが一時ロール以下だと、Discordの仕様でロール付与・解除が失敗します。
 
 Message Content Intentは不要です。
 このBotは通常メッセージを読み取らず、スラッシュコマンドの入力だけを使います。
@@ -489,6 +558,11 @@ Message Content Intentは不要です。
 - グローバル登録の場合、反映まで時間がかかることがあります。
 - テスト中は `DISCORD_GUILD_ID` を設定して、サーバー単位で登録すると確認しやすいです。
 
+### `/setting` が出てこない
+
+- 新しいコマンドを追加した後は、もう一度 `npm run register` を実行してください。
+- Renderへデプロイしただけではスラッシュコマンド定義は更新されません。
+
 ### 「対象のボイスチャンネルを指定するか...」と表示される
 
 - `/splitvc` 実行時に `channel` を指定してください。
@@ -499,6 +573,19 @@ Message Content Intentは不要です。
 - VCに人がいるか確認してください。
 - デフォルトではBotユーザーを除外します。Botだけが入っている場合は `include_bots:true` を使ってください。
 - Botが対象VCを閲覧できる権限を持っているか確認してください。
+
+### PBの子VCを検出できない
+
+- PB親VCの設定が正しいか確認してください。
+- PBが代表者を子VCへ移動するまでに時間がかかりすぎると検出に失敗します。
+- `/setting set child_category:...` でPBが子VCを作るカテゴリを設定すると安定しやすくなります。
+- Botに `Move Members` と `Connect` 権限があるか確認してください。
+
+### 一時ロールを付与できない
+
+- Botに `Manage Roles` 権限があるか確認してください。
+- Botのロールを一時ロールより上に置いてください。
+- 管理ロールや連携サービス管理ロールはBotから付与できないことがあります。
 
 ### Botが起動しない
 

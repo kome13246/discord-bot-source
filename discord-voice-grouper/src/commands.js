@@ -29,4 +29,43 @@ export const splitVoiceCommand = new SlashCommandBuilder()
       .setRequired(false),
   );
 
-export const commands = [splitVoiceCommand.toJSON()];
+export const settingCommand = new SlashCommandBuilder()
+  .setName("setting")
+  .setDescription("PB連携に使うロール・チャンネル・通知文を設定します")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("set")
+      .setDescription("PB連携設定を保存します")
+      .addRoleOption((option) =>
+        option
+          .setName("temp_role")
+          .setDescription("一時的に付与するロール")
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("parent_channel")
+          .setDescription("PBの親ボイスチャンネル")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("child_category")
+          .setDescription("PBが子VCを作るカテゴリ。未設定なら自動検出します")
+          .addChannelTypes(ChannelType.GuildCategory)
+          .setRequired(false),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("finish_message")
+          .setDescription("終了通知で送信する内容")
+          .setMaxLength(1000)
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand.setName("show").setDescription("現在のPB連携設定を表示します"),
+  );
+
+export const commands = [splitVoiceCommand.toJSON(), settingCommand.toJSON()];
