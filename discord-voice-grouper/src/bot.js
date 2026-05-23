@@ -127,6 +127,7 @@ async function handleSetting(interaction) {
   const parentChannel = interaction.options.getChannel("parent_channel", false);
   const childCategory = interaction.options.getChannel("child_category", false);
   const waitingChannel = interaction.options.getChannel("waiting_channel", false);
+  const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
   const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
@@ -156,6 +157,10 @@ async function handleSetting(interaction) {
 
   if (waitingChannel) {
     patch.waitingChannelId = waitingChannel.id;
+  }
+
+  if (waitingVcCategory) {
+   patch.waitingVcCategoryId = waitingVcCategory.id;
   }
 
   if (finishMessage?.trim()) {
@@ -376,6 +381,8 @@ async function handleSplitVoice(interaction) {
   const childChannelIds = new Set();
   const participantMemberIds = new Set();
   const processState = { ended: false };
+  let temporaryWaitingVc = null;
+  let temporaryWaitingVcDeleteTimer = null;
 
   if (transferCanceled) {
     await operationChannel.send("転送をキャンセルしました。");
@@ -392,6 +399,45 @@ async function handleSplitVoice(interaction) {
     await sendChunked(operationChannel, `転送結果\n${transferResult.lines.join("\n")}`, {
       allowedMentions: { parse: [] },
     });
+
+if (config.waitingVcCategoryId) {
+
+  temporaryWaitingVc = await operationChannel.guild.channels.create({
+    name: "途中参加部屋",
+    type: ChannelType.GuildVoice,
+    parent: config.waitingVcCategoryId,
+  });
+
+  await operationChannel.send(
+    `待機用VC ${temporaryWaitingVc} を作成しました。10分後に自動削除されます。`,
+  );
+
+  temporaryWaitingVcDeleteTimer = setTimeout(async () => {
+
+    try {
+
+      const fetchedChannel =
+        await operationChannel.guild.channels.fetch(
+          temporaryWaitingVc.id,
+        ).catch(() => null);
+
+      if (fetchedChannel) {
+
+        await fetchedChannel.delete();
+
+        await operationChannel.send(
+          "待機用VCを自動削除しました。",
+        );
+      }
+
+    } catch (error) {
+
+      console.error(error);
+
+    }
+
+  }, 10 * 60 * 1000);
+}
 
     if (config.waitingChannel) {
       void runWaitingRoomMonitor({
@@ -420,7 +466,7 @@ async function handleSplitVoice(interaction) {
     noticeWaitMs,
     roleRemoveWaitMs,
     childChannelIds,
-    state: processState,
+    state: processState,temporaryWaitingVc,temporaryWaitingVcDeleteTimer,
   }).catch((error) => {
     console.error(error);
   });
@@ -450,6 +496,10 @@ async function resolveProcessConfig(interaction, settings, botMember) {
     ? await interaction.guild.channels.fetch(settings.waitingChannelId).catch(() => null)
     : null;
 
+  const waitingVcCategory = settings?.waitingVcCategoryId
+    ? await interaction.guild.channels.fetch( settings.waitingVcCategoryId,).catch(() => null)
+    : null;
+
   if (settings?.tempRoleId && !tempRole) {
     errors.push("設定済みの参加者ロールが見つかりません。");
   }
@@ -465,6 +515,13 @@ async function resolveProcessConfig(interaction, settings, botMember) {
   if (settings?.waitingChannelId && !waitingChannel?.isVoiceBased()) {
     errors.push("設定済みの待機中チャンネルがボイスチャンネルではありません。");
   }
+
+  if (
+  settings?.waitingVcCategoryId &&
+  waitingVcCategory?.type !== ChannelType.GuildCategory
+) {
+  errors.push("待機VCカテゴリがカテゴリチャンネルではありません。");
+}
 
   if (tempRole) {
     if (tempRole.managed || tempRole.id === interaction.guild.id) {
@@ -516,7 +573,9 @@ async function resolveProcessConfig(interaction, settings, botMember) {
     tempRole,
     parentChannel,
     waitingChannel,
+    waitingVcCategory,
     childCategoryId: childCategory?.id ?? null,
+    waitingVcCategoryId: waitingVcCategory?.id ?? null,
   };
 }
 
@@ -855,6 +914,26 @@ async function runEndNotificationFlow(options) {
         : "終了通知をキャンセルしました。参加者ロールを解除します。";
 
     await options.channel.send(cancelText);
+    if (options.temporaryWaitingVc) {
+
+  if (options.temporaryWaitingVcDeleteTimer) {
+    clearTimeout(options.temporaryWaitingVcDeleteTimer);
+  }
+
+  const fetchedChannel =
+    await options.guild.channels.fetch(
+      options.temporaryWaitingVc.id,
+    ).catch(() => null);
+
+  if (fetchedChannel) {
+
+    await fetchedChannel.delete().catch(() => null);
+
+    await options.channel.send(
+      "待機用VCを削除しました。",
+    );
+  }
+}
     const cleanupResult = await removeRoleFromMembers(
       options.guild,
       options.roleId,
@@ -1043,6 +1122,7 @@ function formatSettings(settings) {
     `PB親チャンネル: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
     `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
     `待機中チャンネル: ${settings.waitingChannelId ? `<#${settings.waitingChannelId}>` : "未設定"}`,
+    `待機VCカテゴリ: ${settings.waitingVcCategoryId? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
     `終了通知内容: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
     `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
     `終了通知前待機: ${getNonNegativeInteger(settings.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES)}分`,
