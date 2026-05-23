@@ -58,6 +58,7 @@ function getEnvironmentSettings(guildId) {
     process.env.PB_PARTICIPANT_ROLE_ID ?? process.env.PB_TEMP_ROLE_ID;
   const parentChannelId = process.env.PB_PARENT_CHANNEL_ID;
   const childCategoryId = process.env.PB_CHILD_CATEGORY_ID;
+  const waitingChannelId = process.env.PB_WAITING_CHANNEL_ID;
   const finishMessage = process.env.PB_FINISH_MESSAGE;
   const transferWaitSeconds = process.env.PB_TRANSFER_WAIT_SECONDS;
   const noticeWaitMinutes = process.env.PB_NOTICE_WAIT_MINUTES;
@@ -67,6 +68,7 @@ function getEnvironmentSettings(guildId) {
     !tempRoleId &&
     !parentChannelId &&
     !childCategoryId &&
+    !waitingChannelId &&
     !finishMessage &&
     !transferWaitSeconds &&
     !noticeWaitMinutes &&
@@ -79,6 +81,7 @@ function getEnvironmentSettings(guildId) {
     tempRoleId,
     parentChannelId,
     childCategoryId,
+    waitingChannelId,
     finishMessage,
     transferWaitSeconds: parseOptionalInteger(transferWaitSeconds),
     noticeWaitMinutes: parseOptionalInteger(noticeWaitMinutes),

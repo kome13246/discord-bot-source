@@ -23,6 +23,8 @@ const { DISCORD_TOKEN, DISBOARD_BOT_ID, KEEP_ALIVE_PORT, PORT } = process.env;
 
 const DISBOARD_DEFAULT_BOT_ID = "302050872383242240";
 const BUMP_REMINDER_WAIT_MS = 2 * 60 * 60 * 1000;
+const WAITING_ROOM_MONITOR_MS = 10 * 60 * 1000;
+const WAITING_ROOM_POLL_MS = 5 * 1000;
 const DEFAULT_TRANSFER_WAIT_SECONDS = 30;
 const DEFAULT_NOTICE_WAIT_MINUTES = 25;
 const DEFAULT_ROLE_REMOVE_WAIT_MINUTES = 3;
@@ -124,6 +126,7 @@ async function handleSetting(interaction) {
   const tempRole = interaction.options.getRole("participant_role", false);
   const parentChannel = interaction.options.getChannel("parent_channel", false);
   const childCategory = interaction.options.getChannel("child_category", false);
+  const waitingChannel = interaction.options.getChannel("waiting_channel", false);
   const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
@@ -149,6 +152,10 @@ async function handleSetting(interaction) {
 
   if (childCategory) {
     patch.childCategoryId = childCategory.id;
+  }
+
+  if (waitingChannel) {
+    patch.waitingChannelId = waitingChannel.id;
   }
 
   if (finishMessage?.trim()) {
@@ -340,7 +347,6 @@ async function handleSplitVoice(interaction) {
     return;
   }
 
-  const roleResult = await addRoleToMembers(targetMembers, config.tempRole);
   const operationChannel = getSendableChannel(interaction);
 
   if (!operationChannel) {
@@ -351,16 +357,10 @@ async function handleSplitVoice(interaction) {
     return;
   }
 
-  await sendChunked(
-    operationChannel,
-    [
-      `${config.tempRole} を対象メンバーに付与しました。`,
-      roleResult.failed.length > 0
-        ? `付与できなかったメンバー: ${roleResult.failed.join("、")}`
-        : "全員に付与できました。",
-    ].join("\n"),
-    { allowedMentions: { roles: [] } },
-  );
+  await operationChannel.send({
+    content: `${config.tempRole} は、各メンバーをVCへ転送したタイミングで付与します。`,
+    allowedMentions: { roles: [] },
+  });
 
   const transferCanceled = await runCountdown({
     channel: operationChannel,
@@ -373,7 +373,9 @@ async function handleSplitVoice(interaction) {
       `PB親チャンネルへの転送開始まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
   });
 
-  let childChannelIds = [];
+  const childChannelIds = new Set();
+  const participantMemberIds = new Set();
+  const processState = { ended: false };
 
   if (transferCanceled) {
     await operationChannel.send("転送をキャンセルしました。");
@@ -381,13 +383,31 @@ async function handleSplitVoice(interaction) {
     const transferResult = await transferGroups(groups, {
       parentChannel: config.parentChannel,
       childCategoryId: config.childCategoryId,
+      participantRole: config.tempRole,
       sourceChannelId: sourceChannel.id,
     });
-    childChannelIds = transferResult.childChannelIds;
+    addMany(childChannelIds, transferResult.childChannelIds);
+    addMany(participantMemberIds, transferResult.participantMemberIds);
 
     await sendChunked(operationChannel, `転送結果\n${transferResult.lines.join("\n")}`, {
       allowedMentions: { parse: [] },
     });
+
+    if (config.waitingChannel) {
+      void runWaitingRoomMonitor({
+        channel: operationChannel,
+        guild: interaction.guild,
+        parentChannel: config.parentChannel,
+        waitingChannel: config.waitingChannel,
+        childCategoryId: config.childCategoryId,
+        childChannelIds,
+        participantMemberIds,
+        participantRole: config.tempRole,
+        state: processState,
+      }).catch((error) => {
+        console.error(error);
+      });
+    }
   }
 
   void runEndNotificationFlow({
@@ -395,11 +415,12 @@ async function handleSplitVoice(interaction) {
     guild: interaction.guild,
     ownerId: interaction.user.id,
     roleId: config.tempRole.id,
-    memberIds: targetMembers.map((member) => member.id),
+    memberIds: participantMemberIds,
     finishMessage: settings.finishMessage || DEFAULT_FINISH_MESSAGE,
     noticeWaitMs,
     roleRemoveWaitMs,
     childChannelIds,
+    state: processState,
   }).catch((error) => {
     console.error(error);
   });
@@ -425,6 +446,9 @@ async function resolveProcessConfig(interaction, settings, botMember) {
   const childCategory = settings?.childCategoryId
     ? await interaction.guild.channels.fetch(settings.childCategoryId).catch(() => null)
     : null;
+  const waitingChannel = settings?.waitingChannelId
+    ? await interaction.guild.channels.fetch(settings.waitingChannelId).catch(() => null)
+    : null;
 
   if (settings?.tempRoleId && !tempRole) {
     errors.push("設定済みの参加者ロールが見つかりません。");
@@ -436,6 +460,10 @@ async function resolveProcessConfig(interaction, settings, botMember) {
 
   if (settings?.childCategoryId && childCategory?.type !== ChannelType.GuildCategory) {
     errors.push("設定済みの子VCカテゴリがカテゴリチャンネルではありません。");
+  }
+
+  if (settings?.waitingChannelId && !waitingChannel?.isVoiceBased()) {
+    errors.push("設定済みの待機中チャンネルがボイスチャンネルではありません。");
   }
 
   if (tempRole) {
@@ -468,6 +496,14 @@ async function resolveProcessConfig(interaction, settings, botMember) {
     }
   }
 
+  if (waitingChannel?.isVoiceBased()) {
+    const waitingPermissions = waitingChannel.permissionsFor(botMember);
+
+    if (!waitingPermissions?.has(PermissionsBitField.Flags.ViewChannel)) {
+      errors.push("Botが待機中チャンネルを見る権限を持っていません。");
+    }
+  }
+
   const sendableChannel = getSendableChannel(interaction);
   const textPermissions = sendableChannel?.permissionsFor(botMember);
 
@@ -479,6 +515,7 @@ async function resolveProcessConfig(interaction, settings, botMember) {
     errors,
     tempRole,
     parentChannel,
+    waitingChannel,
     childCategoryId: childCategory?.id ?? null,
   };
 }
@@ -497,9 +534,20 @@ async function addRoleToMembers(members, role) {
   return { failed };
 }
 
+async function addRoleForTransfer(member, role, participantMemberIds) {
+  try {
+    await member.roles.add(role, "Participant role for voice grouping session");
+    participantMemberIds.add(member.id);
+    return null;
+  } catch {
+    return member.displayName;
+  }
+}
+
 async function transferGroups(groups, config) {
   const lines = [];
   const childChannelIds = new Set();
+  const participantMemberIds = new Set();
 
   for (const [index, group] of groups.entries()) {
     const groupNumber = index + 1;
@@ -515,6 +563,16 @@ async function transferGroups(groups, config) {
         config.parentChannel,
         "Move one group member to PB parent channel",
       );
+      const roleFailures = [];
+      const seedRoleFailure = await addRoleForTransfer(
+        seedMember,
+        config.participantRole,
+        participantMemberIds,
+      );
+
+      if (seedRoleFailure) {
+        roleFailures.push(seedRoleFailure);
+      }
 
       const childChannel = await waitForPbChildChannel(seedMember, config);
 
@@ -539,6 +597,16 @@ async function transferGroups(groups, config) {
             childChannel,
             "Move remaining group members to PB child channel",
           );
+          const roleFailure = await addRoleForTransfer(
+            member,
+            config.participantRole,
+            participantMemberIds,
+          );
+
+          if (roleFailure) {
+            roleFailures.push(roleFailure);
+          }
+
           movedCount += 1;
         } catch {
           failed.push(member.displayName);
@@ -547,8 +615,12 @@ async function transferGroups(groups, config) {
 
       const failedText =
         failed.length > 0 ? ` 転送失敗: ${failed.join("、")}` : "";
+      const roleFailedText =
+        roleFailures.length > 0
+          ? ` 参加者ロール付与失敗: ${roleFailures.join("、")}`
+          : "";
       lines.push(
-        `グループ ${groupNumber}: ${childChannel.name} へ ${movedCount}/${group.length} 人を転送しました。${failedText}`,
+        `グループ ${groupNumber}: ${childChannel.name} へ ${movedCount}/${group.length} 人を転送しました。${failedText}${roleFailedText}`,
       );
     } catch (error) {
       lines.push(`グループ ${groupNumber}: 転送中に失敗しました。${error.message}`);
@@ -558,6 +630,7 @@ async function transferGroups(groups, config) {
   return {
     lines,
     childChannelIds: [...childChannelIds],
+    participantMemberIds: [...participantMemberIds],
   };
 }
 
@@ -582,6 +655,186 @@ async function waitForPbChildChannel(member, config) {
   return null;
 }
 
+async function runWaitingRoomMonitor(options) {
+  const endsAt = Date.now() + WAITING_ROOM_MONITOR_MS;
+
+  await options.channel.send(
+    `${options.waitingChannel} の途中参加監視を10分間開始します。`,
+  );
+
+  while (Date.now() < endsAt && !options.state.ended) {
+    await processWaitingRoom(options);
+    await sleep(WAITING_ROOM_POLL_MS);
+  }
+
+  if (!options.state.ended) {
+    await options.channel.send("途中参加監視を終了しました。");
+  }
+}
+
+async function processWaitingRoom(options) {
+  const waitingMembers = getWaitingMembers(options.waitingChannel);
+
+  if (waitingMembers.length === 0) {
+    return;
+  }
+
+  const underfilledChildChannel = await findUnderfilledChildChannel(
+    options.guild,
+    options.childChannelIds,
+  );
+
+  if (underfilledChildChannel) {
+    const member = waitingMembers[0];
+    const roleFailure = await moveMemberToChildChannel(
+      member,
+      underfilledChildChannel,
+      options.participantRole,
+      options.participantMemberIds,
+    );
+    const roleFailureText = roleFailure
+      ? ` 参加者ロール付与失敗: ${roleFailure}`
+      : "";
+
+    await options.channel.send(
+      `途中参加: ${member.displayName} を ${underfilledChildChannel.name} へ転送しました。${roleFailureText}`,
+    );
+    return;
+  }
+
+  if (waitingMembers.length >= 3) {
+    const result = await transferWaitingGroupToNewChild(waitingMembers.slice(0, 3), {
+      parentChannel: options.parentChannel,
+      participantRole: options.participantRole,
+      sourceChannelId: options.waitingChannel.id,
+      childCategoryId: options.childCategoryId,
+      participantMemberIds: options.participantMemberIds,
+    });
+
+    if (result.childChannelId) {
+      options.childChannelIds.add(result.childChannelId);
+    }
+
+    await sendChunked(options.channel, `途中参加の新規グループ\n${result.lines.join("\n")}`, {
+      allowedMentions: { parse: [] },
+    });
+  }
+}
+
+function getWaitingMembers(waitingChannel) {
+  return [...waitingChannel.members.values()]
+    .filter((member) => !member.user.bot)
+    .sort((left, right) =>
+      left.displayName.localeCompare(right.displayName, "ja"),
+    );
+}
+
+async function findUnderfilledChildChannel(guild, childChannelIds) {
+  for (const channelId of childChannelIds) {
+    const channel =
+      guild.channels.cache.get(channelId) ??
+      (await guild.channels.fetch(channelId).catch(() => null));
+
+    if (
+      channel?.isVoiceBased() &&
+      [...channel.members.values()].filter((member) => !member.user.bot).length <= 3
+    ) {
+      return channel;
+    }
+  }
+
+  return null;
+}
+
+async function moveMemberToChildChannel(
+  member,
+  childChannel,
+  participantRole,
+  participantMemberIds,
+) {
+  await member.voice.setChannel(
+    childChannel,
+    "Move waiting participant to PB child channel",
+  );
+  return addRoleForTransfer(member, participantRole, participantMemberIds);
+}
+
+async function transferWaitingGroupToNewChild(members, config) {
+  const lines = [];
+  const seedMember = members[0];
+
+  try {
+    await seedMember.voice.setChannel(
+      config.parentChannel,
+      "Move waiting group seed to PB parent channel",
+    );
+    const roleFailures = [];
+    const seedRoleFailure = await addRoleForTransfer(
+      seedMember,
+      config.participantRole,
+      config.participantMemberIds,
+    );
+
+    if (seedRoleFailure) {
+      roleFailures.push(seedRoleFailure);
+    }
+
+    const childChannel = await waitForPbChildChannel(seedMember, config);
+
+    if (!childChannel) {
+      return {
+        childChannelId: null,
+        lines: ["PBの子VCを検出できませんでした。"],
+      };
+    }
+
+    let movedCount = 1;
+    const failed = [];
+
+    for (const member of members.slice(1)) {
+      try {
+        await member.voice.setChannel(
+          childChannel,
+          "Move waiting group members to PB child channel",
+        );
+        const roleFailure = await addRoleForTransfer(
+          member,
+          config.participantRole,
+          config.participantMemberIds,
+        );
+
+        if (roleFailure) {
+          roleFailures.push(roleFailure);
+        }
+
+        movedCount += 1;
+      } catch {
+        failed.push(member.displayName);
+      }
+    }
+
+    const failedText =
+      failed.length > 0 ? ` 転送失敗: ${failed.join("、")}` : "";
+    const roleFailedText =
+      roleFailures.length > 0
+        ? ` 参加者ロール付与失敗: ${roleFailures.join("、")}`
+        : "";
+    lines.push(
+      `${childChannel.name} へ ${movedCount}/${members.length} 人を転送しました。${failedText}${roleFailedText}`,
+    );
+
+    return {
+      childChannelId: childChannel.id,
+      lines,
+    };
+  } catch (error) {
+    return {
+      childChannelId: null,
+      lines: [`転送中に失敗しました。${error.message}`],
+    };
+  }
+}
+
 async function runEndNotificationFlow(options) {
   const notificationCanceled = await runCountdown({
     channel: options.channel,
@@ -590,10 +843,7 @@ async function runEndNotificationFlow(options) {
     updateEveryMs: COUNTDOWN_UPDATE_MS,
     buttonLabel: "終了通知キャンセル",
     cancelText: "終了通知はキャンセルされました。参加者ロールをすぐ解除します。",
-    autoCancelWhen:
-      options.childChannelIds.length > 0
-        ? () => areAllChannelsGone(options.guild, options.childChannelIds)
-        : undefined,
+    autoCancelWhen: () => areAllChannelsGone(options.guild, options.childChannelIds),
     render: (remainingMs) =>
       `終了通知まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
   });
@@ -614,6 +864,7 @@ async function runEndNotificationFlow(options) {
     await options.channel.send(
       `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
     );
+    options.state.ended = true;
     return;
   }
 
@@ -633,6 +884,7 @@ async function runEndNotificationFlow(options) {
   await options.channel.send(
     `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
   );
+  options.state.ended = true;
 }
 
 async function removeRoleFromMembers(guild, roleId, memberIds) {
@@ -656,11 +908,13 @@ async function removeRoleFromMembers(guild, roleId, memberIds) {
 }
 
 async function areAllChannelsGone(guild, channelIds) {
-  if (channelIds.length === 0) {
+  const ids = [...channelIds];
+
+  if (ids.length === 0) {
     return false;
   }
 
-  for (const channelId of channelIds) {
+  for (const channelId of ids) {
     const cachedChannel = guild.channels.cache.get(channelId);
 
     if (cachedChannel) {
@@ -788,6 +1042,7 @@ function formatSettings(settings) {
     `参加者ロール: ${settings.tempRoleId ? `<@&${settings.tempRoleId}>` : "未設定"}`,
     `PB親チャンネル: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
     `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
+    `待機中チャンネル: ${settings.waitingChannelId ? `<#${settings.waitingChannelId}>` : "未設定"}`,
     `終了通知内容: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
     `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
     `終了通知前待機: ${getNonNegativeInteger(settings.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES)}分`,
@@ -909,6 +1164,12 @@ function getSendableChannel(interaction) {
 
 function createSessionId() {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function addMany(set, values) {
+  for (const value of values) {
+    set.add(value);
+  }
 }
 
 function formatDuration(ms) {

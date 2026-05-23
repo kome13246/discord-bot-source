@@ -56,6 +56,13 @@ export const settingCommand = new SlashCommandBuilder()
           .addChannelTypes(ChannelType.GuildCategory)
           .setRequired(false),
       )
+      .addChannelOption((option) =>
+        option
+          .setName("waiting_channel")
+          .setDescription("途中参加者が入る待機中ボイスチャンネル")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
       .addStringOption((option) =>
         option
           .setName("finish_message")
