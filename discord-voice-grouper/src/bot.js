@@ -448,6 +448,20 @@ async function handleSplitVoice(interaction) {
         }
 
       }, 10 * 60 * 1000);
+
+      void runWaitingRoomMonitor({
+        channel: operationChannel,
+        guild: interaction.guild,
+        waitingChannel: temporaryWaitingVc,
+        parentChannel: config.parentChannel,
+        participantRole: config.tempRole,
+        childCategoryId: config.childCategoryId,
+        childChannelIds,
+        participantMemberIds,
+        state: processState,
+      }).catch((error) => {
+        console.error(error);
+      });
     }
 
 
@@ -466,6 +480,7 @@ async function handleSplitVoice(interaction) {
       console.error(error);
     });
   }
+}
 
   async function resolveProcessConfig(interaction, settings, botMember) {
     const errors = [];
@@ -499,13 +514,17 @@ async function handleSplitVoice(interaction) {
       errors.push("設定済みのPB親チャンネルがボイスチャンネルではありません。");
     }
 
-    if (settings?.childCategoryId && childCategory?.type !== ChannelType.GuildCategory) {
+    if (settings?.childCategoryId && !childCategory) {
+      errors.push("設定済みの子VCカテゴリが見つかりません。");
+    } else if (settings?.childCategoryId && childCategory.type !== ChannelType.GuildCategory) {
       errors.push("設定済みの子VCカテゴリがカテゴリチャンネルではありません。");
     }
 
-    if (
+    if (settings?.waitingVcCategoryId && !waitingVcCategory) {
+      errors.push("設定済みの待機VCカテゴリが見つかりません。");
+    } else if (
       settings?.waitingVcCategoryId &&
-      waitingVcCategory?.type !== ChannelType.GuildCategory
+      waitingVcCategory.type !== ChannelType.GuildCategory
     ) {
       errors.push("待機VCカテゴリがカテゴリチャンネルではありません。");
     }
@@ -540,13 +559,6 @@ async function handleSplitVoice(interaction) {
       }
     }
 
-    if (waitingChannel?.isVoiceBased()) {
-      const waitingPermissions = waitingChannel.permissionsFor(botMember);
-
-      if (!waitingPermissions?.has(PermissionsBitField.Flags.ViewChannel)) {
-        errors.push("Botが待機中チャンネルを見る権限を持っていません。");
-      }
-    }
 
     const sendableChannel = getSendableChannel(interaction);
     const textPermissions = sendableChannel?.permissionsFor(botMember);
@@ -1107,7 +1119,6 @@ async function handleSplitVoice(interaction) {
       `参加者ロール: ${settings.tempRoleId ? `<@&${settings.tempRoleId}>` : "未設定"}`,
       `PB親チャンネル: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
       `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
-      `待機中チャンネル: ${settings.waitingChannelId ? `<#${settings.waitingChannelId}>` : "未設定"}`,
       `待機VCカテゴリ: ${settings.waitingVcCategoryId ? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
       `終了通知内容: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
       `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
