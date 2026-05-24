@@ -433,7 +433,7 @@ async function handleSplitVoice(interaction) {
             ).catch(() => null);
 
           if (fetchedChannel) {
-
+            await notifyWaitingVcClosure(operationChannel, fetchedChannel);
             await fetchedChannel.delete();
 
             await operationChannel.send(
@@ -924,7 +924,7 @@ async function handleSplitVoice(interaction) {
           ).catch(() => null);
 
         if (fetchedChannel) {
-
+          await notifyWaitingVcClosure(options.channel, fetchedChannel);
           await fetchedChannel.delete().catch(() => null);
 
           await options.channel.send(
@@ -1232,6 +1232,20 @@ async function handleSplitVoice(interaction) {
   async function deleteLater(message) {
     await sleep(1500);
     await message.delete().catch(() => null);
+  }
+
+  async function notifyWaitingVcClosure(operationChannel, waitingVc) {
+    const waitingMembers = [...waitingVc.members.values()].filter(
+      (member) => !member.user.bot,
+    );
+
+    if (waitingMembers.length === 0) {
+      return;
+    }
+
+    await operationChannel.send(
+      "誠に申し訳ございませんが、途中参加の条件がそろわなかったため途中参加部屋が削除されました。次の機会があればぜひまたご参加ください",
+    );
   }
 
   function getSendableChannel(interaction) {
