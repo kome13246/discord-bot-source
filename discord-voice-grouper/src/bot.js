@@ -450,22 +450,6 @@ temporaryWaitingVc = await operationChannel.guild.channels.create({
   }, 10 * 60 * 1000);
 }
 
-    if (config.waitingChannel) {
-      void runWaitingRoomMonitor({
-        channel: operationChannel,
-        guild: interaction.guild,
-        parentChannel: config.parentChannel,
-        waitingChannel: config.waitingChannel,
-        childCategoryId: config.childCategoryId,
-        childChannelIds,
-        participantMemberIds,
-        participantRole: config.tempRole,
-        state: processState,
-      }).catch((error) => {
-        console.error(error);
-      });
-    }
-  }
 
   void runEndNotificationFlow({
     channel: operationChannel,
