@@ -5,6 +5,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
+  PermissionFlagsBits,
   Client,
   Events,
   GatewayIntentBits,
@@ -126,7 +127,6 @@ async function handleSetting(interaction) {
   const tempRole = interaction.options.getRole("participant_role", false);
   const parentChannel = interaction.options.getChannel("parent_channel", false);
   const childCategory = interaction.options.getChannel("child_category", false);
-  const waitingChannel = interaction.options.getChannel("waiting_channel", false);
   const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
   const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
@@ -153,10 +153,6 @@ async function handleSetting(interaction) {
 
   if (childCategory) {
     patch.childCategoryId = childCategory.id;
-  }
-
-  if (waitingChannel) {
-    patch.waitingChannelId = waitingChannel.id;
   }
 
   if (waitingVcCategory) {
@@ -402,11 +398,26 @@ async function handleSplitVoice(interaction) {
 
 if (config.waitingVcCategoryId) {
 
-  temporaryWaitingVc = await operationChannel.guild.channels.create({
-    name: "途中参加部屋",
-    type: ChannelType.GuildVoice,
-    parent: config.waitingVcCategoryId,
-  });
+temporaryWaitingVc = await operationChannel.guild.channels.create({
+  name: "途中参加部屋",
+  type: ChannelType.GuildVoice,
+  parent: config.waitingVcCategoryId,
+
+  permissionOverwrites: [
+    {
+      id: operationChannel.guild.roles.everyone.id,
+
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.Connect,
+      ],
+
+      deny: [
+        PermissionFlagsBits.Speak,
+      ],
+    },
+  ],
+});
 
   await operationChannel.send(
     `待機用VC ${temporaryWaitingVc} を作成しました。10分後に自動削除されます。`,
@@ -492,10 +503,6 @@ async function resolveProcessConfig(interaction, settings, botMember) {
   const childCategory = settings?.childCategoryId
     ? await interaction.guild.channels.fetch(settings.childCategoryId).catch(() => null)
     : null;
-  const waitingChannel = settings?.waitingChannelId
-    ? await interaction.guild.channels.fetch(settings.waitingChannelId).catch(() => null)
-    : null;
-
   const waitingVcCategory = settings?.waitingVcCategoryId
     ? await interaction.guild.channels.fetch( settings.waitingVcCategoryId,).catch(() => null)
     : null;
@@ -510,10 +517,6 @@ async function resolveProcessConfig(interaction, settings, botMember) {
 
   if (settings?.childCategoryId && childCategory?.type !== ChannelType.GuildCategory) {
     errors.push("設定済みの子VCカテゴリがカテゴリチャンネルではありません。");
-  }
-
-  if (settings?.waitingChannelId && !waitingChannel?.isVoiceBased()) {
-    errors.push("設定済みの待機中チャンネルがボイスチャンネルではありません。");
   }
 
   if (
@@ -572,7 +575,6 @@ async function resolveProcessConfig(interaction, settings, botMember) {
     errors,
     tempRole,
     parentChannel,
-    waitingChannel,
     waitingVcCategory,
     childCategoryId: childCategory?.id ?? null,
     waitingVcCategoryId: waitingVcCategory?.id ?? null,
