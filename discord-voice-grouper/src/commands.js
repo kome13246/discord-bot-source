@@ -115,20 +115,23 @@ export const bosyuCommand = new SlashCommandBuilder()
   .addStringOption((option) =>
     option
       .setName("time")
-      .setDescription("時間を入力してください。例: 1時間、30分、〇〇まで")
-      .setRequired(true)
+      .setNameLocalizations({ ja: "時間" })
+      .setDescription("時間を入力してください。例: 1時間、30分、〇〇まで（省略可）")
+      .setRequired(false)
       .setMaxLength(100),
   )
   .addStringOption((option) =>
     option
       .setName("purpose")
-      .setDescription("名目を入力してください。例: ゲーム、作業、雑談")
-      .setRequired(true)
+      .setNameLocalizations({ ja: "名目" })
+      .setDescription("名目を入力してください。例: ゲーム、作業、雑談（省略可）")
+      .setRequired(false)
       .setMaxLength(100),
   )
   .addStringOption((option) =>
     option
       .setName("note")
+      .setNameLocalizations({ ja: "ひとこと" })
       .setDescription("ひとことを入力してください。例: 遠慮せずご参加ください！")
       .setRequired(true)
       .setMaxLength(200),

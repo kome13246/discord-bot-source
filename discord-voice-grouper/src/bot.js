@@ -558,8 +558,8 @@ async function handleBosyu(interaction) {
 
   lastBosyuTimestamps.set(rateLimitKey, now);
 
-  const timeValue = interaction.options.getString("time", true).trim();
-  const purposeValue = interaction.options.getString("purpose", true).trim();
+  const timeValue = interaction.options.getString("time", false)?.trim() ?? "";
+  const purposeValue = interaction.options.getString("purpose", false)?.trim() ?? "";
   const noteValue = interaction.options.getString("note", true).trim();
   const content = formatBosyuMessage(timeValue, purposeValue, noteValue, bosyuMentionRoleId);
 
@@ -710,9 +710,9 @@ function createBosyuModal(messageId, content) {
           .setCustomId("bosyu_time")
           .setLabel("時間")
           .setStyle(TextInputStyle.Short)
-          .setRequired(true)
+          .setRequired(false)
           .setMaxLength(100)
-          .setPlaceholder("例: 1時間、30分、〇〇まで")
+          .setPlaceholder("例: 1時間、30分、〇〇まで（省略可）")
           .setValue(defaultValues.time),
       ),
       new ActionRowBuilder().addComponents(
@@ -720,9 +720,9 @@ function createBosyuModal(messageId, content) {
           .setCustomId("bosyu_purpose")
           .setLabel("名目")
           .setStyle(TextInputStyle.Short)
-          .setRequired(true)
+          .setRequired(false)
           .setMaxLength(100)
-          .setPlaceholder("例: ゲーム、作業、雑談")
+          .setPlaceholder("例: ゲーム、作業、雑談（省略可）")
           .setValue(defaultValues.purpose),
       ),
       new ActionRowBuilder().addComponents(
