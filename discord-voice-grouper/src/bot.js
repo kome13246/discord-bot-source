@@ -5,7 +5,10 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
+  ModalBuilder,
   PermissionFlagsBits,
+  TextInputBuilder,
+  TextInputStyle,
   Client,
   Events,
   GatewayIntentBits,
@@ -36,6 +39,8 @@ const MESSAGE_LIMIT = 1900;
 
 const activeSessions = new Map();
 const bumpReminderTimers = new Map();
+const lastBosyuTimestamps = new Map();
+const bosyuEditSessions = new Map();
 
 if (!DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is required.");
@@ -73,7 +78,21 @@ client.on(Events.MessageCreate, async (message) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     if (interaction.isButton()) {
+      if (interaction.customId === "bosyu_edit") {
+        await handleBosyuButton(interaction);
+        return;
+      }
+
       await handleSessionButton(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith("bosyu_edit_modal:")) {
+        await handleBosyuEditModal(interaction);
+        return;
+      }
+
       return;
     }
 
@@ -83,6 +102,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === "splitvc") {
       await handleSplitVoice(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "bosyu") {
+      await handleBosyu(interaction);
       return;
     }
 
@@ -128,6 +152,8 @@ async function handleSetting(interaction) {
   const parentChannel = interaction.options.getChannel("parent_channel", false);
   const childCategory = interaction.options.getChannel("child_category", false);
   const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
+  const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
+  const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
@@ -157,6 +183,14 @@ async function handleSetting(interaction) {
 
   if (waitingVcCategory) {
     patch.waitingVcCategoryId = waitingVcCategory.id;
+  }
+
+  if (bosyuChannel) {
+    patch.bosyuChannelId = bosyuChannel.id;
+  }
+
+  if (bosyuMentionRole) {
+    patch.bosyuMentionRoleId = bosyuMentionRole.id;
   }
 
   if (finishMessage?.trim()) {
@@ -480,6 +514,257 @@ async function handleSplitVoice(interaction) {
       console.error(error);
     });
   }
+}
+
+const BOSYU_COOLDOWN_MS = 15 * 60 * 1000;
+const BOSYU_EDIT_WINDOW_MS = 15 * 60 * 1000;
+
+async function handleBosyu(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({
+      content: "このコマンドはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+  const bosyuChannelId = settings?.bosyuChannelId;
+  const bosyuMentionRoleId = settings?.bosyuMentionRoleId;
+
+  if (bosyuChannelId && interaction.channelId !== bosyuChannelId) {
+    await interaction.reply({
+      content: "このチャンネルでは /bosyu を使用できません。設定された募集チャンネルで実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const rateLimitKey = `${interaction.guildId}:${interaction.user.id}`;
+  const lastUsedAt = lastBosyuTimestamps.get(rateLimitKey) ?? 0;
+  const now = Date.now();
+
+  if (now - lastUsedAt < BOSYU_COOLDOWN_MS) {
+    const remainingMs = BOSYU_COOLDOWN_MS - (now - lastUsedAt);
+    const remainingMinutes = Math.floor(remainingMs / 60000);
+    const remainingSeconds = Math.floor((remainingMs % 60000) / 1000);
+
+    await interaction.reply({
+      content: `15分以内に再度 /bosyu を使用できません。あと ${remainingMinutes}分${remainingSeconds}秒 です。`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  lastBosyuTimestamps.set(rateLimitKey, now);
+
+  const timeValue = interaction.options.getString("time", true).trim();
+  const purposeValue = interaction.options.getString("purpose", true).trim();
+  const noteValue = interaction.options.getString("note", true).trim();
+  const content = formatBosyuMessage(timeValue, purposeValue, noteValue, bosyuMentionRoleId);
+
+  await interaction.reply({
+    content,
+    components: [createBosyuEditRow()],
+    allowedMentions: {
+      roles: bosyuMentionRoleId ? [bosyuMentionRoleId] : [],
+    },
+  });
+
+  const message = await interaction.fetchReply();
+  const expiresAt = now + BOSYU_EDIT_WINDOW_MS;
+
+  bosyuEditSessions.set(message.id, {
+    ownerId: interaction.user.id,
+    expiresAt,
+    bosyuMentionRoleId,
+  });
+
+  setTimeout(async () => {
+    bosyuEditSessions.delete(message.id);
+
+    try {
+      const channel = await client.channels.fetch(interaction.channelId).catch(() => null);
+      if (!channel || typeof channel.messages?.fetch !== "function") {
+        return;
+      }
+
+      const replyMessage = await channel.messages.fetch(message.id).catch(() => null);
+      if (!replyMessage) {
+        return;
+      }
+
+      await replyMessage.edit({ components: [] });
+    } catch {
+      // ignore expired cleanup errors
+    }
+  }, BOSYU_EDIT_WINDOW_MS);
+}
+
+async function handleBosyuButton(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({
+      content: "この操作はサーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const session = bosyuEditSessions.get(interaction.message.id);
+
+  if (!session || Date.now() > session.expiresAt) {
+    await interaction.reply({
+      content: "募集内容の編集期限が終了しました。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.user.id !== session.ownerId) {
+    await interaction.reply({
+      content: "この募集メッセージを編集できるのは実行者のみです。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.showModal(createBosyuModal(interaction.message.id, interaction.message.content));
+}
+
+async function handleBosyuEditModal(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({
+      content: "この操作はサーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const messageId = interaction.customId.slice("bosyu_edit_modal:".length);
+  const session = bosyuEditSessions.get(messageId);
+
+  if (!session || Date.now() > session.expiresAt) {
+    await interaction.reply({
+      content: "募集内容の編集期限が終了しました。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.user.id !== session.ownerId) {
+    await interaction.reply({
+      content: "この募集メッセージを編集できるのは実行者のみです。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const timeValue = interaction.fields.getTextInputValue("bosyu_time");
+  const purposeValue = interaction.fields.getTextInputValue("bosyu_purpose");
+  const noteValue = interaction.fields.getTextInputValue("bosyu_note");
+  const content = formatBosyuMessage(timeValue, purposeValue, noteValue, session.bosyuMentionRoleId);
+
+  const channel = interaction.channel;
+  const replyMessage = await channel.messages.fetch(messageId).catch(() => null);
+
+  if (!replyMessage) {
+    await interaction.reply({
+      content: "募集メッセージの取得に失敗しました。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await replyMessage.edit({
+    content,
+    components: Date.now() <= session.expiresAt ? [createBosyuEditRow()] : [],
+    allowedMentions: {
+      roles: session.bosyuMentionRoleId ? [session.bosyuMentionRoleId] : [],
+    },
+  });
+
+  await interaction.reply({
+    content: "募集内容を更新しました。",
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+function createBosyuEditRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("bosyu_edit")
+      .setLabel("募集内容を編集")
+      .setStyle(ButtonStyle.Primary),
+  );
+}
+
+function createBosyuModal(messageId, content) {
+  const defaultValues = parseBosyuContent(content);
+
+  return new ModalBuilder()
+    .setCustomId(`bosyu_edit_modal:${messageId}`)
+    .setTitle("募集内容を編集")
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("bosyu_time")
+          .setLabel("時間")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(100)
+          .setPlaceholder("例: 1時間、30分、〇〇まで")
+          .setValue(defaultValues.time),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("bosyu_purpose")
+          .setLabel("名目")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(100)
+          .setPlaceholder("例: ゲーム、作業、雑談")
+          .setValue(defaultValues.purpose),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("bosyu_note")
+          .setLabel("ひとこと")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(200)
+          .setPlaceholder("例: 遠慮せずご参加ください！")
+          .setValue(defaultValues.note),
+      ),
+    );
+}
+
+function parseBosyuContent(content) {
+  if (!content) {
+    return { time: "", purpose: "", note: "" };
+  }
+
+  const lines = content.split("\n").map((line) => line.trim());
+  const timeLine = lines.find((line) => line.startsWith("時間:"));
+  const purposeLine = lines.find((line) => line.startsWith("名目:"));
+  const noteLine = lines.find((line) => line.startsWith("ひとこと:"));
+
+  return {
+    time: timeLine ? timeLine.replace(/^時間:\s*/, "") : "",
+    purpose: purposeLine ? purposeLine.replace(/^名目:\s*/, "") : "",
+    note: noteLine ? noteLine.replace(/^ひとこと:\s*/, "") : "",
+  };
+}
+
+function formatBosyuMessage(time, purpose, note, mentionRoleId) {
+  const mention = mentionRoleId ? `<@&${mentionRoleId}>` : "";
+  return [
+    mention,
+    `時間: ${time}`,
+    `名目: ${purpose}`,
+    `ひとこと: ${note}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
   async function resolveProcessConfig(interaction, settings, botMember) {
@@ -1120,6 +1405,8 @@ async function handleSplitVoice(interaction) {
       `PB親チャンネル: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
       `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
       `待機VCカテゴリ: ${settings.waitingVcCategoryId ? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
+      `募集コマンド使用チャンネル: ${settings.bosyuChannelId ? `<#${settings.bosyuChannelId}>` : "制限なし"}`,
+      `募集メンションロール: ${settings.bosyuMentionRoleId ? `<@&${settings.bosyuMentionRoleId}>` : "未設定"}`,
       `終了通知内容: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
       `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
       `終了通知前待機: ${getNonNegativeInteger(settings.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES)}分`,

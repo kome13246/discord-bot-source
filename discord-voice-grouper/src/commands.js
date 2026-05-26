@@ -63,6 +63,19 @@ export const settingCommand = new SlashCommandBuilder()
         .addChannelTypes(ChannelType.GuildCategory)
         .setRequired(false)
       )
+      .addChannelOption((option) =>
+        option
+          .setName("bosyu_channel")
+          .setDescription("/bosyuを使用できるチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addRoleOption((option) =>
+        option
+          .setName("bosyu_mention_role")
+          .setDescription("/bosyuでメンションするロール")
+          .setRequired(false),
+      )
       .addStringOption((option) =>
         option
           .setName("finish_message")
@@ -96,4 +109,33 @@ export const settingCommand = new SlashCommandBuilder()
     subcommand.setName("show").setDescription("現在のPB連携設定を表示します"),
   );
 
-export const commands = [splitVoiceCommand.toJSON(), settingCommand.toJSON()];
+export const bosyuCommand = new SlashCommandBuilder()
+  .setName("bosyu")
+  .setDescription("募集メッセージを送信します")
+  .addStringOption((option) =>
+    option
+      .setName("time")
+      .setDescription("時間を入力してください。例: 1時間、30分、〇〇まで")
+      .setRequired(true)
+      .setMaxLength(100),
+  )
+  .addStringOption((option) =>
+    option
+      .setName("purpose")
+      .setDescription("名目を入力してください。例: ゲーム、作業、雑談")
+      .setRequired(true)
+      .setMaxLength(100),
+  )
+  .addStringOption((option) =>
+    option
+      .setName("note")
+      .setDescription("ひとことを入力してください。例: 遠慮せずご参加ください！")
+      .setRequired(true)
+      .setMaxLength(200),
+  );
+
+export const commands = [
+  splitVoiceCommand.toJSON(),
+  settingCommand.toJSON(),
+  bosyuCommand.toJSON(),
+];
