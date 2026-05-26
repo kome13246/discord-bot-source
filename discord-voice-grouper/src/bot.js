@@ -756,15 +756,25 @@ function parseBosyuContent(content) {
 }
 
 function formatBosyuMessage(time, purpose, note, mentionRoleId) {
-  const mention = mentionRoleId ? `<@&${mentionRoleId}>` : "";
-  return [
-    mention,
-    `時間: ${time}`,
-    `名目: ${purpose}`,
-    `ひとこと: ${note}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const lines = [];
+
+  if (mentionRoleId) {
+    lines.push(`<@&${mentionRoleId}>`);
+  }
+
+  if (time) {
+    lines.push(`時間：${time}`);
+  }
+
+  if (purpose) {
+    lines.push(`名目：${purpose}`);
+  }
+
+  if (note) {
+    lines.push(`ひとこと：${note}`);
+  }
+
+  return lines.join("\n");
 }
 
   async function resolveProcessConfig(interaction, settings, botMember) {
