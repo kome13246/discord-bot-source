@@ -41,6 +41,24 @@ const activeSessions = new Map();
 const bumpReminderTimers = new Map();
 const lastBosyuTimestamps = new Map();
 const bosyuEditSessions = new Map();
+const voiceMonitorSessions = new Map();
+const topicFormSessions = new Map();
+
+const VOICE_MONITOR_MIN_MEMBERS = 2;
+const VOICE_REMINDER_INTERVAL_MS = 30 * 60 * 1000;
+const TOPIC_FORM_EXPIRE_MS = 30 * 60 * 1000;
+const SUGGESTED_TOPICS = [
+  "最近ハマっているゲームや漫画について",
+  "最近見た映画やアニメの話",
+  "最近の仕事・学業であった面白い出来事",
+  "今後やってみたいことや旅行の予定",
+  "好きな音楽やおすすめのアーティスト",
+  "日常のちょっとした悩みや相談",
+  "最近挑戦したことや学んだこと",
+  "おすすめのカフェや飲食店について",
+  "最近気になっているニュースや話題",
+  "趣味や特技の話",
+];
 
 if (!DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is required.");
@@ -70,6 +88,15 @@ client.once(Events.ClientReady, (readyClient) => {
 client.on(Events.MessageCreate, async (message) => {
   try {
     await handleDisboardBumpMessage(message);
+    await handleTopicRequestMessage(message);
+  } catch (error) {
+    console.error(error);
+  }
+});
+
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+  try {
+    await handleVoiceStateUpdate(oldState, newState);
   } catch (error) {
     console.error(error);
   }
@@ -83,13 +110,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      await handleSessionButton(interaction);
-      return;
+      if (interaction.customId.startsWith("session_cancel:")) {
+        await handleSessionButton(interaction);
+        return;
+      }
+
+      if (interaction.customId.startsWith("topic_form_button:")) {
+        await handleTopicFormButton(interaction);
+        return;
+      }
+
+      if (interaction.customId.startsWith("suggest_topic:")) {
+        await handleSuggestTopicButton(interaction);
+        return;
+      }
     }
 
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith("bosyu_edit_modal:")) {
         await handleBosyuEditModal(interaction);
+        return;
+      }
+
+      if (interaction.customId.startsWith("topic_form:")) {
+        await handleTopicFormModal(interaction);
         return;
       }
 
@@ -154,6 +198,14 @@ async function handleSetting(interaction) {
   const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
   const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
+  const voiceParticipantRole = interaction.options.getRole("voice_participant_role", false);
+  const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
+  const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
+  const voiceChannel1 = interaction.options.getChannel("voice_channel_1", false);
+  const voiceChannel2 = interaction.options.getChannel("voice_channel_2", false);
+  const voiceChannel3 = interaction.options.getChannel("voice_channel_3", false);
+  const voiceChannel4 = interaction.options.getChannel("voice_channel_4", false);
+  const voiceChannel5 = interaction.options.getChannel("voice_channel_5", false);
   const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
@@ -191,6 +243,32 @@ async function handleSetting(interaction) {
 
   if (bosyuMentionRole) {
     patch.bosyuMentionRoleId = bosyuMentionRole.id;
+  }
+
+  if (voiceParticipantRole) {
+    patch.voiceParticipantRoleId = voiceParticipantRole.id;
+  }
+
+  if (voiceReminderChannel) {
+    patch.voiceReminderChannelId = voiceReminderChannel.id;
+  }
+
+  if (voiceTopicChannel) {
+    patch.voiceTopicChannelId = voiceTopicChannel.id;
+  }
+
+  const voiceChannelIds = [
+    voiceChannel1,
+    voiceChannel2,
+    voiceChannel3,
+    voiceChannel4,
+    voiceChannel5,
+  ]
+    .filter(Boolean)
+    .map((channel) => channel.id);
+
+  if (voiceChannelIds.length > 0) {
+    patch.voiceMonitorVoiceChannelIds = voiceChannelIds;
   }
 
   if (finishMessage?.trim()) {
@@ -266,6 +344,486 @@ async function restoreBumpReminders() {
   for (const reminder of reminders) {
     scheduleBumpReminder(reminder);
   }
+}
+
+async function handleTopicRequestMessage(message) {
+  if (!message.inGuild() || message.author.bot) {
+    return;
+  }
+
+  if (!message.content.includes("話題を出して")) {
+    return;
+  }
+
+  const settings = await getGuildSettings(message.guildId);
+  if (!settings?.voiceReminderChannelId || message.channelId !== settings.voiceReminderChannelId) {
+    return;
+  }
+
+  const session = [...voiceMonitorSessions.values()].find(
+    (session) =>
+      session.guildId === message.guildId &&
+      session.reminderChannelId === message.channelId,
+  );
+
+  if (!session) {
+    return;
+  }
+
+  const topic = SUGGESTED_TOPICS[Math.floor(Math.random() * SUGGESTED_TOPICS.length)];
+  await message.channel.send({ content: `話題の提案です：${topic}` });
+}
+
+async function handleVoiceStateUpdate(oldState, newState) {
+  const guild = newState.guild ?? oldState.guild;
+  if (!guild) {
+    return;
+  }
+
+  const settings = await getGuildSettings(guild.id);
+  const voiceChannelIds = Array.isArray(settings?.voiceMonitorVoiceChannelIds)
+    ? settings.voiceMonitorVoiceChannelIds.filter(Boolean)
+    : [];
+
+  if (voiceChannelIds.length === 0) {
+    return;
+  }
+
+  const changedChannelIds = new Set();
+
+  if (oldState.channelId && voiceChannelIds.includes(oldState.channelId)) {
+    changedChannelIds.add(oldState.channelId);
+  }
+
+  if (newState.channelId && voiceChannelIds.includes(newState.channelId)) {
+    changedChannelIds.add(newState.channelId);
+  }
+
+  if (changedChannelIds.size === 0) {
+    return;
+  }
+
+  await Promise.all(
+    [...changedChannelIds].map((channelId) =>
+      updateVoiceMonitorSession(guild, settings, channelId),
+    ),
+  );
+
+  if (
+    oldState.member &&
+    oldState.member.user &&
+    !oldState.member.user.bot &&
+    oldState.channelId &&
+    voiceChannelIds.includes(oldState.channelId) &&
+    settings?.voiceParticipantRoleId
+  ) {
+    const stillInMonitored = [...guild.voiceStates.cache.values()].some(
+      (voiceState) =>
+        voiceState.member?.id === oldState.member.id &&
+        voiceChannelIds.includes(voiceState.channelId),
+    );
+
+    if (!stillInMonitored) {
+      const member = await guild.members.fetch(oldState.member.id).catch(() => null);
+      if (member) {
+        await removeVoiceParticipantRole(member, settings.voiceParticipantRoleId);
+      }
+    }
+  }
+}
+
+async function updateVoiceMonitorSession(guild, settings, channelId) {
+  const voiceChannel = await guild.channels.fetch(channelId).catch(() => null);
+
+  if (!voiceChannel?.isVoiceBased()) {
+    return;
+  }
+
+  const reminderChannel = settings?.voiceReminderChannelId
+    ? await guild.channels.fetch(settings.voiceReminderChannelId).catch(() => null)
+    : null;
+
+  if (!reminderChannel || typeof reminderChannel.send !== "function") {
+    return;
+  }
+
+  const members = [...voiceChannel.members.values()].filter(
+    (member) => !member.user.bot,
+  );
+
+  const sessionKey = `${guild.id}:${channelId}`;
+  const existingSession = voiceMonitorSessions.get(sessionKey);
+
+  if (members.length >= VOICE_MONITOR_MIN_MEMBERS) {
+    if (!existingSession) {
+      const session = {
+        guildId: guild.id,
+        voiceChannelId: channelId,
+        reminderChannelId: settings.voiceReminderChannelId,
+        topicOutputChannelId:
+          settings.voiceTopicChannelId || settings.voiceReminderChannelId,
+        participantRoleId: settings.voiceParticipantRoleId,
+        startTime: Date.now(),
+        reminderCount: 0,
+        memberIds: new Set(),
+        reminderTimer: null,
+        active: true,
+        topicForms: new Map(),
+      };
+
+      voiceMonitorSessions.set(sessionKey, session);
+      await startVoiceMonitorSession(session, voiceChannel, members, reminderChannel);
+      return;
+    }
+
+    await ensureSessionMembersHaveRole(existingSession, voiceChannel, members);
+    return;
+  }
+
+  if (existingSession) {
+    await stopVoiceMonitorSession(existingSession, guild, voiceChannel, settings);
+  }
+}
+
+async function startVoiceMonitorSession(session, voiceChannel, members, reminderChannel) {
+  await reminderChannel.send({
+    content:
+      "お集まりいただきありがとうございます！\n「話題を出して」とチャットに送るとbotが話題を出してくれるので話題に詰まったら使ってみてください！",
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`suggest_topic:${session.voiceChannelId}`)
+          .setLabel("話題を出して")
+          .setStyle(ButtonStyle.Primary),
+      ),
+    ],
+  });
+
+  await ensureSessionMembersHaveRole(session, voiceChannel, members);
+  scheduleNextVoiceReminder(session);
+}
+
+async function ensureSessionMembersHaveRole(session, voiceChannel, members) {
+  session.memberIds = new Set(members.map((member) => member.id));
+
+  if (!session.participantRoleId || members.length === 0) {
+    return;
+  }
+
+  const role = await voiceChannel.guild.roles
+    .fetch(session.participantRoleId)
+    .catch(() => null);
+
+  if (!role) {
+    return;
+  }
+
+  for (const member of members) {
+    if (!member.roles.cache.has(role.id)) {
+      try {
+        await member.roles.add(role, "VC参加者ロールを付与");
+      } catch {
+        // ignore individual failures
+      }
+    }
+  }
+}
+
+function scheduleNextVoiceReminder(session) {
+  if (session.reminderTimer) {
+    clearTimeout(session.reminderTimer);
+  }
+
+  session.reminderTimer = setTimeout(async () => {
+    if (!voiceMonitorSessions.has(`${session.guildId}:${session.voiceChannelId}`)) {
+      return;
+    }
+
+    await sendVoiceMonitorReminder(session).catch((error) => {
+      console.error(error);
+    });
+  }, VOICE_REMINDER_INTERVAL_MS);
+}
+
+async function sendVoiceMonitorReminder(session) {
+  const reminderChannel = await client.channels
+    .fetch(session.reminderChannelId)
+    .catch(() => null);
+
+  if (!reminderChannel || typeof reminderChannel.send !== "function") {
+    return;
+  }
+
+  const elapsedMs = Date.now() - session.startTime;
+  const elapsedText = formatVoiceElapsedTime(elapsedMs);
+  const formId = createSessionId();
+
+  const mentionText = session.participantRoleId
+    ? `<@&${session.participantRoleId}> `
+    : "";
+
+  const reminderMessage = await reminderChannel.send({
+    content: `${mentionText}あつまってから${elapsedText}が経過しました！お時間大丈夫でしょうか！お暇があれば今話してる話題をフォームへお願いします！（３０分後に無効になる今話してる話題を書き込むフォームを添付）`,
+    components: [createTopicFormRow(formId)],
+    allowedMentions: session.participantRoleId
+      ? { roles: [session.participantRoleId] }
+      : { parse: [] },
+  });
+
+  const topicForm = {
+    guildId: session.guildId,
+    voiceChannelId: session.voiceChannelId,
+    reminderChannelId: session.reminderChannelId,
+    topicOutputChannelId: session.topicOutputChannelId,
+    expiresAt: Date.now() + TOPIC_FORM_EXPIRE_MS,
+    messageId: reminderMessage.id,
+    disableTimer: null,
+  };
+
+  topicForm.disableTimer = setTimeout(() => {
+    void disableTopicForm(formId).catch((error) => {
+      console.error(error);
+    });
+  }, TOPIC_FORM_EXPIRE_MS);
+
+  topicFormSessions.set(formId, topicForm);
+  session.topicForms.set(formId, topicForm);
+  session.reminderCount += 1;
+  scheduleNextVoiceReminder(session);
+}
+
+async function disableTopicForm(formId) {
+  const topicForm = topicFormSessions.get(formId);
+  if (!topicForm) {
+    return;
+  }
+
+  topicFormSessions.delete(formId);
+
+  const session = voiceMonitorSessions.get(
+    `${topicForm.guildId}:${topicForm.voiceChannelId}`,
+  );
+
+  if (session) {
+    session.topicForms.delete(formId);
+  }
+
+  const reminderChannel = await client.channels
+    .fetch(topicForm.reminderChannelId)
+    .catch(() => null);
+
+  if (!reminderChannel || typeof reminderChannel.messages?.fetch !== "function") {
+    return;
+  }
+
+  const reminderMessage = await reminderChannel.messages
+    .fetch(topicForm.messageId)
+    .catch(() => null);
+
+  if (!reminderMessage) {
+    return;
+  }
+
+  await editSafely(reminderMessage, {
+    components: [createTopicFormRow(formId, true)],
+  });
+}
+
+async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
+  if (session.reminderTimer) {
+    clearTimeout(session.reminderTimer);
+  }
+
+  for (const [formId, topicForm] of session.topicForms.entries()) {
+    if (topicForm.disableTimer) {
+      clearTimeout(topicForm.disableTimer);
+    }
+    topicFormSessions.delete(formId);
+  }
+
+  voiceMonitorSessions.delete(`${session.guildId}:${session.voiceChannelId}`);
+
+  const members = [...voiceChannel.members.values()].filter(
+    (member) => !member.user.bot,
+  );
+
+  for (const member of members) {
+    const stillInOtherMonitored = [...guild.voiceStates.cache.values()].some(
+      (voiceState) =>
+        voiceState.member?.id === member.id &&
+        settings.voiceMonitorVoiceChannelIds?.includes(voiceState.channelId),
+    );
+
+    if (!stillInOtherMonitored && settings.voiceParticipantRoleId) {
+      await removeVoiceParticipantRole(member, settings.voiceParticipantRoleId);
+    }
+  }
+
+  const reminderChannel = await guild.channels
+    .fetch(settings.voiceReminderChannelId)
+    .catch(() => null);
+
+  if (reminderChannel && typeof reminderChannel.send === "function") {
+    await reminderChannel.send(
+      "参加者が2人未満になったため、VCリマインダーの監視を終了しました。",
+    );
+  }
+}
+
+function createTopicFormRow(formId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`topic_form_button:${formId}`)
+      .setLabel(disabled ? "フォーム期限切れ" : "話題フォームを開く")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(disabled),
+  );
+}
+
+function createVoiceTopicModal(formId) {
+  return new ModalBuilder()
+    .setCustomId(`topic_form:${formId}`)
+    .setTitle("今の話題を投稿")
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("voice_topic_input")
+          .setLabel("今話している話題を入力してください")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(400)
+          .setPlaceholder("例：ゲームについてしゃべってます！"),
+      ),
+    );
+}
+
+async function handleTopicFormButton(interaction) {
+  const formId = interaction.customId.slice("topic_form_button:".length);
+  const topicForm = topicFormSessions.get(formId);
+
+  if (!topicForm || Date.now() > topicForm.expiresAt) {
+    await interaction.reply({
+      content: "このフォームの有効期限が切れました。次のリマインダーをお待ちください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.showModal(createVoiceTopicModal(formId));
+}
+
+async function handleSuggestTopicButton(interaction) {
+  const session = [...voiceMonitorSessions.values()].find(
+    (session) =>
+      interaction.customId === `suggest_topic:${session.voiceChannelId}` &&
+      session.guildId === interaction.guildId,
+  );
+
+  if (!session) {
+    await interaction.reply({
+      content: "現在、話題提案を行えるセッションがありません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const topic = SUGGESTED_TOPICS[Math.floor(Math.random() * SUGGESTED_TOPICS.length)];
+
+  await interaction.reply({
+    content: `話題の提案です：${topic}`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleTopicFormModal(interaction) {
+  const formId = interaction.customId.slice("topic_form:".length);
+  const topicForm = topicFormSessions.get(formId);
+
+  if (!topicForm || Date.now() > topicForm.expiresAt) {
+    await interaction.reply({
+      content: "このフォームの有効期限が切れました。次のリマインダーをお待ちください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const topicText = interaction.fields.getTextInputValue("voice_topic_input").trim();
+  const outputChannel = await client.channels
+    .fetch(topicForm.topicOutputChannelId)
+    .catch(() => null);
+
+  if (!outputChannel || typeof outputChannel.send !== "function") {
+    await interaction.reply({
+      content:
+        "話題を投稿するチャンネルにメッセージを送信できませんでした。設定を確認してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await outputChannel.send({
+    content: `今の話題：${topicText}`,
+    allowedMentions: { parse: [] },
+  });
+
+  await interaction.reply({
+    content: "話題を送信しました。",
+    flags: MessageFlags.Ephemeral,
+  });
+
+  if (topicForm.disableTimer) {
+    clearTimeout(topicForm.disableTimer);
+  }
+
+  const session = voiceMonitorSessions.get(
+    `${topicForm.guildId}:${topicForm.voiceChannelId}`,
+  );
+
+  if (session) {
+    session.topicForms.delete(formId);
+  }
+
+  topicFormSessions.delete(formId);
+
+  const reminderChannel = await client.channels
+    .fetch(topicForm.reminderChannelId)
+    .catch(() => null);
+
+  if (reminderChannel && typeof reminderChannel.messages?.fetch === "function") {
+    const reminderMessage = await reminderChannel.messages
+      .fetch(topicForm.messageId)
+      .catch(() => null);
+
+    if (reminderMessage) {
+      await editSafely(reminderMessage, {
+        components: [createTopicFormRow(formId, true)],
+      });
+    }
+  }
+}
+
+async function removeVoiceParticipantRole(member, roleId) {
+  if (!member.roles.cache.has(roleId)) {
+    return;
+  }
+
+  try {
+    await member.roles.remove(roleId, "VC離脱に伴う参加者ロール解除");
+  } catch {
+    // ignore removal failures
+  }
+}
+
+function formatVoiceElapsedTime(elapsedMs) {
+  const totalMinutes = Math.floor(elapsedMs / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours > 0) {
+    return `${hours}時間${minutes}分`;
+  }
+
+  return `${minutes}分`;
 }
 
 function scheduleBumpReminder(reminder) {
@@ -1421,6 +1979,12 @@ function formatBosyuMessage(time, purpose, note, mentionRoleId) {
       `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
       `終了通知前待機: ${getNonNegativeInteger(settings.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES)}分`,
       `通知後ロール解除待機: ${getNonNegativeInteger(settings.roleRemoveWaitMinutes, DEFAULT_ROLE_REMOVE_WAIT_MINUTES)}分`,
+      "",
+      "現在のVCリマインダー設定:",
+      `監視VC: ${Array.isArray(settings.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.length > 0 ? settings.voiceMonitorVoiceChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定"}`,
+      `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
+      `リマインダーチャンネル: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "未設定"}`,
+      `話題投稿先チャンネル: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "未設定"}`,
     ].join("\n");
   }
 

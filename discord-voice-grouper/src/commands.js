@@ -76,6 +76,61 @@ export const settingCommand = new SlashCommandBuilder()
           .setDescription("/bosyuでメンションするロール")
           .setRequired(false),
       )
+      .addRoleOption((option) =>
+        option
+          .setName("voice_participant_role")
+          .setDescription("VC参加者に付与するロール")
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_reminder_channel")
+          .setDescription("リマインダーと初期メッセージを送信するチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_topic_channel")
+          .setDescription("フォーム送信後の話題投稿先チャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_channel_1")
+          .setDescription("監視するボイスチャンネル 1")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_channel_2")
+          .setDescription("監視するボイスチャンネル 2")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_channel_3")
+          .setDescription("監視するボイスチャンネル 3")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_channel_4")
+          .setDescription("監視するボイスチャンネル 4")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_channel_5")
+          .setDescription("監視するボイスチャンネル 5")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
       .addStringOption((option) =>
         option
           .setName("finish_message")
