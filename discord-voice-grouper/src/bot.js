@@ -199,7 +199,6 @@ async function handleSetting(interaction) {
   const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const voiceParticipantRole = interaction.options.getRole("voice_participant_role", false);
-  const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
   const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
   const voiceChannel1 = interaction.options.getChannel("voice_channel_1", false);
   const voiceChannel2 = interaction.options.getChannel("voice_channel_2", false);
@@ -248,11 +247,6 @@ async function handleSetting(interaction) {
   if (voiceParticipantRole) {
     patch.voiceParticipantRoleId = voiceParticipantRole.id;
   }
-
-  if (voiceReminderChannel) {
-    patch.voiceReminderChannelId = voiceReminderChannel.id;
-  }
-
   if (voiceTopicChannel) {
     patch.voiceTopicChannelId = voiceTopicChannel.id;
   }
@@ -355,15 +349,8 @@ async function handleTopicRequestMessage(message) {
     return;
   }
 
-  const settings = await getGuildSettings(message.guildId);
-  if (!settings?.voiceReminderChannelId || message.channelId !== settings.voiceReminderChannelId) {
-    return;
-  }
-
   const session = [...voiceMonitorSessions.values()].find(
-    (session) =>
-      session.guildId === message.guildId &&
-      session.reminderChannelId === message.channelId,
+    (session) => session.guildId === message.guildId && session.reminderChannelId === message.channelId,
   );
 
   if (!session) {
@@ -432,6 +419,37 @@ async function handleVoiceStateUpdate(oldState, newState) {
   }
 }
 
+async function findAssociatedTextChannel(guild, voiceChannel, settings) {
+  const textTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+  const channels = [...guild.channels.cache.values()].filter((c) => textTypes.includes(c.type));
+
+  // 1) exact name match
+  let ch = channels.find((c) => c.name === voiceChannel.name);
+  if (ch) return ch;
+
+  // 2) same parent + name contains
+  if (voiceChannel.parentId) {
+    ch = channels.find((c) => c.parentId === voiceChannel.parentId && c.name.includes(voiceChannel.name));
+    if (ch) return ch;
+  }
+
+  // 3) topic contains voice channel id
+  ch = channels.find((c) => typeof c.topic === "string" && c.topic.includes(voiceChannel.id));
+  if (ch) return ch;
+
+  // 4) name starts with
+  ch = channels.find((c) => c.name.startsWith(voiceChannel.name));
+  if (ch) return ch;
+
+  // 5) fallback to configured topic channel if present
+  if (settings?.voiceTopicChannelId) {
+    const fetched = await guild.channels.fetch(settings.voiceTopicChannelId).catch(() => null);
+    if (fetched && textTypes.includes(fetched.type)) return fetched;
+  }
+
+  return null;
+}
+
 async function updateVoiceMonitorSession(guild, settings, channelId) {
   const voiceChannel = await guild.channels.fetch(channelId).catch(() => null);
 
@@ -439,9 +457,7 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
     return;
   }
 
-  const reminderChannel = settings?.voiceReminderChannelId
-    ? await guild.channels.fetch(settings.voiceReminderChannelId).catch(() => null)
-    : null;
+  const reminderChannel = await findAssociatedTextChannel(guild, voiceChannel, settings);
 
   if (!reminderChannel || typeof reminderChannel.send !== "function") {
     return;
@@ -459,9 +475,8 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
       const session = {
         guildId: guild.id,
         voiceChannelId: channelId,
-        reminderChannelId: settings.voiceReminderChannelId,
-        topicOutputChannelId:
-          settings.voiceTopicChannelId || settings.voiceReminderChannelId,
+        reminderChannelId: reminderChannel.id,
+        topicOutputChannelId: settings.voiceTopicChannelId || reminderChannel.id,
         participantRoleId: settings.voiceParticipantRoleId,
         startTime: Date.now(),
         reminderCount: 0,
@@ -489,14 +504,6 @@ async function startVoiceMonitorSession(session, voiceChannel, members, reminder
   await reminderChannel.send({
     content:
       "お集まりいただきありがとうございます！\n「話題を出して」とチャットに送るとbotが話題を出してくれるので話題に詰まったら使ってみてください！",
-    components: [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`suggest_topic:${session.voiceChannelId}`)
-          .setLabel("話題を出して")
-          .setStyle(ButtonStyle.Primary),
-      ),
-    ],
   });
 
   await ensureSessionMembersHaveRole(session, voiceChannel, members);
@@ -563,7 +570,7 @@ async function sendVoiceMonitorReminder(session) {
     : "";
 
   const reminderMessage = await reminderChannel.send({
-    content: `${mentionText}あつまってから${elapsedText}が経過しました！お時間大丈夫でしょうか！お暇があれば今話してる話題をフォームへお願いします！（３０分後に無効になる今話してる話題を書き込むフォームを添付）`,
+    content: `${mentionText}あつまってから${elapsedText}が経過しました！お時間大丈夫でしょうか！お暇があれば今話してる話題をフォームへお願いします！`,
     components: [createTopicFormRow(formId)],
     allowedMentions: session.participantRoleId
       ? { roles: [session.participantRoleId] }
@@ -659,15 +666,7 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
     }
   }
 
-  const reminderChannel = await guild.channels
-    .fetch(settings.voiceReminderChannelId)
-    .catch(() => null);
-
-  if (reminderChannel && typeof reminderChannel.send === "function") {
-    await reminderChannel.send(
-      "参加者が2人未満になったため、VCリマインダーの監視を終了しました。",
-    );
-  }
+  // ノーティフィケーションは不要のため送信しない
 }
 
 function createTopicFormRow(formId, disabled = false) {
@@ -1983,7 +1982,7 @@ function formatBosyuMessage(time, purpose, note, mentionRoleId) {
       "現在のVCリマインダー設定:",
       `監視VC: ${Array.isArray(settings.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.length > 0 ? settings.voiceMonitorVoiceChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
-      `リマインダーチャンネル: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "未設定"}`,
+      `リマインダーチャンネル: ボイスチャンネルに付随するテキストチャンネルを自動参照`,
       `話題投稿先チャンネル: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "未設定"}`,
     ].join("\n");
   }

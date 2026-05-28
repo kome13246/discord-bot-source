@@ -15,13 +15,7 @@ export const splitVoiceCommand = new SlashCommandBuilder()
       .setName("shuffle")
       .setDescription("ランダムに並べ替えるか")
       .setRequired(false),
-  )
-  .addBooleanOption((option) =>
-    option
-      .setName("include_bots")
-      .setDescription("Botも対象に含めるか")
-      .setRequired(false),
-  )
+      )
   .addBooleanOption((option) =>
     option
       .setName("private")
@@ -80,13 +74,6 @@ export const settingCommand = new SlashCommandBuilder()
         option
           .setName("voice_participant_role")
           .setDescription("VC参加者に付与するロール")
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_reminder_channel")
-          .setDescription("リマインダーと初期メッセージを送信するチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
       .addChannelOption((option) =>
