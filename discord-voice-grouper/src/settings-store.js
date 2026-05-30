@@ -60,6 +60,9 @@ function getEnvironmentSettings(guildId) {
   const childCategoryId = process.env.PB_CHILD_CATEGORY_ID;
   const waitingVcCategoryId =
     process.env.PB_WAITING_VC_CATEGORY_ID ?? process.env.PB_WAITING_CHANNEL_ID;
+  const waitingVcName = process.env.PB_WAITING_VC_NAME;
+  const voiceReminderChannelId = process.env.PB_VOICE_REMINDER_CHANNEL_ID;
+  const voiceReminderParentChannelId = process.env.PB_VOICE_REMINDER_PARENT_CHANNEL_ID;
   const finishMessage = process.env.PB_FINISH_MESSAGE;
   const transferWaitSeconds = process.env.PB_TRANSFER_WAIT_SECONDS;
   const noticeWaitMinutes = process.env.PB_NOTICE_WAIT_MINUTES;
@@ -70,6 +73,9 @@ function getEnvironmentSettings(guildId) {
     !parentChannelId &&
     !childCategoryId &&
     !waitingVcCategoryId &&
+    !waitingVcName &&
+    !voiceReminderChannelId &&
+    !voiceReminderParentChannelId &&
     !finishMessage &&
     !transferWaitSeconds &&
     !noticeWaitMinutes &&
@@ -83,6 +89,9 @@ function getEnvironmentSettings(guildId) {
     parentChannelId,
     childCategoryId,
     waitingVcCategoryId,
+    waitingVcName,
+    voiceReminderChannelId,
+    voiceReminderParentChannelId,
     finishMessage,
     transferWaitSeconds: parseOptionalInteger(transferWaitSeconds),
     noticeWaitMinutes: parseOptionalInteger(noticeWaitMinutes),

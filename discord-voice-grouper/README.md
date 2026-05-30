@@ -20,9 +20,10 @@
 - 転送前待機、終了通知前待機、通知後ロール解除待機をコマンドで変更できます。
 - PBが作成した子VCがすべて削除されたら、終了通知を自動キャンセルして参加者ロールを解除できます。
 - DISBOARDの `/bump` 成功メッセージを検知し、2時間後に実行者へリマインドできます。
-- 振り分け後10分間、途中参加用の「待機中」VCを監視できます。
+- 振り分け完了後、途中参加用の待機VCを自動作成して10分間監視できます。
 - 待機中の参加者を、3人以下の子VCへ補充できます。
 - 補充先がない場合、待機中に3人集まった時点で新規子VCへ転送できます。
+- 待機VCは10分経過、または終了通知キャンセル時に自動削除されます。
 
 ## グループ分けのルール
 
@@ -114,6 +115,7 @@ Bot Permissions:
 - `Connect`
 - `Move Members`
 - `Manage Roles`
+- `Manage Channels`
 
 生成されたURLをブラウザで開き、Botを使いたいサーバーへ招待します。
 
@@ -125,6 +127,7 @@ Bot Permissions:
 - メンバーをPB親VCや子VCへ移動するため、Move Members権限が必要です。
 - 参加者ロールを付与・解除するため、Manage Roles権限が必要です。
 - 参加者ロールはBotの最上位ロールより下に置いてください。
+- 途中参加用の待機VCを作成・削除するため、Manage Channels権限が必要です。
 - DISBOARD bumpリマインドのため、DISBOARDがbump成功メッセージを投稿するチャンネルをBotが閲覧できる必要があります。
 
 ## 3. `.env` を作る
@@ -145,7 +148,8 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_PARTICIPANT_ROLE_ID=123456789012345678
 # PB_PARENT_CHANNEL_ID=123456789012345678
 # PB_CHILD_CATEGORY_ID=123456789012345678
-# PB_WAITING_CHANNEL_ID=123456789012345678
+# PB_WAITING_VC_CATEGORY_ID=123456789012345678
+# PB_WAITING_VC_NAME=途中参加部屋
 # PB_FINISH_MESSAGE=終了時間です。
 # PB_TRANSFER_WAIT_SECONDS=30
 # PB_NOTICE_WAIT_MINUTES=25
@@ -163,8 +167,9 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_PARTICIPANT_ROLE_ID` | 任意 | Renderなどで固定設定したい場合の参加者ロールIDです。 |
 | `PB_PARENT_CHANNEL_ID` | 任意 | Renderなどで固定設定したい場合のPB親VCのIDです。 |
 | `PB_CHILD_CATEGORY_ID` | 任意 | PBが子VCを作るカテゴリIDです。未設定でも自動検出します。 |
-| `PB_WAITING_VC_CATEGORY_ID` | 任意 | 途中参加者が入る待機VCカテゴリのIDです。 |
-| `PB_WAITING_CHANNEL_ID` | 任意 | `PB_WAITING_VC_CATEGORY_ID` の互換名です。 |
+| `PB_WAITING_VC_CATEGORY_ID` | 任意 | Botが途中参加用の待機VCを作成するカテゴリIDです。 |
+| `PB_WAITING_VC_NAME` | 任意 | 自動作成する待機VCの名前です。未設定時は `途中参加部屋` です。 |
+| `PB_WAITING_CHANNEL_ID` | 任意 | 古い設定との互換用です。新しく設定する場合は `PB_WAITING_VC_CATEGORY_ID` を使ってください。 |
 | `PB_FINISH_MESSAGE` | 任意 | 終了通知の文面です。 |
 | `PB_TRANSFER_WAIT_SECONDS` | 任意 | 転送開始までの待機秒数です。未設定時は30秒です。 |
 | `PB_NOTICE_WAIT_MINUTES` | 任意 | 終了通知までの待機分数です。未設定時は25分です。 |
@@ -399,7 +404,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID` (または互換性のための `PB_WAITING_CHANNEL_ID`) 、`PB_FINISH_MESSAGE`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_FINISH_MESSAGE`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES` として入れてください。
 
 ### 5. デプロイする
 
@@ -464,10 +469,10 @@ push後、RenderのEventsやLogsでデプロイ状況を確認してください
 
 ### `/setting`
 
-PB連携に使う参加者ロール、PB親VC、子VCカテゴリ、待機中VC、終了通知文を設定します。
+PB連携に使う参加者ロール、PB親VC、子VCカテゴリ、待機VC作成先カテゴリ、待機VC名、終了通知文を設定します。
 
 ```text
-/setting set participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_channel:待機中 finish_message:終了時間です。 transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
+/setting set participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 finish_message:終了時間です。 transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
 ```
 
 現在の設定を見る場合:
@@ -480,8 +485,12 @@ PB連携に使う参加者ロール、PB親VC、子VCカテゴリ、待機中VC�
 設定すると、PBが作った子VCをそのカテゴリ内だけから探します。
 未設定の場合は、代表者がPB親VCから別のVCへ移動したことを見て自動検出します。
 
-`waiting_channel` は任意です。
-設定すると、振り分け後10分間、そのVCに入った途中参加者を監視します。
+`waiting_vc_category` は任意です。
+設定すると、振り分け完了後にそのカテゴリへ途中参加用の待機VCを自動作成し、10分間監視します。
+
+`waiting_vc_name` は任意です。
+自動作成する待機VCの名前を変更できます。
+未設定の場合は `途中参加部屋` という名前で作成します。
 
 `/setting set` を使うにはサーバー管理権限が必要です。
 
@@ -522,20 +531,24 @@ PB連携に使う参加者ロール、PB親VC、子VCカテゴリ、待機中VC�
 PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も行います。
 
 1. 振り分け結果を送信します。
-2. 対象メンバーへ参加者ロールを付与します。
+2. 参加者ロールは、各メンバーをVCへ転送したタイミングで付与します。
 3. 30秒待機し、待機中だけ転送キャンセルボタンを表示します。
 4. 各グループから1人をPB親VCへ移動します。
 5. PBが作成した子VCを検出し、同じグループの残りメンバーを移動します。
 6. 25分後に参加者ロールへメンションして終了通知を送信します。
 7. 終了通知の3分後に参加者ロールを解除します。
 
-`waiting_channel` が設定されている場合、振り分け後10分間だけ途中参加者を監視します。
+`waiting_vc_category` が設定されている場合、振り分け完了後に待機VCを自動作成し、10分間だけ途中参加者を監視します。
 
+- 待機VCは `/setting set waiting_vc_category:...` で設定したカテゴリ内に作成されます。
+- 待機VC名は `/setting set waiting_vc_name:...` で変更できます。
 - 参加者が待機中VCにいて、3人以下の子VCがある場合は、その子VCへ1人転送します。
 - 3人以下の子VCがない場合は、待機中VCに3人集まるまで待ちます。
 - 待機中VCに3人集まったら、その3人を新規グループとしてPB親VC経由で新規子VCへ転送します。
 - 参加者ロールは、実際にVC転送が発生したタイミングで付与します。
 - 参加者ロール解除は、最初の参加者と途中参加者をまとめて一括で行います。
+- 待機VCは作成から10分が経過したら自動削除されます。
+- 終了通知キャンセル、またはPB子VC削除による自動キャンセルが発生した場合も、待機VCは削除されます。
 
 転送キャンセルボタンを押した場合、VC移動だけをキャンセルします。
 終了通知の待機と参加者ロール解除は続行します。
@@ -586,6 +599,7 @@ Botに必要な主な権限:
 - PB親VCへ接続できること
 - メンバーをVC間で移動できること
 - 参加者ロールを付与・解除できること
+- 途中参加用の待機VCを作成・削除できること
 
 Role Hierarchyの注意:
 

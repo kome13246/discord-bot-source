@@ -57,6 +57,13 @@ export const settingCommand = new SlashCommandBuilder()
         .addChannelTypes(ChannelType.GuildCategory)
         .setRequired(false)
       )
+      .addStringOption((option) =>
+        option
+          .setName("waiting_vc_name")
+          .setDescription("自動作成する待機VCの名前")
+          .setMaxLength(100)
+          .setRequired(false),
+      )
       .addChannelOption((option) =>
         option
           .setName("bosyu_channel")
@@ -81,6 +88,20 @@ export const settingCommand = new SlashCommandBuilder()
           .setName("voice_topic_channel")
           .setDescription("フォーム送信後の話題投稿先チャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_reminder_channel")
+          .setDescription("リマインダー送信先テキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_reminder_parent_channel")
+          .setDescription("リマインダー対象のPB親ボイスチャンネル")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
           .setRequired(false),
       )
       .addChannelOption((option) =>
@@ -179,8 +200,37 @@ export const bosyuCommand = new SlashCommandBuilder()
       .setMaxLength(100),
   );
 
+export const bCommand = new SlashCommandBuilder()
+  .setName("b")
+  .setDescription("募集メッセージを送信します（/bosyu の短縮版）")
+  .addStringOption((option) =>
+    option
+      .setName("note")
+      .setNameLocalizations({ ja: "ひとこと" })
+      .setDescription("ひとことを入力してください。例: 遠慮せずご参加ください！")
+      .setRequired(true)
+      .setMaxLength(200),
+  )
+  .addStringOption((option) =>
+    option
+      .setName("time")
+      .setNameLocalizations({ ja: "時間" })
+      .setDescription("時間を入力してください。例: 1時間、30分、〇〇まで（省略可）")
+      .setRequired(false)
+      .setMaxLength(100),
+  )
+  .addStringOption((option) =>
+    option
+      .setName("purpose")
+      .setNameLocalizations({ ja: "名目" })
+      .setDescription("名目を入力してください。例: ゲーム、作業、雑談（省略可）")
+      .setRequired(false)
+      .setMaxLength(100),
+  );
+
 export const commands = [
   splitVoiceCommand.toJSON(),
   settingCommand.toJSON(),
   bosyuCommand.toJSON(),
+  bCommand.toJSON(),
 ];

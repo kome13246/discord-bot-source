@@ -32,6 +32,7 @@ const WAITING_ROOM_POLL_MS = 5 * 1000;
 const DEFAULT_TRANSFER_WAIT_SECONDS = 30;
 const DEFAULT_NOTICE_WAIT_MINUTES = 25;
 const DEFAULT_ROLE_REMOVE_WAIT_MINUTES = 3;
+const DEFAULT_WAITING_VC_NAME = "途中参加部屋";
 const COUNTDOWN_UPDATE_MS = 1000;
 const PB_CHILD_WAIT_MS = 20 * 1000;
 const DEFAULT_FINISH_MESSAGE = "終了時間です。";
@@ -43,8 +44,10 @@ const lastBosyuTimestamps = new Map();
 const bosyuEditSessions = new Map();
 const voiceMonitorSessions = new Map();
 const topicFormSessions = new Map();
+const autoSplitSuggestionMessages = new Map();
 
 const VOICE_MONITOR_MIN_MEMBERS = 2;
+const AUTO_SPLIT_THRESHOLD = 6;
 const VOICE_REMINDER_INTERVAL_MS = 30 * 60 * 1000;
 const TOPIC_FORM_EXPIRE_MS = 30 * 60 * 1000;
 const SUGGESTED_TOPICS = [
@@ -120,6 +123,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
+      if (interaction.customId.startsWith("auto_split:")) {
+        await handleAutoSplitButton(interaction);
+        return;
+      }
+
       if (interaction.customId.startsWith("suggest_topic:")) {
         await handleSuggestTopicButton(interaction);
         return;
@@ -149,7 +157,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    if (interaction.commandName === "bosyu") {
+    if (interaction.commandName === "bosyu" || interaction.commandName === "b") {
       await handleBosyu(interaction);
       return;
     }
@@ -196,10 +204,13 @@ async function handleSetting(interaction) {
   const parentChannel = interaction.options.getChannel("parent_channel", false);
   const childCategory = interaction.options.getChannel("child_category", false);
   const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
+  const waitingVcName = interaction.options.getString("waiting_vc_name", false);
   const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const voiceParticipantRole = interaction.options.getRole("voice_participant_role", false);
   const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
+  const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
+  const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
   const voiceChannel1 = interaction.options.getChannel("voice_channel_1", false);
   const voiceChannel2 = interaction.options.getChannel("voice_channel_2", false);
   const voiceChannel3 = interaction.options.getChannel("voice_channel_3", false);
@@ -236,6 +247,10 @@ async function handleSetting(interaction) {
     patch.waitingVcCategoryId = waitingVcCategory.id;
   }
 
+  if (waitingVcName?.trim()) {
+    patch.waitingVcName = waitingVcName.trim();
+  }
+
   if (bosyuChannel) {
     patch.bosyuChannelId = bosyuChannel.id;
   }
@@ -249,6 +264,14 @@ async function handleSetting(interaction) {
   }
   if (voiceTopicChannel) {
     patch.voiceTopicChannelId = voiceTopicChannel.id;
+  }
+
+  if (voiceReminderChannel) {
+    patch.voiceReminderChannelId = voiceReminderChannel.id;
+  }
+
+  if (voiceReminderParentChannel) {
+    patch.voiceReminderParentChannelId = voiceReminderParentChannel.id;
   }
 
   const voiceChannelIds = [
@@ -368,47 +391,54 @@ async function handleVoiceStateUpdate(oldState, newState) {
   }
 
   const settings = await getGuildSettings(guild.id);
-  const voiceChannelIds = Array.isArray(settings?.voiceMonitorVoiceChannelIds)
-    ? settings.voiceMonitorVoiceChannelIds.filter(Boolean)
-    : [];
-
-  if (voiceChannelIds.length === 0) {
-    return;
-  }
-
   const changedChannelIds = new Set();
 
-  if (oldState.channelId && voiceChannelIds.includes(oldState.channelId)) {
+  if (oldState.channelId) {
     changedChannelIds.add(oldState.channelId);
   }
 
-  if (newState.channelId && voiceChannelIds.includes(newState.channelId)) {
+  if (newState.channelId) {
     changedChannelIds.add(newState.channelId);
   }
 
-  if (changedChannelIds.size === 0) {
-    return;
+  const monitoredChannelIds = [];
+
+  for (const channelId of changedChannelIds) {
+    if (await isVoiceChannelMonitored(guild, settings, channelId)) {
+      monitoredChannelIds.push(channelId);
+    }
+
+    await maybeSendAutoSplitSuggestion(guild, settings, channelId);
   }
 
-  await Promise.all(
-    [...changedChannelIds].map((channelId) =>
-      updateVoiceMonitorSession(guild, settings, channelId),
-    ),
-  );
+  if (monitoredChannelIds.length > 0) {
+    await Promise.all(
+      monitoredChannelIds.map((channelId) =>
+        updateVoiceMonitorSession(guild, settings, channelId),
+      ),
+    );
+  }
 
   if (
     oldState.member &&
     oldState.member.user &&
     !oldState.member.user.bot &&
     oldState.channelId &&
-    voiceChannelIds.includes(oldState.channelId) &&
-    settings?.voiceParticipantRoleId
+    settings?.voiceParticipantRoleId &&
+    (await isVoiceChannelMonitored(guild, settings, oldState.channelId))
   ) {
-    const stillInMonitored = [...guild.voiceStates.cache.values()].some(
-      (voiceState) =>
+    let stillInMonitored = false;
+
+    for (const voiceState of [...guild.voiceStates.cache.values()]) {
+      if (
         voiceState.member?.id === oldState.member.id &&
-        voiceChannelIds.includes(voiceState.channelId),
-    );
+        voiceState.channelId &&
+        (await isVoiceChannelMonitored(guild, settings, voiceState.channelId))
+      ) {
+        stillInMonitored = true;
+        break;
+      }
+    }
 
     if (!stillInMonitored) {
       const member = await guild.members.fetch(oldState.member.id).catch(() => null);
@@ -421,6 +451,14 @@ async function handleVoiceStateUpdate(oldState, newState) {
 
 async function findAssociatedTextChannel(guild, voiceChannel, settings) {
   const textTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+
+  if (settings?.voiceReminderChannelId) {
+    const configured = await guild.channels.fetch(settings.voiceReminderChannelId).catch(() => null);
+    if (configured && textTypes.includes(configured.type)) {
+      return configured;
+    }
+  }
+
   const channels = [...guild.channels.cache.values()].filter((c) => textTypes.includes(c.type));
 
   // 1) exact name match
@@ -448,6 +486,112 @@ async function findAssociatedTextChannel(guild, voiceChannel, settings) {
   }
 
   return null;
+}
+
+function createAutoSplitRow(channelId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`auto_split:${channelId}`)
+      .setLabel("自動振り分け")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(disabled),
+  );
+}
+
+async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
+  const voiceChannel = await guild.channels.fetch(channelId).catch(() => null);
+
+  if (!voiceChannel?.isVoiceBased()) {
+    return;
+  }
+
+  if (await isVoiceChannelMonitored(guild, settings, channelId)) {
+    return;
+  }
+
+  const members = [...voiceChannel.members.values()].filter((member) => !member.user.bot);
+  const existingMessageId = autoSplitSuggestionMessages.get(channelId);
+
+  if (members.length >= AUTO_SPLIT_THRESHOLD) {
+    if (existingMessageId) {
+      return;
+    }
+
+    const reminderChannel = await findAssociatedTextChannel(guild, voiceChannel, settings);
+
+    if (!reminderChannel || typeof reminderChannel.send !== "function") {
+      return;
+    }
+
+    const canAutoSplit = Boolean(settings?.parentChannelId && settings?.tempRoleId);
+    const components = [createAutoSplitRow(channelId, !canAutoSplit)];
+    const content =
+      "1つのvcに６人以上集まると喋れない人が出てきがちなので当チャンネルでは振り分けを推奨しています。\nまた、振り分け方が決まらないときは下の自動振り分けボタンをご活用ください！" +
+      (canAutoSplit
+        ? ""
+        : "\n※PB親チャンネルまたは参加者ロールが設定されていないため、自動振り分けは無効です。");
+
+    const suggestionMessage = await reminderChannel.send({
+      content,
+      components,
+    });
+
+    autoSplitSuggestionMessages.set(channelId, suggestionMessage.id);
+    return;
+  }
+
+  if (existingMessageId && members.length < AUTO_SPLIT_THRESHOLD) {
+    const reminderChannel = await findAssociatedTextChannel(guild, voiceChannel, settings);
+    if (reminderChannel && typeof reminderChannel.messages?.fetch === "function") {
+      const message = await reminderChannel.messages
+        .fetch(existingMessageId)
+        .catch(() => null);
+      if (message) {
+        await message.delete().catch(() => null);
+      }
+    }
+
+    autoSplitSuggestionMessages.delete(channelId);
+  }
+}
+
+async function isVoiceChannelMonitored(guild, settings, channelId) {
+  if (!channelId) {
+    return false;
+  }
+
+  const voiceChannel =
+    guild.channels.cache.get(channelId) ??
+    (await guild.channels.fetch(channelId).catch(() => null));
+
+  if (!voiceChannel?.isVoiceBased()) {
+    return false;
+  }
+
+  if (settings?.voiceReminderParentChannelId) {
+    const parentChannel = await guild.channels
+      .fetch(settings.voiceReminderParentChannelId)
+      .catch(() => null);
+
+    if (!parentChannel?.isVoiceBased()) {
+      return false;
+    }
+
+    if (voiceChannel.id === parentChannel.id) {
+      return false;
+    }
+
+    if (settings.childCategoryId) {
+      return voiceChannel.parentId === settings.childCategoryId;
+    }
+
+    return voiceChannel.parentId === parentChannel.parentId;
+  }
+
+  return (
+    Array.isArray(settings?.voiceMonitorVoiceChannelIds) &&
+    settings.voiceMonitorVoiceChannelIds.includes(channelId)
+  );
 }
 
 async function updateVoiceMonitorSession(guild, settings, channelId) {
@@ -482,6 +626,7 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
         reminderCount: 0,
         memberIds: new Set(),
         reminderTimer: null,
+        lastReminderMessageId: null,
         active: true,
         topicForms: new Map(),
       };
@@ -561,6 +706,16 @@ async function sendVoiceMonitorReminder(session) {
     return;
   }
 
+  if (session.lastReminderMessageId) {
+    const previousMessage = await reminderChannel.messages
+      .fetch(session.lastReminderMessageId)
+      .catch(() => null);
+
+    if (previousMessage) {
+      await previousMessage.delete().catch(() => null);
+    }
+  }
+
   const elapsedMs = Date.now() - session.startTime;
   const elapsedText = formatVoiceElapsedTime(elapsedMs);
   const formId = createSessionId();
@@ -576,6 +731,8 @@ async function sendVoiceMonitorReminder(session) {
       ? { roles: [session.participantRoleId] }
       : { parse: [] },
   });
+
+  session.lastReminderMessageId = reminderMessage.id;
 
   const topicForm = {
     guildId: session.guildId,
@@ -655,11 +812,17 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
   );
 
   for (const member of members) {
-    const stillInOtherMonitored = [...guild.voiceStates.cache.values()].some(
-      (voiceState) =>
+    let stillInOtherMonitored = false;
+
+    for (const voiceState of [...guild.voiceStates.cache.values()]) {
+      if (
         voiceState.member?.id === member.id &&
-        settings.voiceMonitorVoiceChannelIds?.includes(voiceState.channelId),
-    );
+        (await isVoiceChannelMonitored(guild, settings, voiceState.channelId))
+      ) {
+        stillInOtherMonitored = true;
+        break;
+      }
+    }
 
     if (!stillInOtherMonitored && settings.voiceParticipantRoleId) {
       await removeVoiceParticipantRole(member, settings.voiceParticipantRoleId);
@@ -711,6 +874,164 @@ async function handleTopicFormButton(interaction) {
   await interaction.showModal(createVoiceTopicModal(formId));
 }
 
+async function handleAutoSplitButton(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({
+      content: "この操作はサーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const channelId = interaction.customId.slice("auto_split:".length);
+  const settings = await getGuildSettings(interaction.guildId);
+  const guild = interaction.guild;
+  const voiceChannel = await guild.channels.fetch(channelId).catch(() => null);
+
+  if (!voiceChannel?.isVoiceBased()) {
+    await interaction.reply({
+      content: "対象のボイスチャンネルが見つかりませんでした。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const members = [...voiceChannel.members.values()].filter((member) => !member.user.bot);
+
+  if (members.length < AUTO_SPLIT_THRESHOLD) {
+    await interaction.reply({
+      content: "参加人数が6人未満になったため、自動振り分けは実行できませんでした。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const parentChannel = await guild.channels.fetch(settings?.parentChannelId).catch(() => null);
+  const participantRole = settings?.tempRoleId
+    ? await guild.roles.fetch(settings.tempRoleId).catch(() => null)
+    : null;
+
+  if (!settings?.parentChannelId || !parentChannel?.isVoiceBased() || !participantRole) {
+    await interaction.reply({
+      content:
+        "PB親チャンネルまたは参加者ロールが未設定のため、自動振り分けを実行できませんでした。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.update({
+    content: "自動振り分けを実行します。少々お待ちください…",
+    components: [],
+  });
+
+  const [stayGroup, moveGroup] = splitIntoTwoRandomGroups(members);
+
+  const transferResult = await transferMembersToPbChildChannel(moveGroup, {
+    parentChannel,
+    childCategoryId: settings.childCategoryId,
+    participantRole,
+    sourceChannelId: voiceChannel.id,
+  });
+
+  const moved = moveGroup.length - transferResult.failed.length;
+  const roleFailedText = transferResult.roleFailures.length
+    ? ` 参加者ロール付与失敗: ${transferResult.roleFailures.join("、")}`
+    : "";
+  const failedText = transferResult.failed.length
+    ? ` 転送失敗: ${transferResult.failed.join("、")}`
+    : "";
+
+  await interaction.followUp({
+    content: `自動振り分けを完了しました。
+${transferResult.childChannel ? `<#${transferResult.childChannel.id}>` : "PB子VCの検出に失敗しました。"} へ ${moved}/${moveGroup.length} 人を転送しました。${failedText}${roleFailedText}`,
+    allowedMentions: { parse: [] },
+  });
+
+  autoSplitSuggestionMessages.delete(channelId);
+}
+
+function splitIntoTwoRandomGroups(members) {
+  const shuffled = shuffle(members);
+  const firstGroupSize = Math.ceil(shuffled.length / 2);
+  return [
+    shuffled.slice(0, firstGroupSize),
+    shuffled.slice(firstGroupSize),
+  ];
+}
+
+async function transferMembersToPbChildChannel(members, config) {
+  const failures = [];
+  const roleFailures = [];
+  const participantMemberIds = new Set();
+
+  if (members.length === 0) {
+    return { childChannel: null, failed: [], roleFailures };
+  }
+
+  const seedMember = members[0];
+
+  try {
+    await seedMember.voice.setChannel(
+      config.parentChannel,
+      "Move split group seed to PB parent channel",
+    );
+  } catch {
+    failures.push(seedMember.displayName);
+  }
+
+  const seedRoleFailure = await addRoleForTransfer(
+    seedMember,
+    config.participantRole,
+    participantMemberIds,
+  );
+
+  if (seedRoleFailure) {
+    roleFailures.push(seedRoleFailure);
+  }
+
+  const childChannel = await waitForPbChildChannel(seedMember, {
+    parentChannel: config.parentChannel,
+    sourceChannelId: config.sourceChannelId,
+    childCategoryId: config.childCategoryId,
+  });
+
+  if (!childChannel) {
+    return { childChannel: null, failed: [seedMember.displayName], roleFailures };
+  }
+
+  let movedCount = failures.length === 0 ? 1 : 0;
+
+  for (const member of members.slice(1)) {
+    try {
+      await member.voice.setChannel(
+        childChannel,
+        "Move group member to PB child channel",
+      );
+      const roleFailure = await addRoleForTransfer(
+        member,
+        config.participantRole,
+        participantMemberIds,
+      );
+
+      if (roleFailure) {
+        roleFailures.push(roleFailure);
+      }
+
+      movedCount += 1;
+    } catch {
+      failures.push(member.displayName);
+    }
+  }
+
+  return {
+    childChannel,
+    failed: failures,
+    roleFailures,
+    participantMemberIds: [...participantMemberIds],
+  };
+}
+
 async function handleSuggestTopicButton(interaction) {
   const session = [...voiceMonitorSessions.values()].find(
     (session) =>
@@ -760,8 +1081,14 @@ async function handleTopicFormModal(interaction) {
     return;
   }
 
+  const voiceChannel = await client.channels
+    .fetch(topicForm.voiceChannelId)
+    .catch(() => null);
+
+  const channelName = voiceChannel?.isVoiceBased() ? voiceChannel.name : "このVC";
+
   await outputChannel.send({
-    content: `今の話題：${topicText}`,
+    content: `${channelName} のいまの話題：${topicText}`,
     allowedMentions: { parse: [] },
   });
 
@@ -990,7 +1317,7 @@ async function handleSplitVoice(interaction) {
     if (config.waitingVcCategoryId) {
 
       temporaryWaitingVc = await operationChannel.guild.channels.create({
-        name: "途中参加部屋",
+        name: config.waitingVcName,
         type: ChannelType.GuildVoice,
         parent: config.waitingVcCategoryId,
 
@@ -1116,8 +1443,20 @@ async function handleBosyu(interaction) {
   lastBosyuTimestamps.set(rateLimitKey, now);
 
   const timeValue = interaction.options.getString("time", false)?.trim() ?? "";
-  const purposeValue = interaction.options.getString("purpose", false)?.trim() ?? "";
+  let purposeValue = interaction.options.getString("purpose", false)?.trim() ?? "";
   const noteValue = interaction.options.getString("note", true).trim();
+
+  if (!purposeValue) {
+    const currentChannelName = await getPbChildChannelName(
+      interaction.member?.voice?.channel,
+      settings,
+      interaction.guild,
+    );
+    if (currentChannelName) {
+      purposeValue = currentChannelName;
+    }
+  }
+
   const content = formatBosyuMessage(timeValue, purposeValue, noteValue, bosyuMentionRoleId);
 
   await interaction.reply({
@@ -1334,6 +1673,37 @@ function formatBosyuMessage(time, purpose, note, mentionRoleId) {
   return lines.join("\n");
 }
 
+async function getPbChildChannelName(voiceChannel, settings, guild) {
+  if (!voiceChannel?.isVoiceBased() || !settings?.parentChannelId || !guild) {
+    return null;
+  }
+
+  if (voiceChannel.id === settings.parentChannelId) {
+    return null;
+  }
+
+  if (settings.childCategoryId) {
+    if (voiceChannel.parentId !== settings.childCategoryId) {
+      return null;
+    }
+    return voiceChannel.name;
+  }
+
+  const parentChannel = await guild.channels
+    .fetch(settings.parentChannelId)
+    .catch(() => null);
+
+  if (!parentChannel?.isVoiceBased()) {
+    return null;
+  }
+
+  if (voiceChannel.parentId !== parentChannel.parentId) {
+    return null;
+  }
+
+  return voiceChannel.name;
+}
+
   async function resolveProcessConfig(interaction, settings, botMember) {
     const errors = [];
 
@@ -1426,6 +1796,7 @@ function formatBosyuMessage(time, purpose, note, mentionRoleId) {
       waitingVcCategory,
       childCategoryId: childCategory?.id ?? null,
       waitingVcCategoryId: waitingVcCategory?.id ?? null,
+      waitingVcName: settings?.waitingVcName || DEFAULT_WAITING_VC_NAME,
     };
   }
 
@@ -1972,6 +2343,7 @@ function formatBosyuMessage(time, purpose, note, mentionRoleId) {
       `PB親チャンネル: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
       `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
       `待機VCカテゴリ: ${settings.waitingVcCategoryId ? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
+      `待機VC名: ${settings.waitingVcName || DEFAULT_WAITING_VC_NAME}`,
       `募集コマンド使用チャンネル: ${settings.bosyuChannelId ? `<#${settings.bosyuChannelId}>` : "制限なし"}`,
       `募集メンションロール: ${settings.bosyuMentionRoleId ? `<@&${settings.bosyuMentionRoleId}>` : "未設定"}`,
       `終了通知内容: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
@@ -1980,9 +2352,10 @@ function formatBosyuMessage(time, purpose, note, mentionRoleId) {
       `通知後ロール解除待機: ${getNonNegativeInteger(settings.roleRemoveWaitMinutes, DEFAULT_ROLE_REMOVE_WAIT_MINUTES)}分`,
       "",
       "現在のVCリマインダー設定:",
+      `リマインダー対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
       `監視VC: ${Array.isArray(settings.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.length > 0 ? settings.voiceMonitorVoiceChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
-      `リマインダーチャンネル: ボイスチャンネルに付随するテキストチャンネルを自動参照`,
+      `リマインダー送信先: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "ボイスチャンネルに付随するテキストチャンネルを自動参照"}`,
       `話題投稿先チャンネル: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "未設定"}`,
     ].join("\n");
   }
