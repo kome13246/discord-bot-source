@@ -506,8 +506,9 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
 
     const canAutoSplit = Boolean(settings?.voiceReminderParentChannelId && settings?.tempRoleId);
     const components = [createAutoSplitRow(channelId, !canAutoSplit)];
+    const mentionText = settings?.tempRoleId ? `<@&${settings.tempRoleId}> ` : "";
     const content =
-      "1つのvcに６人以上集まると喋れない人が出てきがちなので当チャンネルでは振り分けを推奨しています。\nまた、振り分け方が決まらないときは下の自動振り分けボタンをご活用ください！" +
+      `${mentionText}1つのvcに６人以上集まると喋れない人が出てきがちなので当チャンネルでは振り分けを推奨しています。\nまた、振り分け方が決まらないときは下の自動振り分けボタンをご活用ください！` +
       (canAutoSplit
         ? ""
         : "\n※リマインダー対象PB親チャンネルまたは参加者ロールが設定されていないため、自動振り分けは無効です。");
@@ -515,6 +516,7 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
     const suggestionMessage = await reminderChannel.send({
       content,
       components,
+      allowedMentions: settings?.tempRoleId ? { roles: [settings.tempRoleId] } : { parse: [] },
     });
 
     autoSplitSuggestionMessages.set(channelId, suggestionMessage.id);
