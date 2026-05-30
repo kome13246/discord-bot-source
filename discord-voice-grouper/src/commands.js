@@ -104,41 +104,6 @@ export const settingCommand = new SlashCommandBuilder()
           .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
           .setRequired(false),
       )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_channel_1")
-          .setDescription("監視するボイスチャンネル 1")
-          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_channel_2")
-          .setDescription("監視するボイスチャンネル 2")
-          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_channel_3")
-          .setDescription("監視するボイスチャンネル 3")
-          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_channel_4")
-          .setDescription("監視するボイスチャンネル 4")
-          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_channel_5")
-          .setDescription("監視するボイスチャンネル 5")
-          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
-          .setRequired(false),
-      )
       .addStringOption((option) =>
         option
           .setName("finish_message")
@@ -172,37 +137,9 @@ export const settingCommand = new SlashCommandBuilder()
     subcommand.setName("show").setDescription("現在のPB連携設定を表示します"),
   );
 
-export const bosyuCommand = new SlashCommandBuilder()
-  .setName("bosyu")
-  .setDescription("募集メッセージを送信します")
-  .addStringOption((option) =>
-    option
-      .setName("note")
-      .setNameLocalizations({ ja: "ひとこと" })
-      .setDescription("ひとことを入力してください。例: 遠慮せずご参加ください！")
-      .setRequired(true)
-      .setMaxLength(200),
-  )
-  .addStringOption((option) =>
-    option
-      .setName("time")
-      .setNameLocalizations({ ja: "時間" })
-      .setDescription("時間を入力してください。例: 1時間、30分、〇〇まで（省略可）")
-      .setRequired(false)
-      .setMaxLength(100),
-  )
-  .addStringOption((option) =>
-    option
-      .setName("purpose")
-      .setNameLocalizations({ ja: "名目" })
-      .setDescription("名目を入力してください。例: ゲーム、作業、雑談（省略可）")
-      .setRequired(false)
-      .setMaxLength(100),
-  );
-
 export const bCommand = new SlashCommandBuilder()
   .setName("b")
-  .setDescription("募集メッセージを送信します（/bosyu の短縮版）")
+  .setDescription("募集メッセージを送信します")
   .addStringOption((option) =>
     option
       .setName("note")
@@ -231,6 +168,5 @@ export const bCommand = new SlashCommandBuilder()
 export const commands = [
   splitVoiceCommand.toJSON(),
   settingCommand.toJSON(),
-  bosyuCommand.toJSON(),
   bCommand.toJSON(),
 ];

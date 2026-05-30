@@ -157,7 +157,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    if (interaction.commandName === "bosyu" || interaction.commandName === "b") {
+    if (interaction.commandName === "b") {
       await handleBosyu(interaction);
       return;
     }
@@ -211,11 +211,6 @@ async function handleSetting(interaction) {
   const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
   const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
   const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
-  const voiceChannel1 = interaction.options.getChannel("voice_channel_1", false);
-  const voiceChannel2 = interaction.options.getChannel("voice_channel_2", false);
-  const voiceChannel3 = interaction.options.getChannel("voice_channel_3", false);
-  const voiceChannel4 = interaction.options.getChannel("voice_channel_4", false);
-  const voiceChannel5 = interaction.options.getChannel("voice_channel_5", false);
   const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
@@ -272,20 +267,6 @@ async function handleSetting(interaction) {
 
   if (voiceReminderParentChannel) {
     patch.voiceReminderParentChannelId = voiceReminderParentChannel.id;
-  }
-
-  const voiceChannelIds = [
-    voiceChannel1,
-    voiceChannel2,
-    voiceChannel3,
-    voiceChannel4,
-    voiceChannel5,
-  ]
-    .filter(Boolean)
-    .map((channel) => channel.id);
-
-  if (voiceChannelIds.length > 0) {
-    patch.voiceMonitorVoiceChannelIds = voiceChannelIds;
   }
 
   if (finishMessage?.trim()) {
@@ -523,13 +504,13 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
       return;
     }
 
-    const canAutoSplit = Boolean(settings?.parentChannelId && settings?.tempRoleId);
+    const canAutoSplit = Boolean(settings?.voiceReminderParentChannelId && settings?.tempRoleId);
     const components = [createAutoSplitRow(channelId, !canAutoSplit)];
     const content =
       "1つのvcに６人以上集まると喋れない人が出てきがちなので当チャンネルでは振り分けを推奨しています。\nまた、振り分け方が決まらないときは下の自動振り分けボタンをご活用ください！" +
       (canAutoSplit
         ? ""
-        : "\n※PB親チャンネルまたは参加者ロールが設定されていないため、自動振り分けは無効です。");
+        : "\n※リマインダー対象PB親チャンネルまたは参加者ロールが設定されていないため、自動振り分けは無効です。");
 
     const suggestionMessage = await reminderChannel.send({
       content,
@@ -906,15 +887,18 @@ async function handleAutoSplitButton(interaction) {
     return;
   }
 
-  const parentChannel = await guild.channels.fetch(settings?.parentChannelId).catch(() => null);
-  const participantRole = settings?.tempRoleId
-    ? await guild.roles.fetch(settings.tempRoleId).catch(() => null)
-    : null;
+const parentChannelId = settings?.voiceReminderParentChannelId;
+    const parentChannel = parentChannelId
+      ? await guild.channels.fetch(parentChannelId).catch(() => null)
+      : null;
+    const participantRole = settings?.tempRoleId
+      ? await guild.roles.fetch(settings.tempRoleId).catch(() => null)
+      : null;
 
-  if (!settings?.parentChannelId || !parentChannel?.isVoiceBased() || !participantRole) {
-    await interaction.reply({
-      content:
-        "PB親チャンネルまたは参加者ロールが未設定のため、自動振り分けを実行できませんでした。",
+    if (!parentChannelId || !parentChannel?.isVoiceBased() || !participantRole) {
+      await interaction.reply({
+        content:
+          "リマインダー対象PB親チャンネルまたは参加者ロールが未設定のため、自動振り分けを実行できませんでした。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1446,15 +1430,26 @@ async function handleBosyu(interaction) {
   let purposeValue = interaction.options.getString("purpose", false)?.trim() ?? "";
   const noteValue = interaction.options.getString("note", true).trim();
 
-  if (!purposeValue) {
-    const currentChannelName = await getPbChildChannelName(
-      interaction.member?.voice?.channel,
-      settings,
-      interaction.guild,
-    );
-    if (currentChannelName) {
-      purposeValue = currentChannelName;
+  const currentVoiceChannel = interaction.member?.voice?.channel;
+  const currentPbChildName = await getPbChildChannelName(
+    currentVoiceChannel,
+    settings,
+    interaction.guild,
+  );
+
+  if (purposeValue) {
+    if (currentPbChildName) {
+      try {
+        await currentVoiceChannel.edit(
+          { name: purposeValue },
+          "募集名目に合わせてPB子VC名を更新",
+        );
+      } catch {
+        // 応答は作成するが、変更できない場合は無視する
+      }
     }
+  } else if (currentPbChildName) {
+    purposeValue = currentPbChildName;
   }
 
   const content = formatBosyuMessage(timeValue, purposeValue, noteValue, bosyuMentionRoleId);
@@ -2353,7 +2348,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "",
       "現在のVCリマインダー設定:",
       `リマインダー対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
-      `監視VC: ${Array.isArray(settings.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.length > 0 ? settings.voiceMonitorVoiceChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       `リマインダー送信先: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "ボイスチャンネルに付随するテキストチャンネルを自動参照"}`,
       `話題投稿先チャンネル: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "未設定"}`,
