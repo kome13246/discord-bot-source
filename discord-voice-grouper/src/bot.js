@@ -1102,19 +1102,20 @@ async function handleTopicFormModal(interaction) {
   }
 
   const topicText = interaction.fields.getTextInputValue("voice_topic_input").trim();
-  const voiceChannel = await client.channels
-    .fetch(topicForm.voiceChannelId)
-    .catch(() => null);
 
-  if (!voiceChannel?.isVoiceBased()) {
-    await interaction.reply({
-      content: "ボイスチャンネルが見つかりません。",
+  // Require the submitter to be in a VC. If not, reject the submission.
+  const posterVoiceChannel = interaction.member?.voice?.channel;
+  if (!posterVoiceChannel?.isVoiceBased()) {
+    await replyOrFollowUp(interaction, {
+      content: "VC参加者のみが使えます",
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  // Send the topic text to the configured reminder channel instead of updating a non-existent "status" field.
+  const voiceChannel = posterVoiceChannel;
+
+  // Forward the topic text to the configured reminder channel instead of attempting a channel status update.
   try {
     const reminderChannel = await client.channels
       .fetch(topicForm.reminderChannelId)
@@ -1123,7 +1124,7 @@ async function handleTopicFormModal(interaction) {
     if (reminderChannel && typeof reminderChannel.send === "function") {
       const channelMention = voiceChannel?.id ? `<#${voiceChannel.id}>` : "(不明なVC)";
       await reminderChannel.send({
-        content: `話題の共有：${channelMention}\n${topicText}`,
+        content: `いまのわだい：${channelMention}\n${topicText}`,
       }).catch(() => null);
     }
   } catch (err) {
