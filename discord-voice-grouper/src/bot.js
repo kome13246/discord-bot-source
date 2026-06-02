@@ -907,7 +907,7 @@ async function handleTopicFormButton(interaction) {
 
 async function handleAutoSplitButton(interaction) {
   if (!interaction.inGuild()) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "この操作はサーバー内で実行してください。",
       flags: MessageFlags.Ephemeral,
     });
@@ -1538,7 +1538,7 @@ async function handleBosyuButton(interaction) {
   const session = bosyuEditSessions.get(interaction.message.id);
 
   if (!session || Date.now() > session.expiresAt) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "募集内容の編集期限が終了しました。",
       flags: MessageFlags.Ephemeral,
     });
@@ -1546,19 +1546,27 @@ async function handleBosyuButton(interaction) {
   }
 
   if (interaction.user.id !== session.ownerId) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "この募集メッセージを編集できるのは実行者のみです。",
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  await interaction.showModal(createBosyuModal(interaction.message.id, interaction.message.content));
+  try {
+    await interaction.showModal(createBosyuModal(interaction.message.id, interaction.message.content));
+  } catch (error) {
+    console.error(`Failed to show modal for bosyu_edit: ${error.message}`, error);
+    await replyOrFollowUp(interaction, {
+      content: "モーダルの表示に失敗しました。ブラウザやクライアントを最新にして再試行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
 }
 
 async function handleBosyuEditModal(interaction) {
   if (!interaction.inGuild()) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "この操作はサーバー内で実行してください。",
       flags: MessageFlags.Ephemeral,
     });
@@ -1569,7 +1577,7 @@ async function handleBosyuEditModal(interaction) {
   const session = bosyuEditSessions.get(messageId);
 
   if (!session || Date.now() > session.expiresAt) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "募集内容の編集期限が終了しました。",
       flags: MessageFlags.Ephemeral,
     });
@@ -1577,7 +1585,7 @@ async function handleBosyuEditModal(interaction) {
   }
 
   if (interaction.user.id !== session.ownerId) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "この募集メッセージを編集できるのは実行者のみです。",
       flags: MessageFlags.Ephemeral,
     });
