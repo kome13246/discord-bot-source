@@ -1114,8 +1114,21 @@ async function handleTopicFormModal(interaction) {
     return;
   }
 
-  const newStatus = `いまの話題：${topicText}`;
-  await updateVoiceChannelStatus(voiceChannel, newStatus).catch(() => null);
+  // Send the topic text to the configured reminder channel instead of updating a non-existent "status" field.
+  try {
+    const reminderChannel = await client.channels
+      .fetch(topicForm.reminderChannelId)
+      .catch(() => null);
+
+    if (reminderChannel && typeof reminderChannel.send === "function") {
+      const channelMention = voiceChannel?.id ? `<#${voiceChannel.id}>` : "(不明なVC)";
+      await reminderChannel.send({
+        content: `話題の共有：${channelMention}\n${topicText}`,
+      }).catch(() => null);
+    }
+  } catch (err) {
+    console.error(`Failed to forward topic to reminder channel: ${err?.message ?? err}`);
+  }
 
   await interaction.reply({
     content: "話題を送信しました。",
@@ -1483,12 +1496,6 @@ async function handleBosyu(interaction) {
       } catch {
         // 応答は作成するが、変更できない場合は無視する
       }
-    } else {
-      purposeValue = currentVoiceChannel.name;
-    }
-
-    if (noteValue.trim()) {
-      await updateVoiceChannelStatus(currentVoiceChannel, noteValue);
     }
   }
 
@@ -1649,13 +1656,7 @@ async function handleBosyuEditModal(interaction) {
         }
       }
 
-      if (noteValue?.trim()) {
-        try {
-          await updateVoiceChannelStatus(targetVoiceChannel, noteValue);
-        } catch (err) {
-          console.error(`Failed to update bosyu VC status: ${err.message}`, err);
-        }
-      }
+      // 'noteValue' (ひとこと) is included in the message content; do not attempt to set a channel status.
     }
   } catch (error) {
     console.error(`Error updating VC from bosyu edit: ${error.message}`);
@@ -2571,40 +2572,10 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     await message.edit(payload).catch(() => null);
   }
 
-  async function updateVoiceChannelStatus(voiceChannel, status) {
-    if (!voiceChannel?.isVoiceBased() || !voiceChannel?.id) {
-      return;
-    }
-
-    try {
-      const currentName = voiceChannel.name ?? "";
-      // remove previous status suffix like '【...】' if present
-      const baseName = currentName.replace(/\s*【.*】\s*$/u, "").trim();
-      let statusText = String(status ?? "").replace(/[\r\n]+/gu, " ").replace(/[【】]/gu, "").trim();
-
-      if (!statusText) {
-        return;
-      }
-
-      const suffix = ` 【${statusText}】`;
-      let finalName = `${baseName}${suffix}`;
-
-      if (finalName === currentName) {
-        return;
-      }
-
-      // Discord channel name max length is 100
-      if (finalName.length > 100) {
-        const maxBaseLength = 100 - suffix.length;
-        finalName = `${baseName.slice(0, maxBaseLength).trim()}${suffix}`;
-      }
-
-      await voiceChannel.edit({ name: finalName }, "Update VC status");
-      console.log(`Updated VC name for ${voiceChannel.id} -> ${finalName}`);
-    } catch (error) {
-      console.error(`Failed to update VC name/status: ${error.message}`, error);
-    }
-  }
+  // Note: Discord API does not provide a channel "status" field. We no longer attempt
+  // to synthesize a status by editing channel names; the bot only updates VC names when
+  // the purpose is provided. Topic submissions are forwarded to the configured reminder
+  // text channel instead of being stored as a channel status.
 
   async function deleteLater(message) {
     await sleep(1500);
