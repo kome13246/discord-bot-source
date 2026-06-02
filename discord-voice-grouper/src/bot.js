@@ -7,6 +7,7 @@ import {
   ChannelType,
   ModalBuilder,
   PermissionFlagsBits,
+  Routes,
   TextInputBuilder,
   TextInputStyle,
   Client,
@@ -208,7 +209,6 @@ async function handleSetting(interaction) {
   const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const voiceParticipantRole = interaction.options.getRole("voice_participant_role", false);
-  const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
   const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
   const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
   const finishMessage = interaction.options.getString("finish_message", false);
@@ -256,9 +256,6 @@ async function handleSetting(interaction) {
 
   if (voiceParticipantRole) {
     patch.voiceParticipantRoleId = voiceParticipantRole.id;
-  }
-  if (voiceTopicChannel) {
-    patch.voiceTopicChannelId = voiceTopicChannel.id;
   }
 
   if (voiceReminderChannel) {
@@ -408,20 +405,13 @@ async function handleVoiceStateUpdate(oldState, newState) {
     settings?.voiceParticipantRoleId &&
     (await isVoiceChannelMonitored(guild, settings, oldState.channelId))
   ) {
-    let stillInMonitored = false;
+    const stillInActiveSession = await isMemberInActiveVoiceMonitorContext(
+      guild,
+      settings,
+      oldState.member.id,
+    );
 
-    for (const voiceState of [...guild.voiceStates.cache.values()]) {
-      if (
-        voiceState.member?.id === oldState.member.id &&
-        voiceState.channelId &&
-        (await isVoiceChannelMonitored(guild, settings, voiceState.channelId))
-      ) {
-        stillInMonitored = true;
-        break;
-      }
-    }
-
-    if (!stillInMonitored) {
+    if (!stillInActiveSession) {
       const member = await guild.members.fetch(oldState.member.id).catch(() => null);
       if (member) {
         await removeVoiceParticipantRole(member, settings.voiceParticipantRoleId);
@@ -435,9 +425,7 @@ async function findAssociatedTextChannel(guild, voiceChannel, settings) {
 
   if (settings?.voiceReminderChannelId) {
     const configured = await guild.channels.fetch(settings.voiceReminderChannelId).catch(() => null);
-    if (configured && textTypes.includes(configured.type)) {
-      return configured;
-    }
+    return configured && textTypes.includes(configured.type) ? configured : null;
   }
 
   const channels = [...guild.channels.cache.values()].filter((c) => textTypes.includes(c.type));
@@ -460,12 +448,6 @@ async function findAssociatedTextChannel(guild, voiceChannel, settings) {
   ch = channels.find((c) => c.name.startsWith(voiceChannel.name));
   if (ch) return ch;
 
-  // 5) fallback to configured topic channel if present
-  if (settings?.voiceTopicChannelId) {
-    const fetched = await guild.channels.fetch(settings.voiceTopicChannelId).catch(() => null);
-    if (fetched && textTypes.includes(fetched.type)) return fetched;
-  }
-
   return null;
 }
 
@@ -486,11 +468,11 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
     return;
   }
 
-  if (await isVoiceChannelMonitored(guild, settings, channelId)) {
+  if (settings?.voiceReminderParentChannelId === channelId) {
     return;
   }
 
-  const members = [...voiceChannel.members.values()].filter((member) => !member.user.bot);
+  const members = getNonBotVoiceMembers(voiceChannel);
   const existingMessageId = autoSplitSuggestionMessages.get(channelId);
 
   if (members.length >= AUTO_SPLIT_THRESHOLD) {
@@ -551,30 +533,91 @@ async function isVoiceChannelMonitored(guild, settings, channelId) {
     return false;
   }
 
-  if (settings?.voiceReminderParentChannelId) {
-    const parentChannel = await guild.channels
-      .fetch(settings.voiceReminderParentChannelId)
-      .catch(() => null);
-
-    if (!parentChannel?.isVoiceBased()) {
-      return false;
-    }
-
-    if (voiceChannel.id === parentChannel.id) {
-      return false;
-    }
-
-    if (settings.childCategoryId) {
-      return voiceChannel.parentId === settings.childCategoryId;
-    }
-
-    return voiceChannel.parentId === parentChannel.parentId;
+  if (await isPbChildVoiceChannel(guild, settings, voiceChannel)) {
+    return true;
   }
 
   return (
     Array.isArray(settings?.voiceMonitorVoiceChannelIds) &&
     settings.voiceMonitorVoiceChannelIds.includes(channelId)
   );
+}
+
+async function isPbChildVoiceChannel(guild, settings, voiceChannel) {
+  if (!settings?.voiceReminderParentChannelId || !voiceChannel?.isVoiceBased()) {
+    return false;
+  }
+
+  const parentChannel = await guild.channels
+    .fetch(settings.voiceReminderParentChannelId)
+    .catch(() => null);
+
+  if (!parentChannel?.isVoiceBased() || voiceChannel.id === parentChannel.id) {
+    return false;
+  }
+
+  if (settings.childCategoryId) {
+    return voiceChannel.parentId === settings.childCategoryId;
+  }
+
+  return Boolean(parentChannel.parentId && voiceChannel.parentId === parentChannel.parentId);
+}
+
+function getNonBotVoiceMembers(voiceChannel) {
+  return [...voiceChannel.members.values()].filter((member) => !member.user.bot);
+}
+
+function getVoiceMonitorSessionKey(guildId, channelId) {
+  return `${guildId}:${channelId}`;
+}
+
+async function isMemberInActiveVoiceMonitorContext(
+  guild,
+  settings,
+  memberId,
+  ignoredSessionKey = null,
+) {
+  for (const session of voiceMonitorSessions.values()) {
+    const sessionKey = getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId);
+
+    if (
+      session.guildId === guild.id &&
+      sessionKey !== ignoredSessionKey &&
+      session.memberIds.has(memberId)
+    ) {
+      return true;
+    }
+  }
+
+  for (const voiceState of guild.voiceStates.cache.values()) {
+    if (voiceState.member?.id !== memberId || !voiceState.channelId) {
+      continue;
+    }
+
+    const sessionKey = getVoiceMonitorSessionKey(guild.id, voiceState.channelId);
+
+    if (sessionKey === ignoredSessionKey) {
+      continue;
+    }
+
+    if (voiceMonitorSessions.has(sessionKey)) {
+      return true;
+    }
+
+    const voiceChannel =
+      guild.channels.cache.get(voiceState.channelId) ??
+      (await guild.channels.fetch(voiceState.channelId).catch(() => null));
+
+    if (
+      voiceChannel?.isVoiceBased() &&
+      getNonBotVoiceMembers(voiceChannel).length >= VOICE_MONITOR_MIN_MEMBERS &&
+      (await isVoiceChannelMonitored(guild, settings, voiceState.channelId))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function updateVoiceMonitorSession(guild, settings, channelId) {
@@ -584,26 +627,23 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
     return;
   }
 
-  const reminderChannel = await findAssociatedTextChannel(guild, voiceChannel, settings);
+  const members = getNonBotVoiceMembers(voiceChannel);
 
-  if (!reminderChannel || typeof reminderChannel.send !== "function") {
-    return;
-  }
-
-  const members = [...voiceChannel.members.values()].filter(
-    (member) => !member.user.bot,
-  );
-
-  const sessionKey = `${guild.id}:${channelId}`;
+  const sessionKey = getVoiceMonitorSessionKey(guild.id, channelId);
   const existingSession = voiceMonitorSessions.get(sessionKey);
 
   if (members.length >= VOICE_MONITOR_MIN_MEMBERS) {
     if (!existingSession) {
+      const reminderChannel = await findAssociatedTextChannel(guild, voiceChannel, settings);
+
+      if (!reminderChannel || typeof reminderChannel.send !== "function") {
+        return;
+      }
+
       const session = {
         guildId: guild.id,
         voiceChannelId: channelId,
         reminderChannelId: reminderChannel.id,
-        topicOutputChannelId: settings.voiceTopicChannelId || reminderChannel.id,
         participantRoleId: settings.voiceParticipantRoleId,
         startTime: Date.now(),
         reminderCount: 0,
@@ -641,7 +681,7 @@ async function startVoiceMonitorSession(session, voiceChannel, members, reminder
 async function ensureSessionMembersHaveRole(session, voiceChannel, members) {
   session.memberIds = new Set(members.map((member) => member.id));
 
-  if (!session.participantRoleId || members.length === 0) {
+  if (!session.participantRoleId || members.length < VOICE_MONITOR_MIN_MEMBERS) {
     return;
   }
 
@@ -670,7 +710,7 @@ function scheduleNextVoiceReminder(session) {
   }
 
   session.reminderTimer = setTimeout(async () => {
-    if (!voiceMonitorSessions.has(`${session.guildId}:${session.voiceChannelId}`)) {
+    if (!voiceMonitorSessions.has(getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId))) {
       return;
     }
 
@@ -721,7 +761,6 @@ async function sendVoiceMonitorReminder(session) {
     guildId: session.guildId,
     voiceChannelId: session.voiceChannelId,
     reminderChannelId: session.reminderChannelId,
-    topicOutputChannelId: session.topicOutputChannelId,
     expiresAt: Date.now() + TOPIC_FORM_EXPIRE_MS,
     messageId: reminderMessage.id,
     disableTimer: null,
@@ -748,7 +787,7 @@ async function disableTopicForm(formId) {
   topicFormSessions.delete(formId);
 
   const session = voiceMonitorSessions.get(
-    `${topicForm.guildId}:${topicForm.voiceChannelId}`,
+    getVoiceMonitorSessionKey(topicForm.guildId, topicForm.voiceChannelId),
   );
 
   if (session) {
@@ -788,26 +827,35 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
     topicFormSessions.delete(formId);
   }
 
-  voiceMonitorSessions.delete(`${session.guildId}:${session.voiceChannelId}`);
+  const sessionKey = getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId);
 
-  const members = [...voiceChannel.members.values()].filter(
-    (member) => !member.user.bot,
+  voiceMonitorSessions.delete(sessionKey);
+
+  const memberIds = new Set(
+    [
+      ...session.memberIds,
+      ...getNonBotVoiceMembers(voiceChannel).map((member) => member.id),
+    ],
   );
 
-  for (const member of members) {
-    let stillInOtherMonitored = false;
-
-    for (const voiceState of [...guild.voiceStates.cache.values()]) {
-      if (
-        voiceState.member?.id === member.id &&
-        (await isVoiceChannelMonitored(guild, settings, voiceState.channelId))
-      ) {
-        stillInOtherMonitored = true;
-        break;
-      }
+  for (const memberId of memberIds) {
+    if (!settings.voiceParticipantRoleId) {
+      continue;
     }
 
-    if (!stillInOtherMonitored && settings.voiceParticipantRoleId) {
+    const stillInActiveSession = await isMemberInActiveVoiceMonitorContext(
+      guild,
+      settings,
+      memberId,
+      sessionKey,
+    );
+
+    if (!stillInActiveSession) {
+      const member = await guild.members.fetch(memberId).catch(() => null);
+      if (!member) {
+        continue;
+      }
+
       await removeVoiceParticipantRole(member, settings.voiceParticipantRoleId);
     }
   }
@@ -1054,29 +1102,20 @@ async function handleTopicFormModal(interaction) {
   }
 
   const topicText = interaction.fields.getTextInputValue("voice_topic_input").trim();
-  const outputChannel = await client.channels
-    .fetch(topicForm.topicOutputChannelId)
+  const voiceChannel = await client.channels
+    .fetch(topicForm.voiceChannelId)
     .catch(() => null);
 
-  if (!outputChannel || typeof outputChannel.send !== "function") {
+  if (!voiceChannel?.isVoiceBased()) {
     await interaction.reply({
-      content:
-        "話題を投稿するチャンネルにメッセージを送信できませんでした。設定を確認してください。",
+      content: "ボイスチャンネルが見つかりません。",
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const voiceChannel = await client.channels
-    .fetch(topicForm.voiceChannelId)
-    .catch(() => null);
-
-  const channelName = voiceChannel?.isVoiceBased() ? voiceChannel.name : "このVC";
-
-  await outputChannel.send({
-    content: `${channelName} のいまの話題：${topicText}`,
-    allowedMentions: { parse: [] },
-  });
+  const newStatus = `いまの話題：${topicText}`;
+  await updateVoiceChannelStatus(voiceChannel, newStatus).catch(() => null);
 
   await interaction.reply({
     content: "話題を送信しました。",
@@ -1088,7 +1127,7 @@ async function handleTopicFormModal(interaction) {
   }
 
   const session = voiceMonitorSessions.get(
-    `${topicForm.guildId}:${topicForm.voiceChannelId}`,
+    getVoiceMonitorSessionKey(topicForm.guildId, topicForm.voiceChannelId),
   );
 
   if (session) {
@@ -1917,12 +1956,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     while (Date.now() - startedAt < PB_CHILD_WAIT_MS) {
       const channel = member.voice.channel;
 
-      if (
-        channel?.isVoiceBased() &&
-        channel.id !== config.parentChannel.id &&
-        channel.id !== config.sourceChannelId &&
-        (!config.childCategoryId || channel.parentId === config.childCategoryId)
-      ) {
+      if (isExpectedPbChildChannel(channel, config)) {
         return channel;
       }
 
@@ -1930,6 +1964,26 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     }
 
     return null;
+  }
+
+  function isExpectedPbChildChannel(channel, config) {
+    if (
+      !channel?.isVoiceBased() ||
+      channel.id === config.parentChannel.id ||
+      channel.id === config.sourceChannelId
+    ) {
+      return false;
+    }
+
+    if (config.childCategoryId) {
+      return channel.parentId === config.childCategoryId;
+    }
+
+    if (config.parentChannel.parentId) {
+      return channel.parentId === config.parentChannel.parentId;
+    }
+
+    return true;
   }
 
   async function runWaitingRoomMonitor(options) {
@@ -2352,7 +2406,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `リマインダー対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       `リマインダー送信先: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "ボイスチャンネルに付随するテキストチャンネルを自動参照"}`,
-      `話題投稿先チャンネル: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "未設定"}`,
     ].join("\n");
   }
 
@@ -2456,6 +2509,20 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
   async function editSafely(message, payload) {
     await message.edit(payload).catch(() => null);
+  }
+
+  async function updateVoiceChannelStatus(voiceChannel, status) {
+    if (!voiceChannel?.isVoiceBased() || !voiceChannel.id) {
+      return;
+    }
+
+    try {
+      await client.rest.patch(`/channels/${voiceChannel.id}`, {
+        body: { status },
+      });
+    } catch (error) {
+      console.error(`Failed to update voice channel status: ${error.message}`);
+    }
   }
 
   async function deleteLater(message) {
