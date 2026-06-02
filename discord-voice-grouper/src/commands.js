@@ -153,7 +153,7 @@ export const bCommand = new SlashCommandBuilder()
     option
       .setName("purpose")
       .setNameLocalizations({ ja: "名目" })
-      .setDescription("名目を入力してください。例: ゲーム、作業、雑談（省略可）")
+      .setDescription("名目を入力してください。例: ゲーム、作業、雑談（省略可）。入力するとVC名として設定されます。")
       .setRequired(false)
       .setMaxLength(100),
   );
