@@ -1473,17 +1473,23 @@ async function handleBosyu(interaction) {
 
   const currentVoiceChannel = interaction.member?.voice?.channel;
 
-  if (purposeValue && currentVoiceChannel?.isVoiceBased()) {
-    try {
-      await currentVoiceChannel.edit(
-        { name: purposeValue },
-        "募集名目に合わせてVC名を更新",
-      );
-    } catch {
-      // 応答は作成するが、変更できない場合は無視する
+  if (currentVoiceChannel?.isVoiceBased()) {
+    if (purposeValue) {
+      try {
+        await currentVoiceChannel.edit(
+          { name: purposeValue },
+          "募集名目に合わせてVC名を更新",
+        );
+      } catch {
+        // 応答は作成するが、変更できない場合は無視する
+      }
+    } else {
+      purposeValue = currentVoiceChannel.name;
     }
-  } else if (!purposeValue && currentVoiceChannel?.isVoiceBased()) {
-    purposeValue = currentVoiceChannel.name;
+
+    if (noteValue.trim()) {
+      await updateVoiceChannelStatus(currentVoiceChannel, noteValue);
+    }
   }
 
   const content = formatBosyuMessage(timeValue, purposeValue, noteValue, bosyuMentionRoleId);
@@ -1503,6 +1509,7 @@ async function handleBosyu(interaction) {
     ownerId: interaction.user.id,
     expiresAt,
     bosyuMentionRoleId,
+    voiceChannelId: currentVoiceChannel?.isVoiceBased() ? currentVoiceChannel.id : null,
   });
 
   setTimeout(async () => {
@@ -1601,39 +1608,52 @@ async function handleBosyuEditModal(interaction) {
   const replyMessage = await channel.messages.fetch(messageId).catch(() => null);
 
   if (!replyMessage) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "募集メッセージの取得に失敗しました。",
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  await replyMessage.edit({
-    content,
-    components: Date.now() <= session.expiresAt ? [createBosyuEditRow()] : [],
-    allowedMentions: {
-      roles: session.bosyuMentionRoleId ? [session.bosyuMentionRoleId] : [],
-    },
-  });
-
-  // If the editor is currently in a voice channel, update that VC's name/status
+  let replyMessageUpdated = true;
   try {
-    const currentVoiceChannel = interaction.member?.voice?.channel;
+    await replyMessage.edit({
+      content,
+      components: Date.now() <= session.expiresAt ? [createBosyuEditRow()] : [],
+      allowedMentions: {
+        roles: session.bosyuMentionRoleId ? [session.bosyuMentionRoleId] : [],
+      },
+    });
+  } catch (error) {
+    replyMessageUpdated = false;
+    console.error(`Failed to update bosyu message: ${error.message}`, error);
+  }
 
-    if (currentVoiceChannel?.isVoiceBased()) {
+  // Update the original VC from the bosyu session if available, otherwise fall back to the editor's current VC.
+  try {
+    let targetVoiceChannel = null;
+    if (session.voiceChannelId) {
+      targetVoiceChannel = await interaction.guild.channels.fetch(session.voiceChannelId).catch(() => null);
+    }
+
+    if (!targetVoiceChannel) {
+      targetVoiceChannel = interaction.member?.voice?.channel;
+    }
+
+    if (targetVoiceChannel?.isVoiceBased()) {
       if (purposeValue?.trim()) {
         try {
-          await currentVoiceChannel.edit({ name: purposeValue }, "Update VC name from bosyu edit");
+          await targetVoiceChannel.edit({ name: purposeValue }, "Update VC name from bosyu edit");
         } catch (err) {
-          // ignore individual failures
+          console.error(`Failed to update bosyu VC name: ${err.message}`, err);
         }
       }
 
       if (noteValue?.trim()) {
         try {
-          await updateVoiceChannelStatus(currentVoiceChannel, noteValue);
+          await updateVoiceChannelStatus(targetVoiceChannel, noteValue);
         } catch (err) {
-          // ignore
+          console.error(`Failed to update bosyu VC status: ${err.message}`, err);
         }
       }
     }
@@ -1641,8 +1661,10 @@ async function handleBosyuEditModal(interaction) {
     console.error(`Error updating VC from bosyu edit: ${error.message}`);
   }
 
-  await interaction.reply({
-    content: "募集内容を更新しました。",
+  await replyOrFollowUp(interaction, {
+    content: replyMessageUpdated
+      ? "募集内容を更新しました。"
+      : "募集内容の更新は試みましたが、募集メッセージの編集に失敗しました。",
     flags: MessageFlags.Ephemeral,
   });
 }
@@ -2558,16 +2580,24 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       const currentName = voiceChannel.name ?? "";
       // remove previous status suffix like '【...】' if present
       const baseName = currentName.replace(/\s*【.*】\s*$/u, "").trim();
-      const statusText = String(status ?? "").trim();
+      let statusText = String(status ?? "").replace(/[\r\n]+/gu, " ").replace(/[【】]/gu, "").trim();
 
-      const newName = statusText ? `${baseName} 【${statusText}】` : baseName;
+      if (!statusText) {
+        return;
+      }
 
-      if (newName === currentName) {
+      const suffix = ` 【${statusText}】`;
+      let finalName = `${baseName}${suffix}`;
+
+      if (finalName === currentName) {
         return;
       }
 
       // Discord channel name max length is 100
-      const finalName = newName.length > 100 ? newName.slice(0, 100) : newName;
+      if (finalName.length > 100) {
+        const maxBaseLength = 100 - suffix.length;
+        finalName = `${baseName.slice(0, maxBaseLength).trim()}${suffix}`;
+      }
 
       await voiceChannel.edit({ name: finalName }, "Update VC status");
       console.log(`Updated VC name for ${voiceChannel.id} -> ${finalName}`);
