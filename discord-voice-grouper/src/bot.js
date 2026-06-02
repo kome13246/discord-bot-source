@@ -1608,6 +1608,31 @@ async function handleBosyuEditModal(interaction) {
     },
   });
 
+  // If the editor is currently in a voice channel, update that VC's name/status
+  try {
+    const currentVoiceChannel = interaction.member?.voice?.channel;
+
+    if (currentVoiceChannel?.isVoiceBased()) {
+      if (purposeValue?.trim()) {
+        try {
+          await currentVoiceChannel.edit({ name: purposeValue }, "Update VC name from bosyu edit");
+        } catch (err) {
+          // ignore individual failures
+        }
+      }
+
+      if (noteValue?.trim()) {
+        try {
+          await updateVoiceChannelStatus(currentVoiceChannel, noteValue);
+        } catch (err) {
+          // ignore
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`Error updating VC from bosyu edit: ${error.message}`);
+  }
+
   await interaction.reply({
     content: "募集内容を更新しました。",
     flags: MessageFlags.Ephemeral,
@@ -2505,18 +2530,29 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   }
 
   async function updateVoiceChannelStatus(voiceChannel, status) {
-    if (!voiceChannel?.isVoiceBased() || !voiceChannel.id) {
+    if (!voiceChannel?.isVoiceBased() || !voiceChannel?.id) {
       return;
     }
 
     try {
-      const response = await client.rest.patch(`/channels/${voiceChannel.id}`, {
-        data: { status },
-        auth: true,
-      });
-      console.log(`VC status updated:`, response);
+      const currentName = voiceChannel.name ?? "";
+      // remove previous status suffix like '【...】' if present
+      const baseName = currentName.replace(/\s*【.*】\s*$/u, "").trim();
+      const statusText = String(status ?? "").trim();
+
+      const newName = statusText ? `${baseName} 【${statusText}】` : baseName;
+
+      if (newName === currentName) {
+        return;
+      }
+
+      // Discord channel name max length is 100
+      const finalName = newName.length > 100 ? newName.slice(0, 100) : newName;
+
+      await voiceChannel.edit({ name: finalName }, "Update VC status");
+      console.log(`Updated VC name for ${voiceChannel.id} -> ${finalName}`);
     } catch (error) {
-      console.error(`Failed to update voice channel status: ${error.message}`, error);
+      console.error(`Failed to update VC name/status: ${error.message}`, error);
     }
   }
 
