@@ -174,7 +174,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 async function handleSetting(interaction) {
   if (!interaction.inGuild()) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "このコマンドはサーバー内で使ってください。",
       flags: MessageFlags.Ephemeral,
     });
@@ -182,7 +182,7 @@ async function handleSetting(interaction) {
   }
 
   if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "この設定を変更するには、サーバー管理権限が必要です。",
       flags: MessageFlags.Ephemeral,
     });
@@ -193,7 +193,7 @@ async function handleSetting(interaction) {
 
   if (subcommand === "show") {
     const settings = await getGuildSettings(interaction.guildId);
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: formatSettings(settings),
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
@@ -291,7 +291,7 @@ async function handleSetting(interaction) {
   }
 
   const settings = await saveGuildSettings(interaction.guildId, patch);
-  await interaction.reply({
+  await replyOrFollowUp(interaction, {
     content: `設定を保存しました。\n\n${formatSettings(settings)}`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
@@ -1442,7 +1442,7 @@ async function handleBosyu(interaction) {
   const bosyuMentionRoleId = settings?.bosyuMentionRoleId;
 
   if (bosyuChannelId && interaction.channelId !== bosyuChannelId) {
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: "このチャンネルでは /bosyu を使用できません。設定された募集チャンネルで実行してください。",
       flags: MessageFlags.Ephemeral,
     });
@@ -1458,7 +1458,7 @@ async function handleBosyu(interaction) {
     const remainingMinutes = Math.floor(remainingMs / 60000);
     const remainingSeconds = Math.floor((remainingMs % 60000) / 1000);
 
-    await interaction.reply({
+    await replyOrFollowUp(interaction, {
       content: `15分以内に再度 /bosyu を使用できません。あと ${remainingMinutes}分${remainingSeconds}秒 です。`,
       flags: MessageFlags.Ephemeral,
     });
@@ -1488,7 +1488,7 @@ async function handleBosyu(interaction) {
 
   const content = formatBosyuMessage(timeValue, purposeValue, noteValue, bosyuMentionRoleId);
 
-  await interaction.reply({
+  await replyOrFollowUp(interaction, {
     content,
     components: [createBosyuEditRow()],
     allowedMentions: {
@@ -2517,6 +2517,18 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       content,
       flags: MessageFlags.Ephemeral,
     };
+
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp(payload).catch(() => null);
+    } else {
+      await interaction.reply(payload).catch(() => null);
+    }
+  }
+
+  async function replyOrFollowUp(interaction, payload) {
+    if (!payload || typeof payload !== "object") {
+      payload = { content: String(payload ?? ""), flags: MessageFlags.Ephemeral };
+    }
 
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp(payload).catch(() => null);
