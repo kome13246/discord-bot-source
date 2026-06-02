@@ -1472,25 +1472,18 @@ async function handleBosyu(interaction) {
   const noteValue = interaction.options.getString("note", true).trim();
 
   const currentVoiceChannel = interaction.member?.voice?.channel;
-  const currentPbChildName = await getPbChildChannelName(
-    currentVoiceChannel,
-    settings,
-    interaction.guild,
-  );
 
-  if (purposeValue) {
-    if (currentPbChildName) {
-      try {
-        await currentVoiceChannel.edit(
-          { name: purposeValue },
-          "募集名目に合わせてPB子VC名を更新",
-        );
-      } catch {
-        // 応答は作成するが、変更できない場合は無視する
-      }
+  if (purposeValue && currentVoiceChannel?.isVoiceBased()) {
+    try {
+      await currentVoiceChannel.edit(
+        { name: purposeValue },
+        "募集名目に合わせてVC名を更新",
+      );
+    } catch {
+      // 応答は作成するが、変更できない場合は無視する
     }
-  } else if (currentPbChildName) {
-    purposeValue = currentPbChildName;
+  } else if (!purposeValue && currentVoiceChannel?.isVoiceBased()) {
+    purposeValue = currentVoiceChannel.name;
   }
 
   const content = formatBosyuMessage(timeValue, purposeValue, noteValue, bosyuMentionRoleId);
