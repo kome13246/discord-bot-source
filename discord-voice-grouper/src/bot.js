@@ -2510,11 +2510,13 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     }
 
     try {
-      await client.rest.patch(`/channels/${voiceChannel.id}`, {
-        body: { status },
+      const response = await client.rest.patch(`/channels/${voiceChannel.id}`, {
+        data: { status },
+        auth: true,
       });
+      console.log(`VC status updated:`, response);
     } catch (error) {
-      console.error(`Failed to update voice channel status: ${error.message}`);
+      console.error(`Failed to update voice channel status: ${error.message}`, error);
     }
   }
 
