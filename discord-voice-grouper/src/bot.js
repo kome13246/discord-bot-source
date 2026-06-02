@@ -210,6 +210,7 @@ async function handleSetting(interaction) {
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const voiceParticipantRole = interaction.options.getRole("voice_participant_role", false);
   const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
+  const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
   const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
   const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
@@ -260,6 +261,10 @@ async function handleSetting(interaction) {
 
   if (voiceReminderChannel) {
     patch.voiceReminderChannelId = voiceReminderChannel.id;
+  }
+
+  if (voiceTopicChannel) {
+    patch.voiceTopicChannelId = voiceTopicChannel.id;
   }
 
   if (voiceReminderParentChannel) {
@@ -1115,20 +1120,27 @@ async function handleTopicFormModal(interaction) {
 
   const voiceChannel = posterVoiceChannel;
 
-  // Forward the topic text to the configured reminder channel instead of attempting a channel status update.
+  // Forward the topic text to the configured topic forward channel, or fall back to the reminder channel.
   try {
-    const reminderChannel = await client.channels
-      .fetch(topicForm.reminderChannelId)
-      .catch(() => null);
+    const settings = await getGuildSettings(topicForm.guildId);
+    const topicChannel = settings?.voiceTopicChannelId
+      ? await client.channels.fetch(settings.voiceTopicChannelId).catch(() => null)
+      : null;
+    const sendChannel =
+      topicChannel && typeof topicChannel.send === "function"
+        ? topicChannel
+        : await client.channels
+            .fetch(topicForm.reminderChannelId)
+            .catch(() => null);
 
-    if (reminderChannel && typeof reminderChannel.send === "function") {
+    if (sendChannel && typeof sendChannel.send === "function") {
       const channelMention = voiceChannel?.id ? `<#${voiceChannel.id}>` : "(不明なVC)";
-      await reminderChannel.send({
+      await sendChannel.send({
         content: `いまのわだい：${channelMention}\n${topicText}`,
       }).catch(() => null);
     }
   } catch (err) {
-    console.error(`Failed to forward topic to reminder channel: ${err?.message ?? err}`);
+    console.error(`Failed to forward topic to channel: ${err?.message ?? err}`);
   }
 
   await interaction.reply({
@@ -2456,6 +2468,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `リマインダー対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       `リマインダー送信先: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "ボイスチャンネルに付随するテキストチャンネルを自動参照"}`,
+      `話題送信先: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "リマインダー送信先と同じ"}`,
     ].join("\n");
   }
 

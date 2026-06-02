@@ -62,6 +62,7 @@ function getEnvironmentSettings(guildId) {
     process.env.PB_WAITING_VC_CATEGORY_ID ?? process.env.PB_WAITING_CHANNEL_ID;
   const waitingVcName = process.env.PB_WAITING_VC_NAME;
   const voiceReminderChannelId = process.env.PB_VOICE_REMINDER_CHANNEL_ID;
+  const voiceTopicChannelId = process.env.PB_VOICE_TOPIC_CHANNEL_ID;
   const voiceReminderParentChannelId = process.env.PB_VOICE_REMINDER_PARENT_CHANNEL_ID;
   const finishMessage = process.env.PB_FINISH_MESSAGE;
   const transferWaitSeconds = process.env.PB_TRANSFER_WAIT_SECONDS;
@@ -75,6 +76,7 @@ function getEnvironmentSettings(guildId) {
     !waitingVcCategoryId &&
     !waitingVcName &&
     !voiceReminderChannelId &&
+    !voiceTopicChannelId &&
     !voiceReminderParentChannelId &&
     !finishMessage &&
     !transferWaitSeconds &&
@@ -91,6 +93,7 @@ function getEnvironmentSettings(guildId) {
     waitingVcCategoryId,
     waitingVcName,
     voiceReminderChannelId,
+    voiceTopicChannelId,
     voiceReminderParentChannelId,
     finishMessage,
     transferWaitSeconds: parseOptionalInteger(transferWaitSeconds),

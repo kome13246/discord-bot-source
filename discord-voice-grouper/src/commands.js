@@ -92,6 +92,13 @@ export const settingCommand = new SlashCommandBuilder()
       )
       .addChannelOption((option) =>
         option
+          .setName("voice_topic_channel")
+          .setDescription("話題送信先テキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
           .setName("voice_reminder_parent_channel")
           .setDescription("リマインダー対象のPB親ボイスチャンネル")
           .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
