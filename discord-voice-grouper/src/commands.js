@@ -104,6 +104,13 @@ export const settingCommand = new SlashCommandBuilder()
           .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
           .setRequired(false),
       )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_reminder_child_category")
+          .setDescription("リマインダー対象のPB子VCカテゴリ。未設定ならPB子VCカテゴリを自動検出します")
+          .addChannelTypes(ChannelType.GuildCategory)
+          .setRequired(false),
+      )
       .addStringOption((option) =>
         option
           .setName("finish_message")

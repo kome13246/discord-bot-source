@@ -212,6 +212,7 @@ async function handleSetting(interaction) {
   const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
   const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
   const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
+  const voiceReminderChildCategory = interaction.options.getChannel("voice_reminder_child_category", false);
   const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
@@ -269,6 +270,10 @@ async function handleSetting(interaction) {
 
   if (voiceReminderParentChannel) {
     patch.voiceReminderParentChannelId = voiceReminderParentChannel.id;
+  }
+
+  if (voiceReminderChildCategory) {
+    patch.voiceReminderChildCategoryId = voiceReminderChildCategory.id;
   }
 
   if (finishMessage?.trim()) {
@@ -559,6 +564,10 @@ async function isPbChildVoiceChannel(guild, settings, voiceChannel) {
 
   if (!parentChannel?.isVoiceBased() || voiceChannel.id === parentChannel.id) {
     return false;
+  }
+
+  if (settings.voiceReminderChildCategoryId) {
+    return voiceChannel.parentId === settings.voiceReminderChildCategoryId;
   }
 
   if (settings.childCategoryId) {
@@ -2123,20 +2132,29 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   }
 
   async function findUnderfilledChildChannel(guild, childChannelIds) {
+    let bestChannel = null;
+    let bestCount = Infinity;
+
     for (const channelId of childChannelIds) {
       const channel =
         guild.channels.cache.get(channelId) ??
         (await guild.channels.fetch(channelId).catch(() => null));
 
-      if (
-        channel?.isVoiceBased() &&
-        [...channel.members.values()].filter((member) => !member.user.bot).length <= 3
-      ) {
-        return channel;
+      if (!channel?.isVoiceBased()) {
+        continue;
+      }
+
+      const memberCount = [...channel.members.values()].filter(
+        (member) => !member.user.bot,
+      ).length;
+
+      if (memberCount <= 3 && memberCount < bestCount) {
+        bestChannel = channel;
+        bestCount = memberCount;
       }
     }
 
-    return null;
+    return bestChannel;
   }
 
   async function moveMemberToChildChannel(
@@ -2466,6 +2484,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "",
       "現在のVCリマインダー設定:",
       `リマインダー対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
+      `リマインダー子VCカテゴリ: ${settings.voiceReminderChildCategoryId ? `<#${settings.voiceReminderChildCategoryId}>` : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       `リマインダー送信先: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "ボイスチャンネルに付随するテキストチャンネルを自動参照"}`,
       `話題送信先: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "リマインダー送信先と同じ"}`,
