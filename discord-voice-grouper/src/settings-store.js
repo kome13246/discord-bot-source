@@ -65,7 +65,7 @@ function getEnvironmentSettings(guildId) {
   const voiceTopicChannelId = process.env.PB_VOICE_TOPIC_CHANNEL_ID;
   const voiceReminderParentChannelId = process.env.PB_VOICE_REMINDER_PARENT_CHANNEL_ID;
   const voiceReminderChildCategoryId = process.env.PB_VOICE_REMINDER_CHILD_CATEGORY_ID;
-  const finishMessage = process.env.PB_FINISH_MESSAGE;
+  const voiceReminderEnabled = parseOptionalBoolean(process.env.PB_VOICE_REMINDER_ENABLED);
   const transferWaitSeconds = process.env.PB_TRANSFER_WAIT_SECONDS;
   const noticeWaitMinutes = process.env.PB_NOTICE_WAIT_MINUTES;
   const roleRemoveWaitMinutes = process.env.PB_ROLE_REMOVE_WAIT_MINUTES;
@@ -80,7 +80,7 @@ function getEnvironmentSettings(guildId) {
     !voiceTopicChannelId &&
     !voiceReminderParentChannelId &&
     !voiceReminderChildCategoryId &&
-    !finishMessage &&
+    voiceReminderEnabled === undefined &&
     !transferWaitSeconds &&
     !noticeWaitMinutes &&
     !roleRemoveWaitMinutes
@@ -98,12 +98,29 @@ function getEnvironmentSettings(guildId) {
     voiceTopicChannelId,
     voiceReminderParentChannelId,
     voiceReminderChildCategoryId,
-    finishMessage,
+    voiceReminderEnabled,
     transferWaitSeconds: parseOptionalInteger(transferWaitSeconds),
     noticeWaitMinutes: parseOptionalInteger(noticeWaitMinutes),
     roleRemoveWaitMinutes: parseOptionalInteger(roleRemoveWaitMinutes),
     updatedAt: "environment",
   };
+}
+
+function parseOptionalBoolean(value) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+
+  if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+
+  return undefined;
 }
 
 function parseOptionalInteger(value) {

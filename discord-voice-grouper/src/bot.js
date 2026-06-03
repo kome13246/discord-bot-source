@@ -36,7 +36,8 @@ const DEFAULT_ROLE_REMOVE_WAIT_MINUTES = 3;
 const DEFAULT_WAITING_VC_NAME = "途中参加部屋";
 const COUNTDOWN_UPDATE_MS = 1000;
 const PB_CHILD_WAIT_MS = 20 * 1000;
-const DEFAULT_FINISH_MESSAGE = "終了時間です。";
+const DEFAULT_FINISH_MESSAGE =
+  "30分が経過しました！各々のちょうどいいタイミングで解散してください";
 const MESSAGE_LIMIT = 1900;
 
 const activeSessions = new Map();
@@ -209,11 +210,11 @@ async function handleSetting(interaction) {
   const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const voiceParticipantRole = interaction.options.getRole("voice_participant_role", false);
+  const voiceReminderEnabled = interaction.options.getBoolean("voice_reminder_enabled", false);
   const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
   const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
   const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
   const voiceReminderChildCategory = interaction.options.getChannel("voice_reminder_child_category", false);
-  const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
     false,
@@ -276,8 +277,8 @@ async function handleSetting(interaction) {
     patch.voiceReminderChildCategoryId = voiceReminderChildCategory.id;
   }
 
-  if (finishMessage?.trim()) {
-    patch.finishMessage = finishMessage.trim();
+  if (voiceReminderEnabled !== null) {
+    patch.voiceReminderEnabled = voiceReminderEnabled;
   }
 
   if (transferWaitSeconds !== null) {
@@ -532,6 +533,10 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
 
 async function isVoiceChannelMonitored(guild, settings, channelId) {
   if (!channelId) {
+    return false;
+  }
+
+  if (settings?.voiceReminderEnabled === false) {
     return false;
   }
 
@@ -1449,7 +1454,7 @@ async function handleSplitVoice(interaction) {
       ownerId: interaction.user.id,
       roleId: config.tempRole.id,
       memberIds: participantMemberIds,
-      finishMessage: settings.finishMessage || DEFAULT_FINISH_MESSAGE,
+      finishMessage: DEFAULT_FINISH_MESSAGE,
       noticeWaitMs,
       roleRemoveWaitMs,
       childChannelIds,
@@ -2475,9 +2480,9 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
       `待機VCカテゴリ: ${settings.waitingVcCategoryId ? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
       `待機VC名: ${settings.waitingVcName || DEFAULT_WAITING_VC_NAME}`,
+      `リマインダー機能: ${settings.voiceReminderEnabled === false ? "無効" : "有効"}`,
       `募集コマンド使用チャンネル: ${settings.bosyuChannelId ? `<#${settings.bosyuChannelId}>` : "制限なし"}`,
       `募集メンションロール: ${settings.bosyuMentionRoleId ? `<@&${settings.bosyuMentionRoleId}>` : "未設定"}`,
-      `終了通知内容: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
       `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
       `終了通知前待機: ${getNonNegativeInteger(settings.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES)}分`,
       `通知後ロール解除待機: ${getNonNegativeInteger(settings.roleRemoveWaitMinutes, DEFAULT_ROLE_REMOVE_WAIT_MINUTES)}分`,

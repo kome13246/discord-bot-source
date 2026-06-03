@@ -83,6 +83,12 @@ export const settingCommand = new SlashCommandBuilder()
           .setDescription("VC参加者に付与するロール")
           .setRequired(false),
       )
+      .addBooleanOption((option) =>
+        option
+          .setName("voice_reminder_enabled")
+          .setDescription("VCリマインダー機能を有効または無効にする")
+          .setRequired(false),
+      )
       .addChannelOption((option) =>
         option
           .setName("voice_reminder_channel")
