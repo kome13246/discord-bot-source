@@ -117,6 +117,13 @@ export const settingCommand = new SlashCommandBuilder()
           .addChannelTypes(ChannelType.GuildCategory)
           .setRequired(false),
       )
+      .addChannelOption((option) =>
+        option
+          .setName("wadaich")
+          .setDescription("/splitvc後のおすすめ話題を送るテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
       .addStringOption((option) =>
         option
           .setName("finish_message")
@@ -178,8 +185,48 @@ export const bCommand = new SlashCommandBuilder()
       .setMaxLength(100),
   );
 
+export const addWadaiCommand = new SlashCommandBuilder()
+  .setName("addwadai")
+  .setDescription("おすすめ話題を追加します")
+  .addIntegerOption((option) =>
+    option
+      .setName("category")
+      .setDescription("1:大まかな話題 2:最近ベース 3:思考実験・ディベート")
+      .addChoices(
+        { name: "1 大まかな話題", value: 1 },
+        { name: "2 最近ベースの話題", value: 2 },
+        { name: "3 思考実験・ディベート", value: 3 },
+      )
+      .setRequired(true),
+  )
+  .addStringOption((option) =>
+    option
+      .setName("content")
+      .setDescription("追加する話題の内容")
+      .setRequired(true)
+      .setMaxLength(300),
+  );
+
+export const showWadaiCommand = new SlashCommandBuilder()
+  .setName("showwadai")
+  .setDescription("登録されているおすすめ話題を表示します");
+
+export const delWadaiCommand = new SlashCommandBuilder()
+  .setName("delwadai")
+  .setDescription("添え字で指定したおすすめ話題を削除します")
+  .addStringOption((option) =>
+    option
+      .setName("target")
+      .setDescription("削除対象。例: 1-2")
+      .setRequired(true)
+      .setMaxLength(20),
+  );
+
 export const commands = [
   splitVoiceCommand.toJSON(),
   settingCommand.toJSON(),
   bCommand.toJSON(),
+  addWadaiCommand.toJSON(),
+  showWadaiCommand.toJSON(),
+  delWadaiCommand.toJSON(),
 ];

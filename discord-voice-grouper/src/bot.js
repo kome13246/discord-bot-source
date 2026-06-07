@@ -64,6 +64,42 @@ const SUGGESTED_TOPICS = [
   "最近気になっているニュースや話題",
   "趣味や特技の話",
 ];
+const WADAI_RECENT_HISTORY_LIMIT = 3;
+const WADAI_CATEGORIES = {
+  1: {
+    heading: "①大まかな話題",
+    messageLabel: "①",
+    defaults: [
+      "好きな食べ物は？",
+      "趣味は何？",
+      "休日は何をして過ごす？",
+      "行ってみたい場所は？",
+      "朝方？夜型？",
+    ],
+  },
+  2: {
+    heading: "②最近ベースの話題",
+    messageLabel: "②",
+    defaults: [
+      "最近うれしかったことは？",
+      "最近買ってよかったものは？",
+      "最近ハマっている作品は？",
+      "マイブーム的なものはある？",
+      "今楽しみにしてることってある？",
+    ],
+  },
+  3: {
+    heading: "③思考実験やディベート的なもの",
+    messageLabel: "③",
+    defaults: [
+      "無人島に一つだけ持っていくなら何？",
+      "家の近くにできてほしいお店は？",
+      "スマホからアプリを3つしか残せないとしたら、何を残す？（電話・LINEなどの連絡手段以外で）",
+      "一日だけ誰かと入れ替われるなら誰になりたい？",
+      "一生外食が禁止になるかわりにどんなスーパーの商品も半額になるボタンがあったら押す？",
+    ],
+  },
+};
 
 if (!DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is required.");
@@ -164,6 +200,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    if (interaction.commandName === "addwadai") {
+      await handleAddWadai(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "showwadai") {
+      await handleShowWadai(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "delwadai") {
+      await handleDelWadai(interaction);
+      return;
+    }
+
     if (interaction.commandName === "setting") {
       await handleSetting(interaction);
     }
@@ -215,6 +266,7 @@ async function handleSetting(interaction) {
   const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
   const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
   const voiceReminderChildCategory = interaction.options.getChannel("voice_reminder_child_category", false);
+  const wadaiChannel = interaction.options.getChannel("wadaich", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
     false,
@@ -277,6 +329,10 @@ async function handleSetting(interaction) {
     patch.voiceReminderChildCategoryId = voiceReminderChildCategory.id;
   }
 
+  if (wadaiChannel) {
+    patch.wadaiChannelId = wadaiChannel.id;
+  }
+
   if (voiceReminderEnabled !== null) {
     patch.voiceReminderEnabled = voiceReminderEnabled;
   }
@@ -301,11 +357,362 @@ async function handleSetting(interaction) {
     return;
   }
 
-  const settings = await saveGuildSettings(interaction.guildId, patch);
+  const currentSettings = await getGuildSettings(interaction.guildId);
+  const settings = await saveGuildSettingsWithCurrent(
+    interaction.guildId,
+    currentSettings,
+    patch,
+  );
   await replyOrFollowUp(interaction, {
     content: `設定を保存しました。\n\n${formatSettings(settings)}`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
+  });
+}
+
+async function handleAddWadai(interaction) {
+  if (!interaction.inGuild()) {
+    await replyOrFollowUp(interaction, {
+      content: "このコマンドはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+    await replyOrFollowUp(interaction, {
+      content: "話題を追加するには、サーバー管理権限が必要です。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const category = String(interaction.options.getInteger("category", true));
+  const content = interaction.options.getString("content", true).trim();
+
+  if (!content) {
+    await replyOrFollowUp(interaction, {
+      content: "追加する話題の内容を入力してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+  const topics = getWadaiTopics(settings);
+  const nextTopic = {
+    id: createWadaiTopicId(category),
+    text: content,
+  };
+
+  topics[category].push(nextTopic);
+  await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
+    wadaiTopics: topics,
+  });
+
+  await replyOrFollowUp(interaction, {
+    content: `${WADAI_CATEGORIES[category].heading} に話題を追加しました。\n${topics[category].length}. ${content}`,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleShowWadai(interaction) {
+  if (!interaction.inGuild()) {
+    await replyOrFollowUp(interaction, {
+      content: "このコマンドはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+  await replyInChunks(interaction, formatWadaiList(getWadaiTopics(settings)), {
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleDelWadai(interaction) {
+  if (!interaction.inGuild()) {
+    await replyOrFollowUp(interaction, {
+      content: "このコマンドはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+    await replyOrFollowUp(interaction, {
+      content: "話題を削除するには、サーバー管理権限が必要です。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const target = interaction.options.getString("target", true).trim();
+  const parsed = parseWadaiTarget(target);
+
+  if (!parsed) {
+    await replyOrFollowUp(interaction, {
+      content: "削除対象は `1-2` のように指定してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+  const topics = getWadaiTopics(settings);
+  const categoryTopics = topics[parsed.category];
+  const deleteIndex = parsed.index - 1;
+
+  if (!categoryTopics[deleteIndex]) {
+    await replyOrFollowUp(interaction, {
+      content: `${WADAI_CATEGORIES[parsed.category].heading} の ${parsed.index} 番目の話題はありません。`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const [deleted] = categoryTopics.splice(deleteIndex, 1);
+  const recentHistory = getWadaiRecentHistory(settings);
+  recentHistory[parsed.category] = recentHistory[parsed.category].filter(
+    (topicId) => topicId !== deleted.id,
+  );
+
+  await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
+    wadaiTopics: topics,
+    wadaiRecentHistory: recentHistory,
+  });
+
+  await replyOrFollowUp(interaction, {
+    content: `話題を削除しました。\n${WADAI_CATEGORIES[parsed.category].heading}: ${deleted.text}`,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function sendPostSplitWadaiChoices({
+  fallbackChannel,
+  guild,
+  participantRoleId,
+  settings,
+}) {
+  const currentSettings = (await getGuildSettings(guild.id)) ?? settings;
+  const sendChannel = await resolveWadaiSendChannel(
+    guild,
+    currentSettings,
+    fallbackChannel,
+  );
+
+  if (!sendChannel) {
+    return;
+  }
+
+  const topics = getWadaiTopics(currentSettings);
+  const recentHistory = getWadaiRecentHistory(currentSettings);
+  const selections = chooseWadaiTopics(topics, recentHistory);
+
+  await sendChannel.send({
+    content: formatPostSplitWadaiMessage(participantRoleId, selections),
+    allowedMentions: { roles: [participantRoleId] },
+  });
+
+  await saveGuildSettingsWithCurrent(guild.id, currentSettings, {
+    wadaiTopics: topics,
+    wadaiRecentHistory: recentHistory,
+  });
+}
+
+async function resolveWadaiSendChannel(guild, settings, fallbackChannel) {
+  const textTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+
+  if (settings?.wadaiChannelId) {
+    const configured = await guild.channels.fetch(settings.wadaiChannelId).catch(() => null);
+
+    if (
+      configured &&
+      textTypes.includes(configured.type) &&
+      typeof configured.send === "function"
+    ) {
+      return configured;
+    }
+  }
+
+  return fallbackChannel && typeof fallbackChannel.send === "function"
+    ? fallbackChannel
+    : null;
+}
+
+function chooseWadaiTopics(topics, recentHistory) {
+  const selections = {};
+
+  for (const category of Object.keys(WADAI_CATEGORIES)) {
+    const categoryTopics = topics[category] ?? [];
+    const validTopicIds = new Set(categoryTopics.map((topic) => topic.id));
+    const history = (recentHistory[category] ?? []).filter((topicId) =>
+      validTopicIds.has(topicId),
+    );
+
+    if (categoryTopics.length === 0) {
+      recentHistory[category] = history.slice(-WADAI_RECENT_HISTORY_LIMIT);
+      selections[category] = null;
+      continue;
+    }
+
+    const blockedTopicIds = new Set(history.slice(-WADAI_RECENT_HISTORY_LIMIT));
+    const candidates = categoryTopics.filter((topic) => !blockedTopicIds.has(topic.id));
+    const pool = candidates.length > 0 ? candidates : categoryTopics;
+    const selected = pool[Math.floor(Math.random() * pool.length)];
+
+    recentHistory[category] = [...history, selected.id].slice(
+      -WADAI_RECENT_HISTORY_LIMIT,
+    );
+    selections[category] = selected;
+  }
+
+  return selections;
+}
+
+function formatPostSplitWadaiMessage(participantRoleId, selections) {
+  return [
+    `<@&${participantRoleId}>`,
+    "おすすめの話題",
+    `①${selections[1]?.text ?? "未登録です。/addwadai で追加してください。"}`,
+    `②${selections[2]?.text ?? "未登録です。/addwadai で追加してください。"}`,
+    `③${selections[3]?.text ?? "未登録です。/addwadai で追加してください。"}`,
+    "話題に詰まったらここから選んでみてください！",
+  ].join("\n");
+}
+
+function getWadaiTopics(settings) {
+  const savedTopics =
+    settings?.wadaiTopics && typeof settings.wadaiTopics === "object"
+      ? settings.wadaiTopics
+      : {};
+  const topics = {};
+
+  for (const category of Object.keys(WADAI_CATEGORIES)) {
+    const hasSavedCategory = Object.prototype.hasOwnProperty.call(
+      savedTopics,
+      category,
+    );
+    const rawTopics =
+      hasSavedCategory && Array.isArray(savedTopics[category])
+        ? savedTopics[category]
+        : getDefaultWadaiTopicsForCategory(category);
+
+    topics[category] = rawTopics
+      .map((topic, index) => normalizeWadaiTopic(topic, category, index))
+      .filter(Boolean);
+  }
+
+  return topics;
+}
+
+function getDefaultWadaiTopicsForCategory(category) {
+  return WADAI_CATEGORIES[category].defaults.map((text, index) => ({
+    id: `default-${category}-${index + 1}`,
+    text,
+  }));
+}
+
+function normalizeWadaiTopic(topic, category, index) {
+  const text =
+    typeof topic === "string"
+      ? topic
+      : typeof topic?.text === "string"
+        ? topic.text
+        : "";
+  const trimmedText = text.trim();
+
+  if (!trimmedText) {
+    return null;
+  }
+
+  const id =
+    typeof topic?.id === "string" && topic.id.trim()
+      ? topic.id.trim()
+      : `topic-${category}-${index + 1}-${trimmedText}`;
+
+  return {
+    id,
+    text: trimmedText,
+  };
+}
+
+function getWadaiRecentHistory(settings) {
+  const savedHistory =
+    settings?.wadaiRecentHistory && typeof settings.wadaiRecentHistory === "object"
+      ? settings.wadaiRecentHistory
+      : {};
+  const history = {};
+
+  for (const category of Object.keys(WADAI_CATEGORIES)) {
+    history[category] = Array.isArray(savedHistory[category])
+      ? savedHistory[category].filter((topicId) => typeof topicId === "string")
+      : [];
+  }
+
+  return history;
+}
+
+function formatWadaiList(topics) {
+  const lines = [];
+
+  for (const category of Object.keys(WADAI_CATEGORIES)) {
+    lines.push(WADAI_CATEGORIES[category].heading);
+
+    if ((topics[category] ?? []).length === 0) {
+      lines.push("（未登録）");
+    } else {
+      topics[category].forEach((topic, index) => {
+        lines.push(`${index + 1}. ${topic.text}`);
+      });
+    }
+
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
+function parseWadaiTarget(target) {
+  const normalized = normalizeWadaiTarget(target);
+  const match = /^([1-3])-(\d+)$/.exec(normalized);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    category: match[1],
+    index: Number(match[2]),
+  };
+}
+
+function normalizeWadaiTarget(target) {
+  return target
+    .replace(/[０-９]/g, (char) =>
+      String.fromCharCode(char.charCodeAt(0) - 0xfee0),
+    )
+    .replace(/[－ー―]/g, "-")
+    .replace(/\s+/g, "");
+}
+
+function createWadaiTopicId(category) {
+  return `custom-${category}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+async function saveGuildSettingsWithCurrent(guildId, currentSettings, patch) {
+  const base =
+    currentSettings && typeof currentSettings === "object" ? currentSettings : {};
+
+  return saveGuildSettings(guildId, {
+    ...base,
+    ...patch,
   });
 }
 
@@ -1378,6 +1785,17 @@ async function handleSplitVoice(interaction) {
     await sendChunked(operationChannel, `転送結果\n${transferResult.lines.join("\n")}`, {
       allowedMentions: { parse: [] },
     });
+
+    try {
+      await sendPostSplitWadaiChoices({
+        fallbackChannel: operationChannel,
+        guild: interaction.guild,
+        participantRoleId: config.tempRole.id,
+        settings,
+      });
+    } catch (error) {
+      console.error(`Failed to send post-split wadai choices: ${error.message}`, error);
+    }
 
     if (config.waitingVcCategoryId) {
 
@@ -2493,6 +2911,9 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       `リマインダー送信先: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "ボイスチャンネルに付随するテキストチャンネルを自動参照"}`,
       `話題送信先: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "リマインダー送信先と同じ"}`,
+      "",
+      "現在のおすすめ話題設定:",
+      `話題3択送信先: ${settings.wadaiChannelId ? `<#${settings.wadaiChannelId}>` : "/splitvcを実行したチャンネル"}`,
     ].join("\n");
   }
 
