@@ -61,15 +61,21 @@ function getEnvironmentSettings(guildId) {
   const waitingVcCategoryId =
     process.env.PB_WAITING_VC_CATEGORY_ID ?? process.env.PB_WAITING_CHANNEL_ID;
   const waitingVcName = process.env.PB_WAITING_VC_NAME;
+  const bosyuChannelId = process.env.PB_BOSYU_CHANNEL_ID;
+  const bosyuMentionRoleId = process.env.PB_BOSYU_MENTION_ROLE_ID;
+  const voiceParticipantRoleId = process.env.PB_VOICE_PARTICIPANT_ROLE_ID;
   const voiceReminderChannelId = process.env.PB_VOICE_REMINDER_CHANNEL_ID;
   const voiceTopicChannelId = process.env.PB_VOICE_TOPIC_CHANNEL_ID;
   const voiceReminderParentChannelId = process.env.PB_VOICE_REMINDER_PARENT_CHANNEL_ID;
   const voiceReminderChildCategoryId = process.env.PB_VOICE_REMINDER_CHILD_CATEGORY_ID;
   const voiceReminderEnabled = parseOptionalBoolean(process.env.PB_VOICE_REMINDER_ENABLED);
   const wadaiChannelId = process.env.PB_WADAI_CHANNEL_ID;
+  const postSplitWadaiChannelId = process.env.PB_POST_SPLIT_WADAI_CHANNEL_ID;
+  const splitStartChannelId = process.env.PB_SPLIT_START_CHANNEL_ID;
   const logChannelId = process.env.PB_LOG_CHANNEL_ID;
   const formChannelId = process.env.PB_FORM_CHANNEL_ID;
   const formSendChannelId = process.env.PB_FORM_SEND_CHANNEL_ID;
+  const finishMessage = process.env.PB_FINISH_MESSAGE;
   const transferWaitSeconds = process.env.PB_TRANSFER_WAIT_SECONDS;
   const noticeWaitMinutes = process.env.PB_NOTICE_WAIT_MINUTES;
   const roleRemoveWaitMinutes = process.env.PB_ROLE_REMOVE_WAIT_MINUTES;
@@ -80,15 +86,21 @@ function getEnvironmentSettings(guildId) {
     !childCategoryId &&
     !waitingVcCategoryId &&
     !waitingVcName &&
+    !bosyuChannelId &&
+    !bosyuMentionRoleId &&
+    !voiceParticipantRoleId &&
     !voiceReminderChannelId &&
     !voiceTopicChannelId &&
     !voiceReminderParentChannelId &&
     !voiceReminderChildCategoryId &&
     voiceReminderEnabled === undefined &&
     !wadaiChannelId &&
+    !postSplitWadaiChannelId &&
+    !splitStartChannelId &&
     !logChannelId &&
     !formChannelId &&
     !formSendChannelId &&
+    !finishMessage &&
     !transferWaitSeconds &&
     !noticeWaitMinutes &&
     !roleRemoveWaitMinutes
@@ -102,15 +114,21 @@ function getEnvironmentSettings(guildId) {
     childCategoryId,
     waitingVcCategoryId,
     waitingVcName,
+    bosyuChannelId,
+    bosyuMentionRoleId,
+    voiceParticipantRoleId,
     voiceReminderChannelId,
     voiceTopicChannelId,
     voiceReminderParentChannelId,
     voiceReminderChildCategoryId,
     voiceReminderEnabled,
     wadaiChannelId,
+    postSplitWadaiChannelId,
+    splitStartChannelId,
     logChannelId,
     formChannelId,
     formSendChannelId,
+    finishMessage,
     transferWaitSeconds: parseOptionalInteger(transferWaitSeconds),
     noticeWaitMinutes: parseOptionalInteger(noticeWaitMinutes),
     roleRemoveWaitMinutes: parseOptionalInteger(roleRemoveWaitMinutes),

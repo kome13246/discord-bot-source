@@ -297,9 +297,12 @@ async function handleSetting(interaction) {
   const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
   const voiceReminderChildCategory = interaction.options.getChannel("voice_reminder_child_category", false);
   const wadaiChannel = interaction.options.getChannel("wadaich", false);
+  const postSplitWadaiChannel = interaction.options.getChannel("post_split_wadai_channel", false);
+  const splitStartChannel = interaction.options.getChannel("split_start_channel", false);
   const logChannel = interaction.options.getChannel("log_channel", false);
   const formChannel = interaction.options.getChannel("form_channel", false);
   const formSendChannel = interaction.options.getChannel("form_send_channel", false);
+  const finishMessage = interaction.options.getString("finish_message", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
     false,
@@ -366,6 +369,14 @@ async function handleSetting(interaction) {
     patch.wadaiChannelId = wadaiChannel.id;
   }
 
+  if (postSplitWadaiChannel) {
+    patch.postSplitWadaiChannelId = postSplitWadaiChannel.id;
+  }
+
+  if (splitStartChannel) {
+    patch.splitStartChannelId = splitStartChannel.id;
+  }
+
   if (logChannel) {
     patch.logChannelId = logChannel.id;
   }
@@ -376,6 +387,10 @@ async function handleSetting(interaction) {
 
   if (formSendChannel) {
     patch.formSendChannelId = formSendChannel.id;
+  }
+
+  if (finishMessage?.trim()) {
+    patch.finishMessage = finishMessage.trim();
   }
 
   if (voiceReminderEnabled !== null) {
@@ -546,14 +561,42 @@ async function sendPostSplitWadaiChoices({
   const currentSettings = (await getGuildSettings(guild.id)) ?? settings;
   const selections = getStoredDailyWadaiSelections(currentSettings);
 
-  if (!selections || !fallbackChannel || typeof fallbackChannel.send !== "function") {
+  if (!selections) {
     return;
   }
 
-  await fallbackChannel.send({
+  const configuredChannel = currentSettings?.postSplitWadaiChannelId
+    ? await resolveConfiguredTextChannel(guild, currentSettings.postSplitWadaiChannelId)
+    : null;
+  const sendChannel =
+    configuredChannel ??
+    (fallbackChannel && typeof fallbackChannel.send === "function"
+      ? fallbackChannel
+      : null);
+
+  if (!sendChannel) {
+    return;
+  }
+
+  await sendChannel.send({
     content: formatPostSplitWadaiMessage(participantRoleId, selections),
     allowedMentions: { roles: [participantRoleId] },
   });
+}
+
+async function sendSplitStartAnnouncement({ guild, settings, waitingChannel }) {
+  const sendChannel = settings?.splitStartChannelId
+    ? await resolveConfiguredTextChannel(guild, settings.splitStartChannelId)
+    : null;
+
+  if (!sendChannel) {
+    return null;
+  }
+
+  return sendChannel.send({
+    content: formatSplitStartAnnouncement(waitingChannel),
+    allowedMentions: { parse: [] },
+  }).catch(() => null);
 }
 
 async function resolveWadaiSendChannel(guild, settings, fallbackChannel) {
@@ -862,6 +905,31 @@ function formatPostSplitWadaiMessage(participantRoleId, selections) {
   ].join("\n");
 }
 
+function formatSplitStartAnnouncement(waitingChannel) {
+  return [
+    "集合開始から5分経ったのでスタートします",
+    `スタート後も10分までなら途中参加を受け付けているのでぜひ${waitingChannel}からご参加ください！`,
+  ].join("\n");
+}
+
+function formatSplitStartClosedAnnouncement() {
+  return [
+    "集合開始から５分経ったのでスタートします",
+    "スタートから10分経過したので途中参加は締め切られました",
+  ].join("\n");
+}
+
+async function editSplitStartAnnouncementClosed(message) {
+  if (!message) {
+    return;
+  }
+
+  await editSafely(message, {
+    content: formatSplitStartClosedAnnouncement(),
+    allowedMentions: { parse: [] },
+  });
+}
+
 function getWadaiTopics(settings) {
   const savedTopics =
     settings?.wadaiTopics && typeof settings.wadaiTopics === "object"
@@ -1032,17 +1100,13 @@ async function handleSetupForms(interaction) {
     return;
   }
 
-  await formChannel.send({
-    content: [
-      "日替わり話題にちょうどいい話題があればぜひ！",
-      "",
-      "提案および要望があればぜひお聞かせください！",
-      "",
-      "対人トラブルや、サーバーについての苦情があればこちらへ",
-    ].join("\n"),
-    components: createFeedbackFormRows(),
-    allowedMentions: { parse: [] },
-  });
+  for (const formMessage of createFeedbackFormMessages()) {
+    await formChannel.send({
+      content: formMessage.content,
+      components: [createFeedbackFormRow(formMessage.type)],
+      allowedMentions: { parse: [] },
+    });
+  }
 
   await replyOrFollowUp(interaction, {
     content: `${formChannel} にフォームを設置しました。`,
@@ -1142,27 +1206,45 @@ async function handleFeedbackFormModal(interaction) {
   });
 }
 
-function createFeedbackFormRows() {
+function createFeedbackFormMessages() {
   return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("feedback_form_button:topic")
-        .setLabel("話題提供フォーム")
-        .setStyle(ButtonStyle.Primary),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("feedback_form_button:suggestion")
-        .setLabel("提案・要望フォーム")
-        .setStyle(ButtonStyle.Success),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("feedback_form_button:complaint")
-        .setLabel("相談・苦情フォーム")
-        .setStyle(ButtonStyle.Secondary),
-    ),
+    {
+      type: "topic",
+      content: "日替わり話題にちょうどいい話題があればぜひ！",
+    },
+    {
+      type: "suggestion",
+      content: "提案および要望があればぜひお聞かせください！",
+    },
+    {
+      type: "complaint",
+      content: "対人トラブルや、サーバーについての苦情があればこちらへ",
+    },
   ];
+}
+
+function createFeedbackFormRow(type) {
+  const buttonConfig = {
+    topic: {
+      label: "話題提供フォーム",
+      style: ButtonStyle.Primary,
+    },
+    suggestion: {
+      label: "提案・要望フォーム",
+      style: ButtonStyle.Success,
+    },
+    complaint: {
+      label: "相談・苦情フォーム",
+      style: ButtonStyle.Secondary,
+    },
+  }[type];
+
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`feedback_form_button:${type}`)
+      .setLabel(buttonConfig.label)
+      .setStyle(buttonConfig.style),
+  );
 }
 
 async function handleDisboardBumpMessage(message) {
@@ -2042,6 +2124,15 @@ async function handleTopicFormModal(interaction) {
   }
 
   const topicText = interaction.fields.getTextInputValue("voice_topic_input").trim();
+  const statusText = formatVoiceTopicStatus(topicText);
+
+  if (!statusText) {
+    await replyOrFollowUp(interaction, {
+      content: "話題を入力してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
   // Require the submitter to be in a VC. If not, reject the submission.
   const posterVoiceChannel = interaction.member?.voice?.channel;
@@ -2055,31 +2146,24 @@ async function handleTopicFormModal(interaction) {
 
   const voiceChannel = posterVoiceChannel;
 
-  // Forward the topic text to the configured topic forward channel, or fall back to the reminder channel.
   try {
-    const settings = await getGuildSettings(topicForm.guildId);
-    const topicChannel = settings?.voiceTopicChannelId
-      ? await client.channels.fetch(settings.voiceTopicChannelId).catch(() => null)
-      : null;
-    const sendChannel =
-      topicChannel && typeof topicChannel.send === "function"
-        ? topicChannel
-        : await client.channels
-            .fetch(topicForm.reminderChannelId)
-            .catch(() => null);
-
-    if (sendChannel && typeof sendChannel.send === "function") {
-      const channelMention = voiceChannel?.id ? `<#${voiceChannel.id}>` : "(不明なVC)";
-      await sendChannel.send({
-        content: `いまのわだい：${channelMention}\n${topicText}`,
-      }).catch(() => null);
-    }
-  } catch (err) {
-    console.error(`Failed to forward topic to channel: ${err?.message ?? err}`);
+    await setVoiceChannelStatus(
+      voiceChannel,
+      statusText,
+      "Update VC status from reminder topic form",
+    );
+  } catch (error) {
+    console.error(`Failed to update voice channel status: ${error?.message ?? error}`);
+    await replyOrFollowUp(interaction, {
+      content:
+        "VCのチャンネルステータス更新に失敗しました。Botに Set Voice Channel Status 権限があるか確認してください。BotがそのVCに入っていない場合は Manage Channels 権限も必要です。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
   }
 
   await interaction.reply({
-    content: "話題を送信しました。",
+    content: "VCのチャンネルステータスを更新しました。",
     flags: MessageFlags.Ephemeral,
   });
 
@@ -2286,6 +2370,7 @@ async function handleSplitVoice(interaction) {
   const processState = { ended: false };
   let temporaryWaitingVc = null;
   let temporaryWaitingVcDeleteTimer = null;
+  let splitStartMessage = null;
 
   if (transferCanceled) {
     await operationChannel.send("転送をキャンセルしました。");
@@ -2299,8 +2384,11 @@ async function handleSplitVoice(interaction) {
     addMany(childChannelIds, transferResult.childChannelIds);
     addMany(participantMemberIds, transferResult.participantMemberIds);
 
-    await sendChunked(operationChannel, `転送結果\n${transferResult.lines.join("\n")}`, {
-      allowedMentions: { parse: [] },
+    await sendOperationalLog({
+      guild: interaction.guild,
+      settings,
+      fallbackChannel: operationChannel,
+      content: `転送結果\n${transferResult.lines.join("\n")}`,
     });
 
     try {
@@ -2344,6 +2432,12 @@ async function handleSplitVoice(interaction) {
         content: `待機用VC ${temporaryWaitingVc} を作成しました。10分後に自動削除されます。`,
       });
 
+      splitStartMessage = await sendSplitStartAnnouncement({
+        guild: interaction.guild,
+        settings,
+        waitingChannel: temporaryWaitingVc,
+      });
+
       temporaryWaitingVcDeleteTimer = setTimeout(async () => {
 
         try {
@@ -2356,6 +2450,7 @@ async function handleSplitVoice(interaction) {
           if (fetchedChannel) {
             await notifyWaitingVcClosure(operationChannel, fetchedChannel);
             await fetchedChannel.delete();
+            await editSplitStartAnnouncementClosed(splitStartMessage);
 
             await sendOperationalLog({
               guild: interaction.guild,
@@ -2396,13 +2491,14 @@ async function handleSplitVoice(interaction) {
       ownerId: interaction.user.id,
       roleId: config.tempRole.id,
       memberIds: participantMemberIds,
-      finishMessage: DEFAULT_FINISH_MESSAGE,
+      finishMessage: settings?.finishMessage || DEFAULT_FINISH_MESSAGE,
       noticeWaitMs,
       roleRemoveWaitMs,
       childChannelIds,
       state: processState,
       temporaryWaitingVc,
       temporaryWaitingVcDeleteTimer,
+      splitStartMessage,
       settings,
     }).catch((error) => {
       console.error(error);
@@ -3229,7 +3325,16 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           ? "PBの子VCがすべて削除されたため、終了通知を自動キャンセルしました。参加者ロールを解除します。"
           : "終了通知をキャンセルしました。参加者ロールを解除します。";
 
-      await options.channel.send(cancelText);
+      if (notificationCanceled === "auto") {
+        await sendOperationalLog({
+          guild: options.guild,
+          settings: options.settings,
+          fallbackChannel: options.channel,
+          content: cancelText,
+        });
+      } else {
+        await options.channel.send(cancelText);
+      }
       if (options.temporaryWaitingVc) {
 
         if (options.temporaryWaitingVcDeleteTimer) {
@@ -3243,7 +3348,13 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
         if (fetchedChannel) {
           await notifyWaitingVcClosure(options.channel, fetchedChannel);
-          await fetchedChannel.delete().catch(() => null);
+          const deleted = await fetchedChannel.delete()
+            .then(() => true)
+            .catch(() => false);
+
+          if (deleted) {
+            await editSplitStartAnnouncementClosed(options.splitStartMessage);
+          }
 
           await sendOperationalLog({
             guild: options.guild,
@@ -3454,16 +3565,19 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
       `終了通知前待機: ${getNonNegativeInteger(settings.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES)}分`,
       `通知後ロール解除待機: ${getNonNegativeInteger(settings.roleRemoveWaitMinutes, DEFAULT_ROLE_REMOVE_WAIT_MINUTES)}分`,
+      `終了通知文: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
       "",
       "現在のVCリマインダー設定:",
       `リマインダー対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
       `リマインダー子VCカテゴリ: ${settings.voiceReminderChildCategoryId ? `<#${settings.voiceReminderChildCategoryId}>` : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       `リマインダー送信先: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "ボイスチャンネルに付随するテキストチャンネルを自動参照"}`,
-      `話題送信先: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "リマインダー送信先と同じ"}`,
+      `旧話題転送先: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "未設定"}`,
       "",
       "現在のおすすめ話題設定:",
       `毎朝6時の話題送信先: ${settings.wadaiChannelId ? `<#${settings.wadaiChannelId}>` : "未設定"}`,
+      `/splitvc後の話題送信先: ${settings.postSplitWadaiChannelId ? `<#${settings.postSplitWadaiChannelId}>` : "実行チャンネル"}`,
+      `スタート案内送信先: ${settings.splitStartChannelId ? `<#${settings.splitStartChannelId}>` : "未設定"}`,
       `運用ログ送信先: ${settings.logChannelId ? `<#${settings.logChannelId}>` : "未設定"}`,
       "",
       "現在のフォーム設定:",
@@ -3586,10 +3700,24 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     await message.edit(payload).catch(() => null);
   }
 
-  // Note: Discord API does not provide a channel "status" field. We no longer attempt
-  // to synthesize a status by editing channel names; the bot only updates VC names when
-  // the purpose is provided. Topic submissions are forwarded to the configured reminder
-  // text channel instead of being stored as a channel status.
+  function formatVoiceTopicStatus(topicText) {
+    const normalizedTopicText = String(topicText ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    return normalizedTopicText ? `今の話題：${normalizedTopicText}` : "";
+  }
+
+  async function setVoiceChannelStatus(voiceChannel, status, reason) {
+    if (!voiceChannel?.isVoiceBased()) {
+      throw new Error("Target channel is not a voice channel.");
+    }
+
+    await client.rest.put(`/channels/${voiceChannel.id}/voice-status`, {
+      body: { status },
+      reason,
+    });
+  }
 
   async function deleteLater(message) {
     await sleep(1500);

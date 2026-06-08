@@ -99,7 +99,7 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("voice_topic_channel")
-          .setDescription("話題送信先テキストチャンネル")
+          .setDescription("旧設定。現在の話題フォームでは使用しません")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
@@ -121,6 +121,20 @@ export const settingCommand = new SlashCommandBuilder()
         option
           .setName("wadaich")
           .setDescription("毎朝6時のおすすめ話題を送るテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("post_split_wadai_channel")
+          .setDescription("/splitvc後のおすすめ話題を送るテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("split_start_channel")
+          .setDescription("/splitvc後のスタート・途中参加案内を送るテキストチャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
