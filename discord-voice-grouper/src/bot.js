@@ -51,7 +51,9 @@ const autoSplitSuggestionMessages = new Map();
 const VOICE_MONITOR_MIN_MEMBERS = 2;
 const AUTO_SPLIT_THRESHOLD = 6;
 const VOICE_REMINDER_INTERVAL_MS = 30 * 60 * 1000;
+const VOICE_MONITOR_STOP_DELAY_MS = 5 * 60 * 1000;
 const TOPIC_FORM_EXPIRE_MS = 30 * 60 * 1000;
+const DAILY_WADAI_POST_HOUR_JST = 6;
 const SUGGESTED_TOPICS = [
   "最近ハマっているゲームや漫画について",
   "最近見た映画やアニメの話",
@@ -100,6 +102,13 @@ const WADAI_CATEGORIES = {
     ],
   },
 };
+const FEEDBACK_FORM_TYPES = {
+  topic: "話題提供",
+  complaint: "相談・苦情",
+  suggestion: "提案・要望",
+};
+
+let dailyWadaiTimer = null;
 
 if (!DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is required.");
@@ -124,6 +133,7 @@ client.once(Events.ClientReady, (readyClient) => {
   void restoreBumpReminders().catch((error) => {
     console.error(error);
   });
+  scheduleNextDailyWadaiPost();
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -170,6 +180,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleSuggestTopicButton(interaction);
         return;
       }
+
+      if (interaction.customId.startsWith("feedback_form_button:")) {
+        await handleFeedbackFormButton(interaction);
+        return;
+      }
     }
 
     if (interaction.isModalSubmit()) {
@@ -180,6 +195,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (interaction.customId.startsWith("topic_form:")) {
         await handleTopicFormModal(interaction);
+        return;
+      }
+
+      if (interaction.customId.startsWith("feedback_form_modal:")) {
+        await handleFeedbackFormModal(interaction);
         return;
       }
 
@@ -212,6 +232,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === "delwadai") {
       await handleDelWadai(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "sendwadai") {
+      await handleSendWadai(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "setupforms") {
+      await handleSetupForms(interaction);
       return;
     }
 
@@ -267,6 +297,9 @@ async function handleSetting(interaction) {
   const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
   const voiceReminderChildCategory = interaction.options.getChannel("voice_reminder_child_category", false);
   const wadaiChannel = interaction.options.getChannel("wadaich", false);
+  const logChannel = interaction.options.getChannel("log_channel", false);
+  const formChannel = interaction.options.getChannel("form_channel", false);
+  const formSendChannel = interaction.options.getChannel("form_send_channel", false);
   const transferWaitSeconds = interaction.options.getInteger(
     "transfer_wait_seconds",
     false,
@@ -331,6 +364,18 @@ async function handleSetting(interaction) {
 
   if (wadaiChannel) {
     patch.wadaiChannelId = wadaiChannel.id;
+  }
+
+  if (logChannel) {
+    patch.logChannelId = logChannel.id;
+  }
+
+  if (formChannel) {
+    patch.formChannelId = formChannel.id;
+  }
+
+  if (formSendChannel) {
+    patch.formSendChannelId = formSendChannel.id;
   }
 
   if (voiceReminderEnabled !== null) {
@@ -499,28 +544,15 @@ async function sendPostSplitWadaiChoices({
   settings,
 }) {
   const currentSettings = (await getGuildSettings(guild.id)) ?? settings;
-  const sendChannel = await resolveWadaiSendChannel(
-    guild,
-    currentSettings,
-    fallbackChannel,
-  );
+  const selections = getStoredDailyWadaiSelections(currentSettings);
 
-  if (!sendChannel) {
+  if (!selections || !fallbackChannel || typeof fallbackChannel.send !== "function") {
     return;
   }
 
-  const topics = getWadaiTopics(currentSettings);
-  const recentHistory = getWadaiRecentHistory(currentSettings);
-  const selections = chooseWadaiTopics(topics, recentHistory);
-
-  await sendChannel.send({
+  await fallbackChannel.send({
     content: formatPostSplitWadaiMessage(participantRoleId, selections),
     allowedMentions: { roles: [participantRoleId] },
-  });
-
-  await saveGuildSettingsWithCurrent(guild.id, currentSettings, {
-    wadaiTopics: topics,
-    wadaiRecentHistory: recentHistory,
   });
 }
 
@@ -542,6 +574,251 @@ async function resolveWadaiSendChannel(guild, settings, fallbackChannel) {
   return fallbackChannel && typeof fallbackChannel.send === "function"
     ? fallbackChannel
     : null;
+}
+
+async function resolveConfiguredTextChannel(guild, channelId) {
+  if (!channelId) {
+    return null;
+  }
+
+  const textTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+  const channel = await guild.channels.fetch(channelId).catch(() => null);
+
+  return channel &&
+    textTypes.includes(channel.type) &&
+    typeof channel.send === "function"
+    ? channel
+    : null;
+}
+
+async function sendOperationalLog({
+  guild,
+  settings,
+  fallbackChannel,
+  content,
+  allowedMentions = { parse: [] },
+}) {
+  const logChannel = settings?.logChannelId
+    ? await resolveConfiguredTextChannel(guild, settings.logChannelId)
+    : null;
+  const channel =
+    logChannel ??
+    (fallbackChannel && typeof fallbackChannel.send === "function"
+      ? fallbackChannel
+      : null);
+
+  if (!channel) {
+    return null;
+  }
+
+  return channel.send({
+    content,
+    allowedMentions,
+  }).catch(() => null);
+}
+
+async function handleSendWadai(interaction) {
+  if (!interaction.inGuild()) {
+    await replyOrFollowUp(interaction, {
+      content: "このコマンドはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+    await replyOrFollowUp(interaction, {
+      content: "本日のお薦め話題を投稿するには、サーバー管理権限が必要です。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+  const result = await postDailyWadaiForGuild(interaction.guild, settings, {
+    force: true,
+  });
+
+  await replyOrFollowUp(interaction, {
+    content: result.sent
+      ? `本日のお薦め話題を ${result.channel} に投稿しました。`
+      : `本日のお薦め話題を投稿できませんでした。${result.reason}`,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+function scheduleNextDailyWadaiPost() {
+  if (dailyWadaiTimer) {
+    clearTimeout(dailyWadaiTimer);
+  }
+
+  const delayMs = getMsUntilNextJstHour(DAILY_WADAI_POST_HOUR_JST);
+  dailyWadaiTimer = setTimeout(() => {
+    void postDailyWadaiForAllGuilds().catch((error) => {
+      console.error(error);
+    }).finally(() => {
+      scheduleNextDailyWadaiPost();
+    });
+  }, delayMs);
+}
+
+async function postDailyWadaiForAllGuilds() {
+  for (const guild of client.guilds.cache.values()) {
+    const settings = await getGuildSettings(guild.id);
+
+    if (!settings?.wadaiChannelId) {
+      continue;
+    }
+
+    await postDailyWadaiForGuild(guild, settings, { force: false }).catch(
+      (error) => {
+        console.error(`Failed to post daily wadai for ${guild.id}: ${error.message}`, error);
+      },
+    );
+  }
+}
+
+async function postDailyWadaiForGuild(guild, settings, { force = false } = {}) {
+  if (!settings?.wadaiChannelId) {
+    return {
+      sent: false,
+      reason: "`/setting set wadaich:送信先チャンネル` を設定してください。",
+    };
+  }
+
+  const channel = await resolveWadaiSendChannel(guild, settings, null);
+
+  if (!channel) {
+    return {
+      sent: false,
+      reason: "話題送信先チャンネルを取得できません。",
+    };
+  }
+
+  const dateKey = getJstDateKey(new Date());
+
+  if (
+    !force &&
+    settings?.wadaiDaily?.dateKey === dateKey &&
+    settings.wadaiDaily.channelId === channel.id &&
+    settings.wadaiDaily.messageId
+  ) {
+    return { sent: false, reason: "本日分はすでに投稿済みです。" };
+  }
+
+  const topics = getWadaiTopics(settings);
+  const recentHistory = getWadaiRecentHistory(settings);
+  const selections = chooseWadaiTopics(topics, recentHistory);
+
+  await deletePreviousDailyWadaiMessage(guild, settings);
+
+  const message = await channel.send({
+    content: formatDailyWadaiMessage(selections),
+    allowedMentions: { parse: [] },
+  });
+
+  await saveGuildSettingsWithCurrent(guild.id, settings, {
+    wadaiTopics: topics,
+    wadaiRecentHistory: recentHistory,
+    wadaiDaily: {
+      dateKey,
+      channelId: channel.id,
+      messageId: message.id,
+      selections: serializeWadaiSelections(selections),
+      postedAt: new Date().toISOString(),
+    },
+  });
+
+  return { sent: true, channel, message };
+}
+
+async function deletePreviousDailyWadaiMessage(guild, settings) {
+  const previous = settings?.wadaiDaily;
+
+  if (!previous?.channelId || !previous?.messageId) {
+    return;
+  }
+
+  const channel = await guild.channels.fetch(previous.channelId).catch(() => null);
+
+  if (!channel || typeof channel.messages?.fetch !== "function") {
+    return;
+  }
+
+  const message = await channel.messages.fetch(previous.messageId).catch(() => null);
+  if (message) {
+    await message.delete().catch(() => null);
+  }
+}
+
+function formatDailyWadaiMessage(selections) {
+  return [
+    "本日のお薦め話題",
+    `①${selections[1]?.text ?? "未登録です。/addwadai で追加してください。"}`,
+    `②${selections[2]?.text ?? "未登録です。/addwadai で追加してください。"}`,
+    `③${selections[3]?.text ?? "未登録です。/addwadai で追加してください。"}`,
+    "",
+    "ぜひ使ってみてください！",
+  ].join("\n");
+}
+
+function serializeWadaiSelections(selections) {
+  const serialized = {};
+
+  for (const category of Object.keys(WADAI_CATEGORIES)) {
+    serialized[category] = selections[category]
+      ? {
+          id: selections[category].id,
+          text: selections[category].text,
+        }
+      : null;
+  }
+
+  return serialized;
+}
+
+function getStoredDailyWadaiSelections(settings) {
+  const selections = settings?.wadaiDaily?.selections;
+
+  if (!selections || typeof selections !== "object") {
+    return null;
+  }
+
+  const normalized = {};
+  let hasAnyTopic = false;
+
+  for (const category of Object.keys(WADAI_CATEGORIES)) {
+    const topic = normalizeWadaiTopic(selections[category], category, 0);
+    normalized[category] = topic;
+    hasAnyTopic = hasAnyTopic || Boolean(topic);
+  }
+
+  return hasAnyTopic ? normalized : null;
+}
+
+function getJstDateKey(date) {
+  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  const year = jstDate.getUTCFullYear();
+  const month = String(jstDate.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(jstDate.getUTCDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function getMsUntilNextJstHour(hour) {
+  const now = new Date();
+  const jstNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  const year = jstNow.getUTCFullYear();
+  const month = jstNow.getUTCMonth();
+  const day = jstNow.getUTCDate();
+  let targetUtcMs = Date.UTC(year, month, day, hour - 9, 0, 0, 0);
+
+  if (targetUtcMs <= now.getTime()) {
+    targetUtcMs = Date.UTC(year, month, day + 1, hour - 9, 0, 0, 0);
+  }
+
+  return Math.max(1000, targetUtcMs - now.getTime());
 }
 
 function chooseWadaiTopics(topics, recentHistory) {
@@ -714,6 +991,178 @@ async function saveGuildSettingsWithCurrent(guildId, currentSettings, patch) {
     ...base,
     ...patch,
   });
+}
+
+async function handleSetupForms(interaction) {
+  if (!interaction.inGuild()) {
+    await replyOrFollowUp(interaction, {
+      content: "このコマンドはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+    await replyOrFollowUp(interaction, {
+      content: "フォームを設置するには、サーバー管理権限が必要です。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+
+  if (!settings?.formChannelId || !settings?.formSendChannelId) {
+    await replyOrFollowUp(interaction, {
+      content: "`/setting set form_channel:設置先 form_send_channel:転送先` を設定してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const formChannel = await interaction.guild.channels
+    .fetch(settings.formChannelId)
+    .catch(() => null);
+
+  if (!formChannel || typeof formChannel.send !== "function") {
+    await replyOrFollowUp(interaction, {
+      content: "フォーム設置先チャンネルへ送信できません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await formChannel.send({
+    content: [
+      "日替わり話題にちょうどいい話題があればぜひ！",
+      "",
+      "提案および要望があればぜひお聞かせください！",
+      "",
+      "対人トラブルや、サーバーについての苦情があればこちらへ",
+    ].join("\n"),
+    components: createFeedbackFormRows(),
+    allowedMentions: { parse: [] },
+  });
+
+  await replyOrFollowUp(interaction, {
+    content: `${formChannel} にフォームを設置しました。`,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleFeedbackFormButton(interaction) {
+  const type = interaction.customId.slice("feedback_form_button:".length);
+  const label = FEEDBACK_FORM_TYPES[type];
+
+  if (!label) {
+    await interaction.reply({
+      content: "不明なフォームです。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`feedback_form_modal:${type}`)
+    .setTitle(`${label}フォーム`)
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("feedback_form_content")
+          .setLabel("内容")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(1500),
+      ),
+    );
+
+  await interaction.showModal(modal);
+}
+
+async function handleFeedbackFormModal(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({
+      content: "このフォームはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const type = interaction.customId.slice("feedback_form_modal:".length);
+  const label = FEEDBACK_FORM_TYPES[type];
+
+  if (!label) {
+    await interaction.reply({
+      content: "不明なフォームです。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+
+  if (!settings?.formSendChannelId) {
+    await interaction.reply({
+      content: "フォーム転送先が設定されていません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const sendChannel = await interaction.guild.channels
+    .fetch(settings.formSendChannelId)
+    .catch(() => null);
+
+  if (!sendChannel || typeof sendChannel.send !== "function") {
+    await interaction.reply({
+      content: "フォーム転送先チャンネルへ送信できません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const content = interaction.fields
+    .getTextInputValue("feedback_form_content")
+    .trim();
+  const senderName = interaction.member?.displayName ?? interaction.user.tag;
+
+  await sendChannel.send({
+    content: [
+      `送信者:${senderName}`,
+      `分類:${label}`,
+      `内容:${content}`,
+    ].join("\n"),
+    allowedMentions: { parse: [] },
+  });
+
+  await interaction.reply({
+    content: "フォームを送信しました。",
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+function createFeedbackFormRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("feedback_form_button:topic")
+        .setLabel("話題提供フォーム")
+        .setStyle(ButtonStyle.Primary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("feedback_form_button:suggestion")
+        .setLabel("提案・要望フォーム")
+        .setStyle(ButtonStyle.Success),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("feedback_form_button:complaint")
+        .setLabel("相談・苦情フォーム")
+        .setStyle(ButtonStyle.Secondary),
+    ),
+  ];
 }
 
 async function handleDisboardBumpMessage(message) {
@@ -1078,6 +1527,8 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
         lastReminderMessageId: null,
         active: true,
         topicForms: new Map(),
+        stopTimer: null,
+        wadaiChannelId: settings?.wadaiChannelId ?? null,
       };
 
       voiceMonitorSessions.set(sessionKey, session);
@@ -1085,19 +1536,63 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
       return;
     }
 
+    if (existingSession.stopTimer) {
+      clearTimeout(existingSession.stopTimer);
+      existingSession.stopTimer = null;
+    }
+
     await ensureSessionMembersHaveRole(existingSession, voiceChannel, members);
     return;
   }
 
-  if (existingSession) {
-    await stopVoiceMonitorSession(existingSession, guild, voiceChannel, settings);
+  if (existingSession && !existingSession.stopTimer) {
+    existingSession.stopTimer = setTimeout(() => {
+      void stopVoiceMonitorSessionIfStillUnderfilled(
+        existingSession,
+        guild,
+        channelId,
+        settings,
+      ).catch((error) => {
+        console.error(error);
+      });
+    }, VOICE_MONITOR_STOP_DELAY_MS);
   }
 }
 
+async function stopVoiceMonitorSessionIfStillUnderfilled(
+  session,
+  guild,
+  channelId,
+  settings,
+) {
+  const sessionKey = getVoiceMonitorSessionKey(guild.id, channelId);
+
+  if (voiceMonitorSessions.get(sessionKey) !== session) {
+    return;
+  }
+
+  const voiceChannel = await guild.channels.fetch(channelId).catch(() => null);
+
+  if (
+    voiceChannel?.isVoiceBased() &&
+    getNonBotVoiceMembers(voiceChannel).length >= VOICE_MONITOR_MIN_MEMBERS
+  ) {
+    session.stopTimer = null;
+    return;
+  }
+
+  await stopVoiceMonitorSession(session, guild, voiceChannel, settings);
+}
+
 async function startVoiceMonitorSession(session, voiceChannel, members, reminderChannel) {
+  const wadaiChannelText = session.wadaiChannelId
+    ? `<#${session.wadaiChannelId}>`
+    : "定時話題送信先チャンネル";
+
   await reminderChannel.send({
     content:
-      "お集まりいただきありがとうございます！\n「話題を出して」とチャットに送るとbotが話題を出してくれるので話題に詰まったら使ってみてください！",
+      `お集まりいただきありがとうございます！\n${wadaiChannelText}に日替わりの話題があるのでぜひ使ってみてください！`,
+    allowedMentions: { parse: [] },
   });
 
   await ensureSessionMembersHaveRole(session, voiceChannel, members);
@@ -1147,6 +1642,18 @@ function scheduleNextVoiceReminder(session) {
 }
 
 async function sendVoiceMonitorReminder(session) {
+  const guild = client.guilds.cache.get(session.guildId);
+  const voiceChannel = guild
+    ? await guild.channels.fetch(session.voiceChannelId).catch(() => null)
+    : null;
+
+  if (
+    !voiceChannel?.isVoiceBased() ||
+    getNonBotVoiceMembers(voiceChannel).length < VOICE_MONITOR_MIN_MEMBERS
+  ) {
+    return;
+  }
+
   const reminderChannel = await client.channels
     .fetch(session.reminderChannelId)
     .catch(() => null);
@@ -1246,6 +1753,11 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
     clearTimeout(session.reminderTimer);
   }
 
+  if (session.stopTimer) {
+    clearTimeout(session.stopTimer);
+    session.stopTimer = null;
+  }
+
   for (const [formId, topicForm] of session.topicForms.entries()) {
     if (topicForm.disableTimer) {
       clearTimeout(topicForm.disableTimer);
@@ -1260,7 +1772,9 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
   const memberIds = new Set(
     [
       ...session.memberIds,
-      ...getNonBotVoiceMembers(voiceChannel).map((member) => member.id),
+      ...(voiceChannel?.isVoiceBased()
+        ? getNonBotVoiceMembers(voiceChannel).map((member) => member.id)
+        : []),
     ],
   );
 
@@ -1748,7 +2262,10 @@ async function handleSplitVoice(interaction) {
     return;
   }
 
-  await operationChannel.send({
+  await sendOperationalLog({
+    guild: interaction.guild,
+    settings,
+    fallbackChannel: operationChannel,
     content: `${config.tempRole} は、各メンバーをVCへ転送したタイミングで付与します。`,
     allowedMentions: { roles: [] },
   });
@@ -1820,9 +2337,12 @@ async function handleSplitVoice(interaction) {
         ],
       });
 
-      await operationChannel.send(
-        `待機用VC ${temporaryWaitingVc} を作成しました。10分後に自動削除されます。`,
-      );
+      await sendOperationalLog({
+        guild: interaction.guild,
+        settings,
+        fallbackChannel: operationChannel,
+        content: `待機用VC ${temporaryWaitingVc} を作成しました。10分後に自動削除されます。`,
+      });
 
       temporaryWaitingVcDeleteTimer = setTimeout(async () => {
 
@@ -1837,9 +2357,12 @@ async function handleSplitVoice(interaction) {
             await notifyWaitingVcClosure(operationChannel, fetchedChannel);
             await fetchedChannel.delete();
 
-            await operationChannel.send(
-              "待機用VCを自動削除しました。",
-            );
+            await sendOperationalLog({
+              guild: interaction.guild,
+              settings,
+              fallbackChannel: operationChannel,
+              content: "待機用VCを自動削除しました。",
+            });
           }
 
         } catch (error) {
@@ -1860,6 +2383,7 @@ async function handleSplitVoice(interaction) {
         childChannelIds,
         participantMemberIds,
         state: processState,
+        settings,
       }).catch((error) => {
         console.error(error);
       });
@@ -1876,7 +2400,10 @@ async function handleSplitVoice(interaction) {
       noticeWaitMs,
       roleRemoveWaitMs,
       childChannelIds,
-      state: processState, temporaryWaitingVc, temporaryWaitingVcDeleteTimer,
+      state: processState,
+      temporaryWaitingVc,
+      temporaryWaitingVcDeleteTimer,
+      settings,
     }).catch((error) => {
       console.error(error);
     });
@@ -2483,9 +3010,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   async function runWaitingRoomMonitor(options) {
     const endsAt = Date.now() + WAITING_ROOM_MONITOR_MS;
 
-    await options.channel.send(
-      `${options.waitingChannel} の途中参加監視を10分間開始します。`,
-    );
+    await sendOperationalLog({
+      guild: options.guild,
+      settings: options.settings,
+      fallbackChannel: options.channel,
+      content: `${options.waitingChannel} の途中参加監視を10分間開始します。`,
+    });
 
     while (Date.now() < endsAt && !options.state.ended) {
       await processWaitingRoom(options);
@@ -2493,7 +3023,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     }
 
     if (!options.state.ended) {
-      await options.channel.send("途中参加監視を終了しました。");
+      await sendOperationalLog({
+        guild: options.guild,
+        settings: options.settings,
+        fallbackChannel: options.channel,
+        content: "途中参加監視を終了しました。",
+      });
     }
   }
 
@@ -2521,9 +3056,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         ? ` 参加者ロール付与失敗: ${roleFailure}`
         : "";
 
-      await options.channel.send(
-        `途中参加: ${member.displayName} を ${underfilledChildChannel.name} へ転送しました。${roleFailureText}`,
-      );
+      await sendOperationalLog({
+        guild: options.guild,
+        settings: options.settings,
+        fallbackChannel: options.channel,
+        content: `途中参加: ${member.displayName} を ${underfilledChildChannel.name} へ転送しました。${roleFailureText}`,
+      });
       return;
     }
 
@@ -2540,8 +3078,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         options.childChannelIds.add(result.childChannelId);
       }
 
-      await sendChunked(options.channel, `途中参加の新規グループ\n${result.lines.join("\n")}`, {
-        allowedMentions: { parse: [] },
+      await sendOperationalLog({
+        guild: options.guild,
+        settings: options.settings,
+        fallbackChannel: options.channel,
+        content: `途中参加の新規グループ\n${result.lines.join("\n")}`,
       });
     }
   }
@@ -2704,9 +3245,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           await notifyWaitingVcClosure(options.channel, fetchedChannel);
           await fetchedChannel.delete().catch(() => null);
 
-          await options.channel.send(
-            "待機用VCを削除しました。",
-          );
+          await sendOperationalLog({
+            guild: options.guild,
+            settings: options.settings,
+            fallbackChannel: options.channel,
+            content: "待機用VCを削除しました。",
+          });
         }
       }
       const cleanupResult = await removeRoleFromMembers(
@@ -2715,9 +3259,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         options.memberIds,
       );
 
-      await options.channel.send(
-        `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
-      );
+      await sendOperationalLog({
+        guild: options.guild,
+        settings: options.settings,
+        fallbackChannel: options.channel,
+        content: `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
+      });
       options.state.ended = true;
       return;
     }
@@ -2735,9 +3282,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       options.memberIds,
     );
 
-    await options.channel.send(
-      `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
-    );
+    await sendOperationalLog({
+      guild: options.guild,
+      settings: options.settings,
+      fallbackChannel: options.channel,
+      content: `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
+    });
     options.state.ended = true;
   }
 
@@ -2913,7 +3463,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `話題送信先: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "リマインダー送信先と同じ"}`,
       "",
       "現在のおすすめ話題設定:",
-      `話題3択送信先: ${settings.wadaiChannelId ? `<#${settings.wadaiChannelId}>` : "/splitvcを実行したチャンネル"}`,
+      `毎朝6時の話題送信先: ${settings.wadaiChannelId ? `<#${settings.wadaiChannelId}>` : "未設定"}`,
+      `運用ログ送信先: ${settings.logChannelId ? `<#${settings.logChannelId}>` : "未設定"}`,
+      "",
+      "現在のフォーム設定:",
+      `フォーム設置先: ${settings.formChannelId ? `<#${settings.formChannelId}>` : "未設定"}`,
+      `フォーム転送先: ${settings.formSendChannelId ? `<#${settings.formSendChannelId}>` : "未設定"}`,
     ].join("\n");
   }
 

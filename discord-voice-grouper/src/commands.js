@@ -120,7 +120,28 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("wadaich")
-          .setDescription("/splitvc後のおすすめ話題を送るテキストチャンネル")
+          .setDescription("毎朝6時のおすすめ話題を送るテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("log_channel")
+          .setDescription("運用ログをまとめるテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("form_channel")
+          .setDescription("フォームボタンを設置するテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("form_send_channel")
+          .setDescription("フォーム送信内容の転送先テキストチャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
@@ -222,6 +243,14 @@ export const delWadaiCommand = new SlashCommandBuilder()
       .setMaxLength(20),
   );
 
+export const sendWadaiCommand = new SlashCommandBuilder()
+  .setName("sendwadai")
+  .setDescription("本日のお薦め話題を今すぐ投稿します");
+
+export const setupFormsCommand = new SlashCommandBuilder()
+  .setName("setupforms")
+  .setDescription("話題提供・提案要望・相談苦情フォームのボタンを設置します");
+
 export const commands = [
   splitVoiceCommand.toJSON(),
   settingCommand.toJSON(),
@@ -229,4 +258,6 @@ export const commands = [
   addWadaiCommand.toJSON(),
   showWadaiCommand.toJSON(),
   delWadaiCommand.toJSON(),
+  sendWadaiCommand.toJSON(),
+  setupFormsCommand.toJSON(),
 ];
