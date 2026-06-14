@@ -15,7 +15,13 @@ export const splitVoiceCommand = new SlashCommandBuilder()
       .setName("shuffle")
       .setDescription("ランダムに並べ替えるか")
       .setRequired(false),
-      )
+  )
+  .addBooleanOption((option) =>
+    option
+      .setName("include_bots")
+      .setDescription("Botも対象に含めるか")
+      .setRequired(false),
+  )
   .addBooleanOption((option) =>
     option
       .setName("private")
@@ -25,11 +31,11 @@ export const splitVoiceCommand = new SlashCommandBuilder()
 
 export const settingCommand = new SlashCommandBuilder()
   .setName("setting")
-  .setDescription("PB連携に使うロール・チャンネル・通知文を設定します")
+  .setDescription("Botの設定を機能ごとに保存します")
   .addSubcommand((subcommand) =>
     subcommand
-      .setName("set")
-      .setDescription("PB連携設定を保存します")
+      .setName("splitvc")
+      .setDescription("/splitvc とPB連携設定を保存します")
       .addRoleOption((option) =>
         option
           .setName("participant_role")
@@ -46,16 +52,16 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("child_category")
-          .setDescription("PBが子VCを作るカテゴリ。未設定なら自動検出します")
+          .setDescription("PBが子VCを作るカテゴリ")
           .addChannelTypes(ChannelType.GuildCategory)
           .setRequired(false),
       )
       .addChannelOption((option) =>
-       option
-        .setName("waiting_vc_category")
-        .setDescription("待機VC作成先カテゴリ")
-        .addChannelTypes(ChannelType.GuildCategory)
-        .setRequired(false)
+        option
+          .setName("waiting_vc_category")
+          .setDescription("途中参加用の待機VCを作成するカテゴリ")
+          .addChannelTypes(ChannelType.GuildCategory)
+          .setRequired(false),
       )
       .addStringOption((option) =>
         option
@@ -66,96 +72,15 @@ export const settingCommand = new SlashCommandBuilder()
       )
       .addChannelOption((option) =>
         option
-          .setName("bosyu_channel")
-          .setDescription("/bosyuを使用できるチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addRoleOption((option) =>
-        option
-          .setName("bosyu_mention_role")
-          .setDescription("/bosyuでメンションするロール")
-          .setRequired(false),
-      )
-      .addRoleOption((option) =>
-        option
-          .setName("voice_participant_role")
-          .setDescription("VC参加者に付与するロール")
-          .setRequired(false),
-      )
-      .addBooleanOption((option) =>
-        option
-          .setName("voice_reminder_enabled")
-          .setDescription("VCリマインダー機能を有効または無効にする")
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_reminder_channel")
-          .setDescription("リマインダー送信先テキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_topic_channel")
-          .setDescription("旧設定。現在の話題フォームでは使用しません")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_reminder_parent_channel")
-          .setDescription("リマインダー対象のPB親ボイスチャンネル")
-          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_reminder_child_category")
-          .setDescription("リマインダー対象のPB子VCカテゴリ。未設定ならPB子VCカテゴリを自動検出します")
-          .addChannelTypes(ChannelType.GuildCategory)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("wadaich")
-          .setDescription("毎朝6時のおすすめ話題を送るテキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
           .setName("post_split_wadai_channel")
-          .setDescription("/splitvc後のおすすめ話題を送るテキストチャンネル")
+          .setDescription("/splitvc後のおすすめ話題再掲先")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
       .addChannelOption((option) =>
         option
           .setName("split_start_channel")
-          .setDescription("/splitvc後のスタート・途中参加案内を送るテキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("log_channel")
-          .setDescription("運用ログをまとめるテキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("form_channel")
-          .setDescription("フォームボタンを設置するテキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("form_send_channel")
-          .setDescription("フォーム送信内容の転送先テキストチャンネル")
+          .setDescription("/splitvc後のスタート・途中参加案内送信先")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
@@ -189,7 +114,144 @@ export const settingCommand = new SlashCommandBuilder()
       ),
   )
   .addSubcommand((subcommand) =>
-    subcommand.setName("show").setDescription("現在のPB連携設定を表示します"),
+    subcommand
+      .setName("bosyu")
+      .setDescription("/b の募集設定を保存します")
+      .addChannelOption((option) =>
+        option
+          .setName("bosyu_channel")
+          .setDescription("/bを使用できるテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addRoleOption((option) =>
+        option
+          .setName("bosyu_mention_role")
+          .setDescription("/bでメンションするロール")
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("reminder")
+      .setDescription("VCリマインダー設定を保存します")
+      .addRoleOption((option) =>
+        option
+          .setName("voice_participant_role")
+          .setDescription("VC参加者に付与するロール")
+          .setRequired(false),
+      )
+      .addBooleanOption((option) =>
+        option
+          .setName("voice_reminder_enabled")
+          .setDescription("VCリマインダーを有効または無効にする")
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_reminder_channel")
+          .setDescription("VCリマインダー送信先テキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_topic_channel")
+          .setDescription("旧設定との互換用。現在は使用しません")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_reminder_parent_channel")
+          .setDescription("VCリマインダー対象のPB親VC")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("voice_reminder_child_category")
+          .setDescription("VCリマインダー対象のPB子VCカテゴリ")
+          .addChannelTypes(ChannelType.GuildCategory)
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("wadai")
+      .setDescription("おすすめ話題設定を保存します")
+      .addChannelOption((option) =>
+        option
+          .setName("wadaich")
+          .setDescription("毎朝6時のおすすめ話題を送るテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("logs")
+      .setDescription("運用ログ設定を保存します")
+      .addChannelOption((option) =>
+        option
+          .setName("log_channel")
+          .setDescription("運用ログをまとめるテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("forms")
+      .setDescription("フォーム設定を保存します")
+      .addChannelOption((option) =>
+        option
+          .setName("form_channel")
+          .setDescription("フォームボタンを設置するテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("form_send_channel")
+          .setDescription("フォーム入力内容の転送先テキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("callwait")
+      .setDescription("通話待機システム設定を保存します")
+      .addBooleanOption((option) =>
+        option
+          .setName("call_wait_enabled")
+          .setDescription("通話待機システムを有効または無効にする")
+          .setRequired(false),
+      )
+      .addRoleOption((option) =>
+        option
+          .setName("call_wait_role")
+          .setDescription("通話希望者に一時付与するロール")
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("call_wait_channel")
+          .setDescription("リアクション募集と集合通知を送るテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("call_wait_voice_category")
+          .setDescription("参加者確認に使うVCカテゴリ")
+          .addChannelTypes(ChannelType.GuildCategory)
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand.setName("show").setDescription("現在のBot設定を表示します"),
   );
 
 export const bCommand = new SlashCommandBuilder()
@@ -207,7 +269,7 @@ export const bCommand = new SlashCommandBuilder()
     option
       .setName("time")
       .setNameLocalizations({ ja: "時間" })
-      .setDescription("時間を入力してください。例: 1時間、30分、〇〇まで（省略可）")
+      .setDescription("時間を入力してください。例: 1時間、30分、未定")
       .setRequired(false)
       .setMaxLength(100),
   )
@@ -215,7 +277,7 @@ export const bCommand = new SlashCommandBuilder()
     option
       .setName("purpose")
       .setNameLocalizations({ ja: "名目" })
-      .setDescription("名目を入力してください。例: ゲーム、作業、雑談（省略可）。入力するとVC名として設定されます。")
+      .setDescription("名目を入力してください。入力すると参加中VC名として設定されます")
       .setRequired(false)
       .setMaxLength(100),
   );
@@ -259,7 +321,11 @@ export const delWadaiCommand = new SlashCommandBuilder()
 
 export const sendWadaiCommand = new SlashCommandBuilder()
   .setName("sendwadai")
-  .setDescription("本日のお薦め話題を今すぐ投稿します");
+  .setDescription("本日のおすすめ話題を今すぐ投稿します");
+
+export const sendCallWaitCommand = new SlashCommandBuilder()
+  .setName("sendcallwait")
+  .setDescription("通話待機システムのリアクション募集メッセージを今すぐ送信します");
 
 export const setupFormsCommand = new SlashCommandBuilder()
   .setName("setupforms")
@@ -273,5 +339,6 @@ export const commands = [
   showWadaiCommand.toJSON(),
   delWadaiCommand.toJSON(),
   sendWadaiCommand.toJSON(),
+  sendCallWaitCommand.toJSON(),
   setupFormsCommand.toJSON(),
 ];

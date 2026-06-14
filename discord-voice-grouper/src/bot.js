@@ -39,6 +39,9 @@ const PB_CHILD_WAIT_MS = 20 * 1000;
 const DEFAULT_FINISH_MESSAGE =
   "30分が経過しました！各々のちょうどいいタイミングで解散してください";
 const MESSAGE_LIMIT = 1900;
+const CALL_WAIT_REACTION = "🤚";
+const CALL_WAIT_MIN_MEMBERS = 2;
+const CALL_WAIT_ROLE_REMOVE_MS = 30 * 60 * 1000;
 
 const activeSessions = new Map();
 const bumpReminderTimers = new Map();
@@ -47,6 +50,7 @@ const bosyuEditSessions = new Map();
 const voiceMonitorSessions = new Map();
 const topicFormSessions = new Map();
 const autoSplitSuggestionMessages = new Map();
+const callWaitRoleRemovalTimers = new Map();
 
 const VOICE_MONITOR_MIN_MEMBERS = 2;
 const AUTO_SPLIT_THRESHOLD = 6;
@@ -109,6 +113,7 @@ const FEEDBACK_FORM_TYPES = {
 };
 
 let dailyWadaiTimer = null;
+let callWaitTimer = null;
 
 if (!DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is required.");
@@ -118,6 +123,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
@@ -134,6 +140,7 @@ client.once(Events.ClientReady, (readyClient) => {
     console.error(error);
   });
   scheduleNextDailyWadaiPost();
+  scheduleNextCallWaitTick();
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -240,6 +247,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    if (interaction.commandName === "sendcallwait") {
+      await handleSendCallWait(interaction);
+      return;
+    }
+
     if (interaction.commandName === "setupforms") {
       await handleSetupForms(interaction);
       return;
@@ -280,6 +292,11 @@ async function handleSetting(interaction) {
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
+    return;
+  }
+
+  if (subcommand === "callwait") {
+    await handleCallWaitSetting(interaction);
     return;
   }
 
@@ -425,6 +442,64 @@ async function handleSetting(interaction) {
   );
   await replyOrFollowUp(interaction, {
     content: `設定を保存しました。\n\n${formatSettings(settings)}`,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleCallWaitSetting(interaction) {
+  const callWaitEnabled = interaction.options.getBoolean("call_wait_enabled", false);
+  const callWaitRole = interaction.options.getRole("call_wait_role", false);
+  const callWaitChannel = interaction.options.getChannel("call_wait_channel", false);
+  const callWaitVoiceCategory = interaction.options.getChannel(
+    "call_wait_voice_category",
+    false,
+  );
+  const patch = {};
+
+  if (callWaitEnabled !== null) {
+    patch.callWaitEnabled = callWaitEnabled;
+  }
+
+  if (callWaitRole) {
+    patch.callWaitRoleId = callWaitRole.id;
+  }
+
+  if (callWaitChannel) {
+    patch.callWaitChannelId = callWaitChannel.id;
+  }
+
+  if (callWaitVoiceCategory) {
+    patch.callWaitVoiceCategoryId = callWaitVoiceCategory.id;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    await replyOrFollowUp(interaction, {
+      content: "変更する通話待機システム設定を1つ以上指定してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const currentSettings = await getGuildSettings(interaction.guildId);
+  let settings = await saveGuildSettingsWithCurrent(
+    interaction.guildId,
+    currentSettings,
+    patch,
+  );
+
+  if (
+    currentSettings?.callWaitPrompt &&
+    (callWaitEnabled === false || callWaitChannel)
+  ) {
+    await deleteCallWaitPrompt(interaction.guild, currentSettings.callWaitPrompt);
+    settings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
+      callWaitPrompt: null,
+    });
+  }
+
+  await replyOrFollowUp(interaction, {
+    content: `通話待機システム設定を保存しました。\n\n${formatSettings(settings)}`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
@@ -691,6 +766,37 @@ async function handleSendWadai(interaction) {
   });
 }
 
+async function handleSendCallWait(interaction) {
+  if (!interaction.inGuild()) {
+    await replyOrFollowUp(interaction, {
+      content: "このコマンドはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+    await replyOrFollowUp(interaction, {
+      content: "通話待機システムの募集メッセージを送るには、サーバー管理権限が必要です。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+  const result = await sendCallWaitPromptForGuild(interaction.guild, settings, {
+    force: true,
+  });
+
+  await replyOrFollowUp(interaction, {
+    content: result.sent
+      ? `通話待機システムの募集メッセージを ${result.channel} に送信しました。${formatJstHour(result.targetAt)} にリアクションを確認します。`
+      : `通話待機システムの募集メッセージを送信できませんでした。${result.reason}`,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
 function scheduleNextDailyWadaiPost() {
   if (dailyWadaiTimer) {
     clearTimeout(dailyWadaiTimer);
@@ -726,7 +832,7 @@ async function postDailyWadaiForGuild(guild, settings, { force = false } = {}) {
   if (!settings?.wadaiChannelId) {
     return {
       sent: false,
-      reason: "`/setting set wadaich:送信先チャンネル` を設定してください。",
+      reason: "`/setting wadai wadaich:送信先チャンネル` を設定してください。",
     };
   }
 
@@ -774,6 +880,365 @@ async function postDailyWadaiForGuild(guild, settings, { force = false } = {}) {
   });
 
   return { sent: true, channel, message };
+}
+
+function scheduleNextCallWaitTick() {
+  if (callWaitTimer) {
+    clearTimeout(callWaitTimer);
+  }
+
+  const delayMs = getMsUntilNextHour(new Date());
+  callWaitTimer = setTimeout(() => {
+    void processCallWaitForAllGuilds()
+      .catch((error) => {
+        console.error(error);
+      })
+      .finally(() => {
+        scheduleNextCallWaitTick();
+      });
+  }, delayMs);
+}
+
+async function processCallWaitForAllGuilds() {
+  for (const guild of client.guilds.cache.values()) {
+    const settings = await getGuildSettings(guild.id);
+    await processCallWaitForGuild(guild, settings).catch((error) => {
+      console.error(`Failed to process call wait for ${guild.id}: ${error.message}`, error);
+    });
+  }
+}
+
+async function processCallWaitForGuild(guild, settings) {
+  if (settings?.callWaitEnabled !== true) {
+    return;
+  }
+
+  const configured = await validateCallWaitSettings(guild, settings);
+
+  if (!configured.ok) {
+    return;
+  }
+
+  const now = new Date();
+  const promptResult = await evaluateCallWaitPrompt(guild, settings, now);
+
+  if (promptResult.evaluated) {
+    settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+      callWaitPrompt: null,
+    });
+
+    if (promptResult.memberIds.length >= CALL_WAIT_MIN_MEMBERS) {
+      await grantCallWaitRoleAndNotify({
+        guild,
+        settings,
+        memberIds: promptResult.memberIds,
+      });
+    }
+  }
+
+  const activeVoiceMemberIds = getCallWaitActiveVoiceMemberIds(
+    guild,
+    settings.callWaitVoiceCategoryId,
+  );
+
+  if (activeVoiceMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
+    if (settings.callWaitPrompt) {
+      await deleteCallWaitPrompt(guild, settings.callWaitPrompt);
+      settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+        callWaitPrompt: null,
+      });
+    }
+
+    return;
+  }
+
+  if (settings.callWaitPrompt) {
+    return;
+  }
+
+  await sendCallWaitPromptForGuild(guild, settings, { force: false, now });
+}
+
+async function sendCallWaitPromptForGuild(guild, settings, { force = false, now = new Date() } = {}) {
+  if (settings?.callWaitEnabled !== true) {
+    return {
+      sent: false,
+      reason: "`/setting callwait call_wait_enabled:true` を設定してください。",
+    };
+  }
+
+  const configured = await validateCallWaitSettings(guild, settings);
+
+  if (!configured.ok) {
+    return configured;
+  }
+
+  if (force && settings.callWaitPrompt) {
+    await deleteCallWaitPrompt(guild, settings.callWaitPrompt);
+    settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+      callWaitPrompt: null,
+    });
+  }
+
+  if (!force && settings.callWaitPrompt) {
+    return {
+      sent: false,
+      reason: "既に有効な募集メッセージがあります。",
+    };
+  }
+
+  const targetAt = getNextHourStart(now);
+  const message = await configured.channel.send({
+    content: formatCallWaitPrompt(targetAt),
+    allowedMentions: { parse: [] },
+  });
+  await message.react(CALL_WAIT_REACTION).catch(() => null);
+
+  await saveGuildSettingsWithCurrent(guild.id, settings, {
+    callWaitPrompt: {
+      channelId: configured.channel.id,
+      messageId: message.id,
+      targetAt: targetAt.toISOString(),
+    },
+  });
+
+  return {
+    sent: true,
+    channel: configured.channel,
+    message,
+    targetAt,
+  };
+}
+
+async function validateCallWaitSettings(guild, settings) {
+  if (!settings?.callWaitRoleId || !settings?.callWaitChannelId) {
+    return {
+      ok: false,
+      sent: false,
+      reason: "`/setting callwait call_wait_role:ロール call_wait_channel:送信先` を設定してください。",
+    };
+  }
+
+  const channel = await resolveConfiguredTextChannel(guild, settings.callWaitChannelId);
+  const role = await guild.roles.fetch(settings.callWaitRoleId).catch(() => null);
+
+  if (!channel) {
+    return {
+      ok: false,
+      sent: false,
+      reason: "通話待機システムの送信先チャンネルを取得できません。",
+    };
+  }
+
+  if (!role) {
+    return {
+      ok: false,
+      sent: false,
+      reason: "通話待機システムのロールを取得できません。",
+    };
+  }
+
+  return {
+    ok: true,
+    channel,
+    role,
+  };
+}
+
+async function evaluateCallWaitPrompt(guild, settings, now) {
+  const prompt = settings?.callWaitPrompt;
+
+  if (!prompt?.channelId || !prompt?.messageId || !prompt?.targetAt) {
+    return { evaluated: false, memberIds: [] };
+  }
+
+  const targetAt = new Date(prompt.targetAt);
+  if (!Number.isFinite(targetAt.getTime()) || targetAt.getTime() > now.getTime()) {
+    return { evaluated: false, memberIds: [] };
+  }
+
+  const channel = await resolveConfiguredTextChannel(guild, prompt.channelId);
+
+  if (!channel || typeof channel.messages?.fetch !== "function") {
+    return { evaluated: true, memberIds: [] };
+  }
+
+  const message = await channel.messages.fetch(prompt.messageId).catch(() => null);
+
+  if (!message) {
+    return { evaluated: true, memberIds: [] };
+  }
+
+  const reaction = message.reactions.cache.find(
+    (cachedReaction) => cachedReaction.emoji.name === CALL_WAIT_REACTION,
+  );
+  const users = reaction ? await reaction.users.fetch().catch(() => null) : null;
+  const memberIds = new Set();
+
+  if (users) {
+    for (const user of users.values()) {
+      if (user.bot) {
+        continue;
+      }
+
+      const member = await guild.members.fetch(user.id).catch(() => null);
+      if (member) {
+        memberIds.add(member.id);
+      }
+    }
+  }
+
+  await message.delete().catch(() => null);
+
+  return { evaluated: true, memberIds: [...memberIds] };
+}
+
+async function deleteCallWaitPrompt(guild, prompt) {
+  if (!prompt?.channelId || !prompt?.messageId) {
+    return;
+  }
+
+  const channel = await resolveConfiguredTextChannel(guild, prompt.channelId);
+
+  if (!channel || typeof channel.messages?.fetch !== "function") {
+    return;
+  }
+
+  const message = await channel.messages.fetch(prompt.messageId).catch(() => null);
+  if (message) {
+    await message.delete().catch(() => null);
+  }
+}
+
+async function grantCallWaitRoleAndNotify({ guild, settings, memberIds }) {
+  const uniqueMemberIds = [...new Set(memberIds)].filter(Boolean);
+
+  if (uniqueMemberIds.length < CALL_WAIT_MIN_MEMBERS) {
+    return false;
+  }
+
+  const channel = await resolveConfiguredTextChannel(guild, settings.callWaitChannelId);
+
+  if (!channel || !settings.callWaitRoleId) {
+    return false;
+  }
+
+  const newlyAddedMemberIds = [];
+
+  for (const memberId of uniqueMemberIds) {
+    const member = await guild.members.fetch(memberId).catch(() => null);
+
+    if (!member || member.user?.bot) {
+      continue;
+    }
+
+    if (member.roles.cache.has(settings.callWaitRoleId)) {
+      continue;
+    }
+
+    await member.roles.add(
+      settings.callWaitRoleId,
+      "通話待機システムの集合通知",
+    ).then(() => {
+      newlyAddedMemberIds.push(member.id);
+    }).catch((error) => {
+      console.error(`Failed to add call wait role to ${member.id}: ${error.message}`);
+    });
+  }
+
+  await channel.send({
+    content: `<@&${settings.callWaitRoleId}> 雑談希望者が複数人集まりました！VCへの参加お願いします！`,
+    allowedMentions: { roles: [settings.callWaitRoleId] },
+  });
+
+  if (newlyAddedMemberIds.length > 0) {
+    scheduleCallWaitRoleRemoval({
+      guild,
+      roleId: settings.callWaitRoleId,
+      memberIds: newlyAddedMemberIds,
+    });
+  }
+
+  return true;
+}
+
+function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds }) {
+  const key = `${guild.id}:${roleId}:${Date.now()}`;
+  const timer = setTimeout(() => {
+    callWaitRoleRemovalTimers.delete(key);
+    void removeCallWaitRoleFromMembers(guild, roleId, memberIds).catch((error) => {
+      console.error(`Failed to remove call wait role: ${error.message}`, error);
+    });
+  }, CALL_WAIT_ROLE_REMOVE_MS);
+
+  callWaitRoleRemovalTimers.set(key, timer);
+}
+
+async function removeCallWaitRoleFromMembers(guild, roleId, memberIds) {
+  for (const memberId of memberIds) {
+    const member = await guild.members.fetch(memberId).catch(() => null);
+
+    if (!member || !member.roles.cache.has(roleId)) {
+      continue;
+    }
+
+    await member.roles.remove(
+      roleId,
+      "通話待機システムの30分経過による自動解除",
+    ).catch((error) => {
+      console.error(`Failed to remove call wait role from ${member.id}: ${error.message}`);
+    });
+  }
+}
+
+function getCallWaitActiveVoiceMemberIds(guild, categoryId) {
+  if (!categoryId) {
+    return [];
+  }
+
+  const memberIds = new Set();
+  const voiceTypes = new Set([ChannelType.GuildVoice, ChannelType.GuildStageVoice]);
+
+  for (const channel of guild.channels.cache.values()) {
+    if (!voiceTypes.has(channel.type) || channel.parentId !== categoryId) {
+      continue;
+    }
+
+    for (const member of channel.members.values()) {
+      if (!member.user?.bot) {
+        memberIds.add(member.id);
+      }
+    }
+  }
+
+  return [...memberIds];
+}
+
+function formatCallWaitPrompt(targetAt) {
+  const targetHour = formatJstHour(targetAt);
+
+  return [
+    `${targetHour}から雑談したい方はリアクション ${CALL_WAIT_REACTION} を押してください。`,
+    `複数人希望者が集まったら${targetHour}にメンションします。メンションが来たらご参加ください。`,
+    "もちろん普通の募集もしてOKです",
+  ].join("\n");
+}
+
+function getMsUntilNextHour(date) {
+  const next = getNextHourStart(date);
+  return Math.max(1000, next.getTime() - date.getTime());
+}
+
+function getNextHourStart(date) {
+  const next = new Date(date);
+  next.setUTCMinutes(0, 0, 0);
+  next.setUTCHours(next.getUTCHours() + 1);
+  return next;
+}
+
+function formatJstHour(date) {
+  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  return `${String(jstDate.getUTCHours()).padStart(2, "0")}:00`;
 }
 
 async function deletePreviousDailyWadaiMessage(guild, settings) {
@@ -1082,7 +1547,7 @@ async function handleSetupForms(interaction) {
 
   if (!settings?.formChannelId || !settings?.formSendChannelId) {
     await replyOrFollowUp(interaction, {
-      content: "`/setting set form_channel:設置先 form_send_channel:転送先` を設定してください。",
+      content: "`/setting forms form_channel:設置先 form_send_channel:転送先` を設定してください。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -2861,11 +3326,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     const errors = [];
 
     if (!settings?.tempRoleId) {
-      errors.push("/setting set で参加者ロールを設定してください。");
+      errors.push("/setting splitvc で参加者ロールを設定してください。");
     }
 
     if (!settings?.parentChannelId) {
-      errors.push("/setting set でPB親ボイスチャンネルを設定してください。");
+      errors.push("/setting splitvc でPB親ボイスチャンネルを設定してください。");
     }
 
     const tempRole = settings?.tempRoleId
@@ -3583,6 +4048,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "現在のフォーム設定:",
       `フォーム設置先: ${settings.formChannelId ? `<#${settings.formChannelId}>` : "未設定"}`,
       `フォーム転送先: ${settings.formSendChannelId ? `<#${settings.formSendChannelId}>` : "未設定"}`,
+      "",
+      "現在の通話待機システム設定:",
+      `通話待機システム: ${settings.callWaitEnabled === true ? "有効" : "無効"}`,
+      `参加希望者ロール: ${settings.callWaitRoleId ? `<@&${settings.callWaitRoleId}>` : "未設定"}`,
+      `リアクション・集合通知送信先: ${settings.callWaitChannelId ? `<#${settings.callWaitChannelId}>` : "未設定"}`,
+      `参加確認VCカテゴリ: ${settings.callWaitVoiceCategoryId ? `<#${settings.callWaitVoiceCategoryId}>` : "未設定"}`,
     ].join("\n");
   }
 

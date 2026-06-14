@@ -37,6 +37,8 @@
 - `/sendwadai` で、管理者が定時外におすすめ話題を投稿できます。
 - 運用ログを指定チャンネルにまとめられます。
 - 話題提供、提案・要望、相談・苦情フォームを設置し、入力内容を指定チャンネルへ転送できます。
+- 通話待機システムで、毎時ちょうどに次の1時間後の雑談希望者をリアクションで募集できます。
+- 希望者が2人以上集まった場合、参加希望者ロールを30分だけ付与して集合通知できます。
 
 ## グループ分けのルール
 
@@ -97,7 +99,7 @@ discord-voice-grouper/
 
 主な役割:
 
-- `src/bot.js`: Bot本体です。Discordに接続し、`/splitvc`、`/b`、`/setting`、話題コマンド、VCリマインダー、DISBOARD bumpリマインドを処理します。
+- `src/bot.js`: Bot本体です。Discordに接続し、`/splitvc`、`/b`、`/setting`、話題コマンド、VCリマインダー、通話待機システム、DISBOARD bumpリマインドを処理します。
 - `src/bump-reminder-store.js`: DISBOARD bumpリマインドの予約を保存します。
 - `src/commands.js`: スラッシュコマンドの定義です。
 - `src/grouping.js`: 3人組・4人組に分ける計算ロジックです。
@@ -131,6 +133,8 @@ Bot Permissions:
 
 - `View Channels`
 - `Send Messages`
+- `Add Reactions`
+- `Read Message History`
 - `Connect`
 - `Move Members`
 - `Manage Roles`
@@ -150,6 +154,7 @@ Bot Permissions:
 - 途中参加用の待機VCを作成・削除するため、Manage Channels権限が必要です。
 - 話題フォームの内容をVCチャンネルステータスへ設定するため、Set Voice Channel Status権限が必要です。Botが対象VCに入っていない場合はManage Channels権限も必要です。
 - おすすめ話題、運用ログ、フォーム設置、フォーム転送先の各チャンネルへメッセージを送信できる必要があります。
+- 通話待機システムでは、募集メッセージにリアクションを付けるため `Add Reactions`、リアクションしたユーザーを確認するため `Read Message History` が必要です。
 - DISBOARD bumpリマインドのため、DISBOARDがbump成功メッセージを投稿するチャンネルをBotが閲覧できる必要があります。
 
 ## 3. `.env` を作る
@@ -185,6 +190,10 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_TRANSFER_WAIT_SECONDS=30
 # PB_NOTICE_WAIT_MINUTES=25
 # PB_ROLE_REMOVE_WAIT_MINUTES=3
+# PB_CALL_WAIT_ENABLED=true
+# PB_CALL_WAIT_ROLE_ID=123456789012345678
+# PB_CALL_WAIT_CHANNEL_ID=123456789012345678
+# PB_CALL_WAIT_VOICE_CATEGORY_ID=123456789012345678
 ```
 
 環境変数:
@@ -215,6 +224,10 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_TRANSFER_WAIT_SECONDS` | 任意 | 転送開始までの待機秒数です。未設定時は30秒です。 |
 | `PB_NOTICE_WAIT_MINUTES` | 任意 | 終了通知までの待機分数です。未設定時は25分です。 |
 | `PB_ROLE_REMOVE_WAIT_MINUTES` | 任意 | 終了通知後のロール解除待機分数です。未設定時は3分です。 |
+| `PB_CALL_WAIT_ENABLED` | 任意 | 通話待機システムの有効・無効です。`true` で有効化します。 |
+| `PB_CALL_WAIT_ROLE_ID` | 任意 | 通話希望者に30分だけ付与するロールIDです。 |
+| `PB_CALL_WAIT_CHANNEL_ID` | 任意 | 通話待機システムのリアクション募集と集合通知を送るチャンネルIDです。 |
+| `PB_CALL_WAIT_VOICE_CATEGORY_ID` | 任意 | 毎時ちょうどに、すでに2人以上いるか確認するVCカテゴリIDです。 |
 
 テスト中は `DISCORD_GUILD_ID` を入れるのがおすすめです。
 サーバー単位のコマンド登録は反映が速く、動作確認がしやすいです。
@@ -445,9 +458,9 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
-Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting set` で再設定が必要になることがあります。
+Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting reminder` などで再設定が必要になることがあります。
 
 ### 5. デプロイする
 
@@ -512,16 +525,24 @@ push後、RenderのEventsやLogsでデプロイ状況を確認してください
 
 ### `/setting`
 
-PB連携、募集、VCリマインダー、話題、ログ、フォームに使うロール・チャンネル・通知文を設定します。
-
-```text
-/setting set participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 bosyu_channel:募集チャンネル bosyu_mention_role:@募集通知 voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_channel:リマインダー送信先 voice_reminder_parent_channel:PB親VC voice_reminder_child_category:PB子VCカテゴリ wadaich:毎朝話題送信先 post_split_wadai_channel:話題再掲先 split_start_channel:スタート案内先 log_channel:運用ログ form_channel:フォーム設置先 form_send_channel:フォーム転送先 transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
-```
+PB連携、募集、VCリマインダー、話題、ログ、フォーム、通話待機システムに使うロール・チャンネル・通知文を機能ごとに設定します。
 
 現在の設定を見る場合:
 
 ```text
 /setting show
+```
+
+`/setting set` は使わず、次のように機能別サブコマンドで設定します。
+
+```text
+/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題再掲先 split_start_channel:スタート案内先 transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
+/setting bosyu bosyu_channel:募集チャンネル bosyu_mention_role:@募集通知
+/setting reminder voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_channel:リマインダー送信先 voice_reminder_parent_channel:PB親VC voice_reminder_child_category:PB子VCカテゴリ
+/setting wadai wadaich:毎朝話題送信先
+/setting logs log_channel:運用ログ
+/setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先
+/setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_channel:募集チャンネル call_wait_voice_category:VCカテゴリ
 ```
 
 `child_category` は任意です。
@@ -535,7 +556,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォームに使�
 自動作成する待機VCの名前を変更できます。
 未設定の場合は `途中参加部屋` という名前で作成します。
 
-募集・VCリマインダー・話題・ログ・フォーム関連の主なオプション:
+募集・VCリマインダー・話題・ログ・フォーム・通話待機関連の主なオプション:
 
 | オプション | 説明 |
 | --- | --- |
@@ -553,8 +574,12 @@ PB連携、募集、VCリマインダー、話題、ログ、フォームに使�
 | `log_channel` | 転送結果、待機VC作成、途中参加転送、PB子VC削除による終了通知自動キャンセル、ロール解除結果などの運用ログをまとめるチャンネルです。未設定時は従来どおり実行チャンネルへ送ります。 |
 | `form_channel` | フォームボタンを設置するチャンネルです。 |
 | `form_send_channel` | フォーム入力内容を転送するチャンネルです。 |
+| `call_wait_enabled` | 通話待機システムを有効・無効にします。 |
+| `call_wait_role` | 希望者が2人以上集まったとき、一時的に付与するロールです。 |
+| `call_wait_channel` | リアクション募集メッセージと集合通知を送るチャンネルです。 |
+| `call_wait_voice_category` | 毎時ちょうどに、すでに2人以上いるか確認するVCカテゴリです。 |
 
-`/setting set` を使うにはサーバー管理権限が必要です。
+`/setting` を使うにはサーバー管理権限が必要です。
 
 待機時間オプション:
 
@@ -671,7 +696,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォームに使�
 事前に設置先と転送先を設定します。
 
 ```text
-/setting set form_channel:フォーム設置先 form_send_channel:フォーム転送先
+/setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先
 ```
 
 フォームボタンを設置するには、管理者が次を実行します。
@@ -762,6 +787,39 @@ VCリマインダーは、PB子VCまたは設定された監視VCに2人以上�
 「話題を出して」とリマインダー送信先チャンネルに投稿すると、Botがランダムな話題を返します。
 この機能は通常メッセージ本文を読むため、Discord側のMessage Content Intent設定に注意してください。
 
+### 通話待機システム
+
+毎時ちょうどに、1時間後の雑談希望者をリアクションで募集します。
+
+例として10:00に動く場合、11:00から雑談したい人向けに次のようなメッセージを送ります。
+
+```text
+11:00から雑談したい方はリアクション 🤚 を押してください。
+複数人希望者が集まったら11:00にメンションします。メンションが来たらご参加ください。
+もちろん普通の募集もしてOKです
+```
+
+Bot自身が先に `🤚` を付けます。
+11:00時点で、Bot以外に2人以上が `🤚` を押していた場合、その人たちへ `call_wait_role` で設定したロールを付与し、`call_wait_channel` に次の集合通知を送ります。
+
+```text
+@通話希望者 雑談希望者が複数人集まりました！VCへの参加お願いします！
+```
+
+付与したロールは、集合通知から30分後に自動解除します。
+11:00時点でBot以外のリアクションが2人未満の場合、古い募集メッセージを削除し、12:00向けの募集メッセージを新しく送ります。
+
+`call_wait_voice_category` に設定したVCカテゴリ内に、毎時ちょうどの時点でBot以外の参加者が2人以上いる場合は、リアクション募集メッセージは送らず、残っている募集メッセージがあれば削除します。
+このカテゴリ内VC人数の確認だけでロール付与や集合通知は行いません。集合通知の対象は、あくまでリアクション募集メッセージに反応した人だけです。
+
+再デプロイ直後やイベント前など、定時を待たずに募集メッセージを出したい場合は、管理者が次を実行します。
+
+```text
+/sendcallwait
+```
+
+このコマンドで送った募集メッセージも、次の `yy:00` に通常どおりリアクション確認、削除、次回分への更新が行われます。
+
 ### `/splitvc`
 
 ```text
@@ -796,13 +854,13 @@ PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も�
 7. 25分後に参加者ロールへメンションして終了通知を送信します。
 8. 終了通知の3分後に参加者ロールを解除します。
 
-おすすめ話題の再掲先は `/setting set post_split_wadai_channel:...` で指定できます。
+おすすめ話題の再掲先は `/setting splitvc post_split_wadai_channel:...` で指定できます。
 未設定の場合は、従来どおり `/splitvc` を実行したチャンネルへ送ります。
 
 `waiting_vc_category` が設定されている場合、振り分け完了後に待機VCを自動作成し、10分間だけ途中参加者を監視します。
 
-- 待機VCは `/setting set waiting_vc_category:...` で設定したカテゴリ内に作成されます。
-- 待機VC名は `/setting set waiting_vc_name:...` で変更できます。
+- 待機VCは `/setting splitvc waiting_vc_category:...` で設定したカテゴリ内に作成されます。
+- 待機VC名は `/setting splitvc waiting_vc_name:...` で変更できます。
 - `split_start_channel` が設定されている場合、待機VC作成後に次の案内を送ります。
 
 ```text
@@ -949,7 +1007,7 @@ DISBOARD_BOT_ID=302050872383242240
 
 - PB親VCの設定が正しいか確認してください。
 - PBが代表者を子VCへ移動するまでに時間がかかりすぎると検出に失敗します。
-- `/setting set child_category:...` でPBが子VCを作るカテゴリを設定すると安定しやすくなります。
+- `/setting splitvc child_category:...` でPBが子VCを作るカテゴリを設定すると安定しやすくなります。
 - Botに `Move Members` と `Connect` 権限があるか確認してください。
 - 子VC削除による終了通知の自動キャンセルは、Botが転送時に検出できた子VCだけを対象にします。
 

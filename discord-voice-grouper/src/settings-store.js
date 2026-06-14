@@ -79,6 +79,10 @@ function getEnvironmentSettings(guildId) {
   const transferWaitSeconds = process.env.PB_TRANSFER_WAIT_SECONDS;
   const noticeWaitMinutes = process.env.PB_NOTICE_WAIT_MINUTES;
   const roleRemoveWaitMinutes = process.env.PB_ROLE_REMOVE_WAIT_MINUTES;
+  const callWaitEnabled = parseOptionalBoolean(process.env.PB_CALL_WAIT_ENABLED);
+  const callWaitRoleId = process.env.PB_CALL_WAIT_ROLE_ID;
+  const callWaitChannelId = process.env.PB_CALL_WAIT_CHANNEL_ID;
+  const callWaitVoiceCategoryId = process.env.PB_CALL_WAIT_VOICE_CATEGORY_ID;
 
   if (
     !tempRoleId &&
@@ -103,7 +107,11 @@ function getEnvironmentSettings(guildId) {
     !finishMessage &&
     !transferWaitSeconds &&
     !noticeWaitMinutes &&
-    !roleRemoveWaitMinutes
+    !roleRemoveWaitMinutes &&
+    callWaitEnabled === undefined &&
+    !callWaitRoleId &&
+    !callWaitChannelId &&
+    !callWaitVoiceCategoryId
   ) {
     return null;
   }
@@ -132,6 +140,10 @@ function getEnvironmentSettings(guildId) {
     transferWaitSeconds: parseOptionalInteger(transferWaitSeconds),
     noticeWaitMinutes: parseOptionalInteger(noticeWaitMinutes),
     roleRemoveWaitMinutes: parseOptionalInteger(roleRemoveWaitMinutes),
+    callWaitEnabled,
+    callWaitRoleId,
+    callWaitChannelId,
+    callWaitVoiceCategoryId,
     updatedAt: "environment",
   };
 }
