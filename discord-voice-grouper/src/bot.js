@@ -42,6 +42,7 @@ const MESSAGE_LIMIT = 1900;
 const CALL_WAIT_REACTION = "🤚";
 const CALL_WAIT_MIN_MEMBERS = 2;
 const CALL_WAIT_ROLE_REMOVE_MS = 30 * 60 * 1000;
+const CALL_WAIT_FOLLOWUP_CHECK_MS = 30 * 60 * 1000;
 
 const activeSessions = new Map();
 const bumpReminderTimers = new Map();
@@ -51,6 +52,7 @@ const voiceMonitorSessions = new Map();
 const topicFormSessions = new Map();
 const autoSplitSuggestionMessages = new Map();
 const callWaitRoleRemovalTimers = new Map();
+const callWaitFollowupTimers = new Map();
 
 const VOICE_MONITOR_MIN_MEMBERS = 2;
 const AUTO_SPLIT_THRESHOLD = 6;
@@ -498,6 +500,15 @@ async function handleCallWaitSetting(interaction) {
     });
   }
 
+  if (callWaitEnabled === false) {
+    const followupTimer = callWaitFollowupTimers.get(interaction.guildId);
+
+    if (followupTimer) {
+      clearTimeout(followupTimer);
+      callWaitFollowupTimers.delete(interaction.guildId);
+    }
+  }
+
   await replyOrFollowUp(interaction, {
     content: `通話待機システム設定を保存しました。\n\n${formatSettings(settings)}`,
     flags: MessageFlags.Ephemeral,
@@ -928,11 +939,16 @@ async function processCallWaitForGuild(guild, settings) {
     });
 
     if (promptResult.memberIds.length >= CALL_WAIT_MIN_MEMBERS) {
-      await grantCallWaitRoleAndNotify({
+      const notified = await grantCallWaitRoleAndNotify({
         guild,
         settings,
         memberIds: promptResult.memberIds,
       });
+
+      if (notified) {
+        scheduleCallWaitFollowupCheck(guild.id);
+        return;
+      }
     }
   }
 
@@ -1172,6 +1188,53 @@ function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds }) {
   }, CALL_WAIT_ROLE_REMOVE_MS);
 
   callWaitRoleRemovalTimers.set(key, timer);
+}
+
+function scheduleCallWaitFollowupCheck(guildId) {
+  const existingTimer = callWaitFollowupTimers.get(guildId);
+
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const timer = setTimeout(() => {
+    callWaitFollowupTimers.delete(guildId);
+    void runCallWaitFollowupCheck(guildId).catch((error) => {
+      console.error(`Failed to run call wait follow-up check: ${error.message}`, error);
+    });
+  }, CALL_WAIT_FOLLOWUP_CHECK_MS);
+
+  callWaitFollowupTimers.set(guildId, timer);
+}
+
+async function runCallWaitFollowupCheck(guildId) {
+  const guild =
+    client.guilds.cache.get(guildId) ??
+    (await client.guilds.fetch(guildId).catch(() => null));
+
+  if (!guild) {
+    return;
+  }
+
+  const settings = await getGuildSettings(guild.id);
+
+  if (settings?.callWaitEnabled !== true || settings.callWaitPrompt) {
+    return;
+  }
+
+  const activeVoiceMemberIds = getCallWaitActiveVoiceMemberIds(
+    guild,
+    settings.callWaitVoiceCategoryId,
+  );
+
+  if (activeVoiceMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
+    return;
+  }
+
+  await sendCallWaitPromptForGuild(guild, settings, {
+    force: false,
+    now: new Date(),
+  });
 }
 
 async function removeCallWaitRoleFromMembers(guild, roleId, memberIds) {
