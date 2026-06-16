@@ -43,6 +43,10 @@ const CALL_WAIT_REACTION = "🤚";
 const CALL_WAIT_MIN_MEMBERS = 2;
 const CALL_WAIT_ROLE_REMOVE_MS = 30 * 60 * 1000;
 const CALL_WAIT_FOLLOWUP_CHECK_MS = 30 * 60 * 1000;
+const CALL_WAIT_MODE_REACTION = "reaction";
+const CALL_WAIT_MODE_BUTTON = "button";
+const CALL_WAIT_JOIN_CUSTOM_ID = "call_wait_join";
+const CALL_WAIT_CANCEL_CUSTOM_ID = "call_wait_cancel";
 
 const activeSessions = new Map();
 const bumpReminderTimers = new Map();
@@ -192,6 +196,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (interaction.customId.startsWith("feedback_form_button:")) {
         await handleFeedbackFormButton(interaction);
+        return;
+      }
+
+      if (
+        interaction.customId === CALL_WAIT_JOIN_CUSTOM_ID ||
+        interaction.customId.startsWith(`${CALL_WAIT_CANCEL_CUSTOM_ID}:`)
+      ) {
+        await handleCallWaitButton(interaction);
         return;
       }
     }
@@ -453,8 +465,21 @@ async function handleCallWaitSetting(interaction) {
   const callWaitEnabled = interaction.options.getBoolean("call_wait_enabled", false);
   const callWaitRole = interaction.options.getRole("call_wait_role", false);
   const callWaitChannel = interaction.options.getChannel("call_wait_channel", false);
+  const callWaitPromptChannel = interaction.options.getChannel(
+    "call_wait_prompt_channel",
+    false,
+  );
+  const callWaitNoticeChannel = interaction.options.getChannel(
+    "call_wait_notice_channel",
+    false,
+  );
   const callWaitVoiceCategory = interaction.options.getChannel(
     "call_wait_voice_category",
+    false,
+  );
+  const callWaitMode = interaction.options.getString("call_wait_mode", false);
+  const callWaitBosyuNoticeEnabled = interaction.options.getBoolean(
+    "call_wait_bosyu_notice_enabled",
     false,
   );
   const patch = {};
@@ -471,8 +496,24 @@ async function handleCallWaitSetting(interaction) {
     patch.callWaitChannelId = callWaitChannel.id;
   }
 
+  if (callWaitPromptChannel) {
+    patch.callWaitPromptChannelId = callWaitPromptChannel.id;
+  }
+
+  if (callWaitNoticeChannel) {
+    patch.callWaitNoticeChannelId = callWaitNoticeChannel.id;
+  }
+
   if (callWaitVoiceCategory) {
     patch.callWaitVoiceCategoryId = callWaitVoiceCategory.id;
+  }
+
+  if (normalizeCallWaitMode(callWaitMode)) {
+    patch.callWaitMode = normalizeCallWaitMode(callWaitMode);
+  }
+
+  if (callWaitBosyuNoticeEnabled !== null) {
+    patch.callWaitBosyuNoticeEnabled = callWaitBosyuNoticeEnabled;
   }
 
   if (Object.keys(patch).length === 0) {
@@ -492,7 +533,10 @@ async function handleCallWaitSetting(interaction) {
 
   if (
     currentSettings?.callWaitPrompt &&
-    (callWaitEnabled === false || callWaitChannel)
+    (callWaitEnabled === false ||
+      callWaitChannel ||
+      callWaitPromptChannel ||
+      callWaitMode)
   ) {
     await deleteCallWaitPrompt(interaction.guild, currentSettings.callWaitPrompt);
     settings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
@@ -801,7 +845,7 @@ async function handleSendCallWait(interaction) {
 
   await replyOrFollowUp(interaction, {
     content: result.sent
-      ? `通話待機システムの募集メッセージを ${result.channel} に送信しました。${formatJstHour(result.targetAt)} にリアクションを確認します。`
+      ? `通話待機システムの募集メッセージを ${result.channel} に送信しました。${formatJstHour(result.targetAt)} に希望者を確認します。`
       : `通話待機システムの募集メッセージを送信できませんでした。${result.reason}`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
@@ -949,6 +993,13 @@ async function processCallWaitForGuild(guild, settings) {
         scheduleCallWaitFollowupCheck(guild.id);
         return;
       }
+    } else if (promptResult.mode === CALL_WAIT_MODE_BUTTON) {
+      await sendCallWaitApplicantLog({
+        guild,
+        settings,
+        action: "reset",
+        memberIds: [],
+      });
     }
   }
 
@@ -1004,45 +1055,65 @@ async function sendCallWaitPromptForGuild(guild, settings, { force = false, now 
   }
 
   const targetAt = getNextHourStart(now);
-  const message = await configured.channel.send({
-    content: formatCallWaitPrompt(targetAt),
+  const mode = normalizeCallWaitMode(settings.callWaitMode);
+  const message = await configured.promptChannel.send({
+    content: formatCallWaitPrompt(targetAt, mode),
     allowedMentions: { parse: [] },
+    components:
+      mode === CALL_WAIT_MODE_BUTTON ? [createCallWaitJoinRow()] : [],
   });
-  await message.react(CALL_WAIT_REACTION).catch(() => null);
+
+  if (mode === CALL_WAIT_MODE_REACTION) {
+    await message.react(CALL_WAIT_REACTION).catch(() => null);
+  }
 
   await saveGuildSettingsWithCurrent(guild.id, settings, {
     callWaitPrompt: {
-      channelId: configured.channel.id,
+      channelId: configured.promptChannel.id,
       messageId: message.id,
       targetAt: targetAt.toISOString(),
+      mode,
+      memberIds: [],
     },
   });
 
   return {
     sent: true,
-    channel: configured.channel,
+    channel: configured.promptChannel,
     message,
     targetAt,
   };
 }
 
 async function validateCallWaitSettings(guild, settings) {
-  if (!settings?.callWaitRoleId || !settings?.callWaitChannelId) {
+  const promptChannelId = getCallWaitPromptChannelId(settings);
+  const noticeChannelId = getCallWaitNoticeChannelId(settings);
+
+  if (!settings?.callWaitRoleId || !promptChannelId || !noticeChannelId) {
     return {
       ok: false,
       sent: false,
-      reason: "`/setting callwait call_wait_role:ロール call_wait_channel:送信先` を設定してください。",
+      reason: "`/setting callwait call_wait_role:ロール call_wait_prompt_channel:募集先 call_wait_notice_channel:通知先` を設定してください。",
     };
   }
 
-  const channel = await resolveConfiguredTextChannel(guild, settings.callWaitChannelId);
+  const promptChannel = await resolveConfiguredTextChannel(guild, promptChannelId);
+  const noticeChannel = await resolveConfiguredTextChannel(guild, noticeChannelId);
   const role = await guild.roles.fetch(settings.callWaitRoleId).catch(() => null);
 
-  if (!channel) {
+  if (!promptChannel) {
     return {
       ok: false,
       sent: false,
-      reason: "通話待機システムの送信先チャンネルを取得できません。",
+      reason: "通話待機システムの募集メッセージ送信先チャンネルを取得できません。",
+    };
+  }
+
+  if (!noticeChannel) {
+    return {
+      ok: false,
+      sent: false,
+      reason: "通話待機システムの集合通知送信先チャンネルを取得できません。",
     };
   }
 
@@ -1056,7 +1127,8 @@ async function validateCallWaitSettings(guild, settings) {
 
   return {
     ok: true,
-    channel,
+    promptChannel,
+    noticeChannel,
     role,
   };
 }
@@ -1085,6 +1157,15 @@ async function evaluateCallWaitPrompt(guild, settings, now) {
     return { evaluated: true, memberIds: [] };
   }
 
+  const mode = normalizeCallWaitMode(prompt.mode ?? settings.callWaitMode);
+
+  if (mode === CALL_WAIT_MODE_BUTTON) {
+    const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
+    await message.delete().catch(() => null);
+
+    return { evaluated: true, memberIds, mode };
+  }
+
   const reaction = message.reactions.cache.find(
     (cachedReaction) => cachedReaction.emoji.name === CALL_WAIT_REACTION,
   );
@@ -1106,7 +1187,7 @@ async function evaluateCallWaitPrompt(guild, settings, now) {
 
   await message.delete().catch(() => null);
 
-  return { evaluated: true, memberIds: [...memberIds] };
+  return { evaluated: true, memberIds: [...memberIds], mode };
 }
 
 async function deleteCallWaitPrompt(guild, prompt) {
@@ -1126,6 +1207,126 @@ async function deleteCallWaitPrompt(guild, prompt) {
   }
 }
 
+async function handleCallWaitButton(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({
+      content: "このボタンはサーバー内で使ってください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const settings = await getGuildSettings(interaction.guildId);
+  const prompt = settings?.callWaitPrompt;
+  const isJoin = interaction.customId === CALL_WAIT_JOIN_CUSTOM_ID;
+  const promptMessageId = isJoin
+    ? interaction.message?.id
+    : interaction.customId.slice(`${CALL_WAIT_CANCEL_CUSTOM_ID}:`.length);
+
+  if (
+    !prompt ||
+    prompt.mode !== CALL_WAIT_MODE_BUTTON ||
+    prompt.messageId !== promptMessageId
+  ) {
+    await interaction.reply({
+      content: "この募集は現在有効ではありません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const targetAt = new Date(prompt.targetAt);
+  if (!Number.isFinite(targetAt.getTime()) || targetAt.getTime() <= Date.now()) {
+    await interaction.reply({
+      content: "この募集は締め切られています。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
+  const userId = interaction.user.id;
+  const nextMemberIds = isJoin
+    ? [...new Set([...memberIds, userId])]
+    : memberIds.filter((memberId) => memberId !== userId);
+
+  await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
+    callWaitPrompt: {
+      ...prompt,
+      memberIds: nextMemberIds,
+    },
+  });
+
+  await sendCallWaitApplicantLog({
+    guild: interaction.guild,
+    settings,
+    action: isJoin ? "join" : "cancel",
+    userId,
+    memberIds: nextMemberIds,
+  });
+
+  if (isJoin) {
+    await interaction.reply({
+      content: "通話参加希望を受け付けました。取り消す場合は下のボタンを押してください。",
+      components: [createCallWaitCancelRow(prompt.messageId)],
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.update({
+    content: "通話参加希望をキャンセルしました。",
+    components: [],
+  });
+}
+
+async function sendCallWaitApplicantLog({
+  guild,
+  settings,
+  action,
+  userId = null,
+  memberIds,
+}) {
+  const actionLabel =
+    action === "join"
+      ? "希望ボタンが押されました"
+      : action === "cancel"
+        ? "希望キャンセルボタンが押されました"
+        : "希望者リストをリセットしました";
+  const list = await formatCallWaitApplicantList(guild, memberIds);
+  const lines = [
+    `通話待機システム: ${actionLabel}`,
+    `操作ユーザー: ${userId ? `<@${userId}>` : "システム"}`,
+    "現在の通話希望者:",
+    list,
+  ];
+
+  await sendOperationalLog({
+    guild,
+    settings,
+    fallbackChannel: null,
+    content: lines.join("\n"),
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function formatCallWaitApplicantList(guild, memberIds) {
+  const uniqueMemberIds = normalizeCallWaitMemberIds(memberIds);
+
+  if (uniqueMemberIds.length === 0) {
+    return "なし";
+  }
+
+  const lines = [];
+
+  for (const memberId of uniqueMemberIds) {
+    const member = await guild.members.fetch(memberId).catch(() => null);
+    lines.push(member ? `- ${member.displayName} (${member.id})` : `- ${memberId}`);
+  }
+
+  return lines.join("\n");
+}
+
 async function grantCallWaitRoleAndNotify({ guild, settings, memberIds }) {
   const uniqueMemberIds = [...new Set(memberIds)].filter(Boolean);
 
@@ -1133,7 +1334,10 @@ async function grantCallWaitRoleAndNotify({ guild, settings, memberIds }) {
     return false;
   }
 
-  const channel = await resolveConfiguredTextChannel(guild, settings.callWaitChannelId);
+  const channel = await resolveConfiguredTextChannel(
+    guild,
+    getCallWaitNoticeChannelId(settings),
+  );
 
   if (!channel || !settings.callWaitRoleId) {
     return false;
@@ -1167,6 +1371,8 @@ async function grantCallWaitRoleAndNotify({ guild, settings, memberIds }) {
     allowedMentions: { roles: [settings.callWaitRoleId] },
   });
 
+  await sendCallWaitBosyuNotice(guild, settings, channel);
+
   if (newlyAddedMemberIds.length > 0) {
     scheduleCallWaitRoleRemoval({
       guild,
@@ -1176,6 +1382,65 @@ async function grantCallWaitRoleAndNotify({ guild, settings, memberIds }) {
   }
 
   return true;
+}
+
+async function sendCallWaitBosyuNotice(guild, settings, fallbackChannel) {
+  if (settings.callWaitBosyuNoticeEnabled !== true || !settings.bosyuMentionRoleId) {
+    return;
+  }
+
+  const channel =
+    (await resolveConfiguredTextChannel(guild, getCallWaitNoticeChannelId(settings))) ??
+    fallbackChannel;
+
+  if (!channel || typeof channel.send !== "function") {
+    return;
+  }
+
+  await channel.send({
+    content: `<@&${settings.bosyuMentionRoleId}> VCが始まりました！お暇ならぜひ途中参加してみてください！`,
+    allowedMentions: { roles: [settings.bosyuMentionRoleId] },
+  }).catch((error) => {
+    console.error(`Failed to send call wait bosyu notice: ${error.message}`);
+  });
+}
+
+function createCallWaitJoinRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(CALL_WAIT_JOIN_CUSTOM_ID)
+      .setLabel("通話に参加希望")
+      .setStyle(ButtonStyle.Primary),
+  );
+}
+
+function createCallWaitCancelRow(promptMessageId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`${CALL_WAIT_CANCEL_CUSTOM_ID}:${promptMessageId}`)
+      .setLabel("希望をキャンセル")
+      .setStyle(ButtonStyle.Danger),
+  );
+}
+
+function normalizeCallWaitMode(mode) {
+  return mode === CALL_WAIT_MODE_BUTTON
+    ? CALL_WAIT_MODE_BUTTON
+    : CALL_WAIT_MODE_REACTION;
+}
+
+function normalizeCallWaitMemberIds(memberIds) {
+  return Array.isArray(memberIds)
+    ? [...new Set(memberIds.filter((memberId) => typeof memberId === "string"))]
+    : [];
+}
+
+function getCallWaitPromptChannelId(settings) {
+  return settings?.callWaitPromptChannelId ?? settings?.callWaitChannelId ?? null;
+}
+
+function getCallWaitNoticeChannelId(settings) {
+  return settings?.callWaitNoticeChannelId ?? settings?.callWaitChannelId ?? null;
 }
 
 function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds }) {
@@ -1277,8 +1542,17 @@ function getCallWaitActiveVoiceMemberIds(guild, categoryId) {
   return [...memberIds];
 }
 
-function formatCallWaitPrompt(targetAt) {
+function formatCallWaitPrompt(targetAt, mode = CALL_WAIT_MODE_REACTION) {
   const targetHour = formatJstHour(targetAt);
+
+  if (mode === CALL_WAIT_MODE_BUTTON) {
+    return [
+      `${targetHour}から雑談したい方はこのメッセージの下のボタンを押してください。`,
+      `${targetHour}時点で複数人がボタンを押していたらメンションします。`,
+      "メンションが来たらご参加ください。",
+      "もちろん普通の募集もしてOKです",
+    ].join("\n");
+  }
 
   return [
     `${targetHour}から雑談したい方はリアクション ${CALL_WAIT_REACTION} を押してください。`,
@@ -4114,9 +4388,13 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "",
       "現在の通話待機システム設定:",
       `通話待機システム: ${settings.callWaitEnabled === true ? "有効" : "無効"}`,
+      `募集方式: ${normalizeCallWaitMode(settings.callWaitMode) === CALL_WAIT_MODE_BUTTON ? "ボタン式" : "リアクション式"}`,
       `参加希望者ロール: ${settings.callWaitRoleId ? `<@&${settings.callWaitRoleId}>` : "未設定"}`,
-      `リアクション・集合通知送信先: ${settings.callWaitChannelId ? `<#${settings.callWaitChannelId}>` : "未設定"}`,
+      `互換用送信先: ${settings.callWaitChannelId ? `<#${settings.callWaitChannelId}>` : "未設定"}`,
+      `募集メッセージ送信先: ${getCallWaitPromptChannelId(settings) ? `<#${getCallWaitPromptChannelId(settings)}>` : "未設定"}`,
+      `集合通知送信先: ${getCallWaitNoticeChannelId(settings) ? `<#${getCallWaitNoticeChannelId(settings)}>` : "未設定"}`,
       `参加確認VCカテゴリ: ${settings.callWaitVoiceCategoryId ? `<#${settings.callWaitVoiceCategoryId}>` : "未設定"}`,
+      `募集ロール途中参加案内: ${settings.callWaitBosyuNoticeEnabled === true ? "有効" : "無効"}`,
     ].join("\n");
   }
 

@@ -82,7 +82,13 @@ function getEnvironmentSettings(guildId) {
   const callWaitEnabled = parseOptionalBoolean(process.env.PB_CALL_WAIT_ENABLED);
   const callWaitRoleId = process.env.PB_CALL_WAIT_ROLE_ID;
   const callWaitChannelId = process.env.PB_CALL_WAIT_CHANNEL_ID;
+  const callWaitPromptChannelId = process.env.PB_CALL_WAIT_PROMPT_CHANNEL_ID;
+  const callWaitNoticeChannelId = process.env.PB_CALL_WAIT_NOTICE_CHANNEL_ID;
   const callWaitVoiceCategoryId = process.env.PB_CALL_WAIT_VOICE_CATEGORY_ID;
+  const callWaitMode = process.env.PB_CALL_WAIT_MODE;
+  const callWaitBosyuNoticeEnabled = parseOptionalBoolean(
+    process.env.PB_CALL_WAIT_BOSYU_NOTICE_ENABLED,
+  );
 
   if (
     !tempRoleId &&
@@ -111,7 +117,11 @@ function getEnvironmentSettings(guildId) {
     callWaitEnabled === undefined &&
     !callWaitRoleId &&
     !callWaitChannelId &&
-    !callWaitVoiceCategoryId
+    !callWaitPromptChannelId &&
+    !callWaitNoticeChannelId &&
+    !callWaitVoiceCategoryId &&
+    !callWaitMode &&
+    callWaitBosyuNoticeEnabled === undefined
   ) {
     return null;
   }
@@ -143,7 +153,11 @@ function getEnvironmentSettings(guildId) {
     callWaitEnabled,
     callWaitRoleId,
     callWaitChannelId,
+    callWaitPromptChannelId,
+    callWaitNoticeChannelId,
     callWaitVoiceCategoryId,
+    callWaitMode,
+    callWaitBosyuNoticeEnabled,
     updatedAt: "environment",
   };
 }

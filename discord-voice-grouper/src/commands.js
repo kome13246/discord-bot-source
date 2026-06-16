@@ -238,7 +238,21 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("call_wait_channel")
-          .setDescription("リアクション募集と集合通知を送るテキストチャンネル")
+          .setDescription("互換用。募集と集合通知の両方に使うチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("call_wait_prompt_channel")
+          .setDescription("募集メッセージを送るテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("call_wait_notice_channel")
+          .setDescription("集合通知を送るテキストチャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
@@ -247,6 +261,22 @@ export const settingCommand = new SlashCommandBuilder()
           .setName("call_wait_voice_category")
           .setDescription("参加者確認に使うVCカテゴリ")
           .addChannelTypes(ChannelType.GuildCategory)
+          .setRequired(false),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("call_wait_mode")
+          .setDescription("募集方式")
+          .addChoices(
+            { name: "リアクション式", value: "reaction" },
+            { name: "ボタン式", value: "button" },
+          )
+          .setRequired(false),
+      )
+      .addBooleanOption((option) =>
+        option
+          .setName("call_wait_bosyu_notice_enabled")
+          .setDescription("集合通知後に募集ロールへ途中参加案内を送るか")
           .setRequired(false),
       ),
   )
