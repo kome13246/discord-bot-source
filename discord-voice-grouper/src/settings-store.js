@@ -75,6 +75,7 @@ function getEnvironmentSettings(guildId) {
   const logChannelId = process.env.PB_LOG_CHANNEL_ID;
   const formChannelId = process.env.PB_FORM_CHANNEL_ID;
   const formSendChannelId = process.env.PB_FORM_SEND_CHANNEL_ID;
+  const formModeratorRoleId = process.env.PB_FORM_MODERATOR_ROLE_ID;
   const finishMessage = process.env.PB_FINISH_MESSAGE;
   const transferWaitSeconds = process.env.PB_TRANSFER_WAIT_SECONDS;
   const noticeWaitMinutes = process.env.PB_NOTICE_WAIT_MINUTES;
@@ -110,6 +111,7 @@ function getEnvironmentSettings(guildId) {
     !logChannelId &&
     !formChannelId &&
     !formSendChannelId &&
+    !formModeratorRoleId &&
     !finishMessage &&
     !transferWaitSeconds &&
     !noticeWaitMinutes &&
@@ -146,6 +148,7 @@ function getEnvironmentSettings(guildId) {
     logChannelId,
     formChannelId,
     formSendChannelId,
+    formModeratorRoleId,
     finishMessage,
     transferWaitSeconds: parseOptionalInteger(transferWaitSeconds),
     noticeWaitMinutes: parseOptionalInteger(noticeWaitMinutes),

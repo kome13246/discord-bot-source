@@ -26,7 +26,7 @@
 - 待機VCは10分経過、または終了通知キャンセル時に自動削除されます。
 - `/b` で募集メッセージを送信できます。
 - `/b` 実行者がVCに入っていて名目を指定した場合、そのVC名を名目で更新します。
-- VCリマインダーで、2人以上集まったVCに参加者ロールを付与し、30分ごとに話題フォーム付きの確認メッセージを送れます。
+- VC集合フォームで、2人以上集まったVCに参加者ロールを付与し、開始時に話題フォーム付きメッセージを送れます。
 - 1つのVCに6人以上いる場合、自動振り分け提案を送れます。
 - 話題フォームの内容を、送信者が参加中のVCチャンネルステータスへ `今の話題：...` として設定できます。
 - 毎日朝6:00に、おすすめ話題を指定チャンネルへ3択で投稿できます。
@@ -187,6 +187,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_LOG_CHANNEL_ID=123456789012345678
 # PB_FORM_CHANNEL_ID=123456789012345678
 # PB_FORM_SEND_CHANNEL_ID=123456789012345678
+# PB_FORM_MODERATOR_ROLE_ID=123456789012345678
 # PB_TRANSFER_WAIT_SECONDS=30
 # PB_NOTICE_WAIT_MINUTES=25
 # PB_ROLE_REMOVE_WAIT_MINUTES=3
@@ -225,6 +226,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_LOG_CHANNEL_ID` | 任意 | 運用ログをまとめるテキストチャンネルIDです。 |
 | `PB_FORM_CHANNEL_ID` | 任意 | フォームボタンを設置するテキストチャンネルIDです。 |
 | `PB_FORM_SEND_CHANNEL_ID` | 任意 | フォーム入力内容を転送するテキストチャンネルIDです。 |
+| `PB_FORM_MODERATOR_ROLE_ID` | 任意 | 相談・苦情フォームでメンションするモデレーターロールIDです。 |
 | `PB_TRANSFER_WAIT_SECONDS` | 任意 | 転送開始までの待機秒数です。未設定時は30秒です。 |
 | `PB_NOTICE_WAIT_MINUTES` | 任意 | 終了通知までの待機分数です。未設定時は25分です。 |
 | `PB_ROLE_REMOVE_WAIT_MINUTES` | 任意 | 終了通知後のロール解除待機分数です。未設定時は3分です。 |
@@ -466,7 +468,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_CHANNEL_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_CHANNEL_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
 Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting reminder` などで再設定が必要になることがあります。
 
@@ -549,7 +551,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 /setting reminder voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_channel:リマインダー送信先 voice_reminder_parent_channel:PB親VC voice_reminder_child_category:PB子VCカテゴリ
 /setting wadai wadaich:毎朝話題送信先
 /setting logs log_channel:運用ログ
-/setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先
+/setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
 /setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:募集チャンネル call_wait_notice_channel:集合通知チャンネル call_wait_voice_category:VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true
 ```
 
@@ -582,6 +584,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `log_channel` | 転送結果、待機VC作成、途中参加転送、PB子VC削除による終了通知自動キャンセル、ロール解除結果などの運用ログをまとめるチャンネルです。未設定時は従来どおり実行チャンネルへ送ります。 |
 | `form_channel` | フォームボタンを設置するチャンネルです。 |
 | `form_send_channel` | フォーム入力内容を転送するチャンネルです。 |
+| `moderator_role` | 相談・苦情フォームの転送時にメンションするモデレーターロールです。 |
 | `call_wait_enabled` | 通話待機システムを有効・無効にします。 |
 | `call_wait_role` | 希望者が2人以上集まったとき、一時的に付与するロールです。 |
 | `call_wait_channel` | 互換用です。募集メッセージと集合通知の両方に使うチャンネルです。 |
@@ -705,10 +708,10 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 
 話題提供、提案・要望、相談・苦情の3種類のフォームボタンを設置できます。
 
-事前に設置先と転送先を設定します。
+事前に設置先と転送先を設定します。相談・苦情フォームで通知したい場合はモデレーターロールも設定します。
 
 ```text
-/setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先
+/setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
 ```
 
 フォームボタンを設置するには、管理者が次を実行します。
@@ -752,6 +755,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 ```
 
 分類は `話題提供`、`提案・要望`、`相談・苦情` のいずれかです。
+`相談・苦情` の場合だけ、転送内容の先頭に設定したモデレーターロールをメンションします。
 
 ### `/b`
 
@@ -778,20 +782,22 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 現在のコードでは、`note` をVCのチャンネルステータスとして設定する処理は行っていません。
 Discord APIのチャンネルステータス項目は使わず、募集メッセージ本文に `ひとこと` として表示します。
 
-### VCリマインダー
+### VC集合フォーム
 
-VCリマインダーは、PB子VCまたは設定された監視VCに2人以上集まったときに開始します。
+VC集合フォームは、PB子VCまたは設定された監視VCに2人以上集まったときに開始します。
 
-- 開始時にリマインダー送信先へ、定時話題送信先チャンネルを案内する集合確認メッセージを送ります。
+- 開始時に送信先へ参加者ロールをメンションし、話題フォームボタン付きの集合メッセージを1回送ります。
 - `voice_participant_role` が設定されている場合、対象VC内の参加者へロールを付与します。
-- 30分ごとに、経過時間の確認メッセージと話題フォームボタンを送ります。
+- 30分ごとの確認メッセージは送信しません。
 - 対象VCが2人未満になった場合、5分待ってからセッションを終了します。5分以内に2人以上へ戻った場合はセッションを継続します。
+- 対象VCが2人未満になってから10分後に、集合メッセージと話題フォームを削除します。10分以内に2人以上へ戻った場合は削除を取り消し、同じフォームを継続します。
 - セッション終了時、他の有効なVCセッションにいないメンバーから参加者ロールを解除します。
 - 1つのVC単体で6人以上になると、自動振り分け提案を送ります。
 
 話題フォーム:
 
 - フォームを送信できるのは、送信時点でVCに参加しているメンバーだけです。
+- 通話終了まで何度でも送信できます。
 - 送信内容はテキストチャンネルへ転送せず、送信者が参加中のVCチャンネルステータスへ設定します。
 - ステータス形式は `今の話題：入力内容` です。
 - Botには `Set Voice Channel Status` 権限が必要です。Botが対象VCに入っていない場合は `Manage Channels` 権限も必要です。
@@ -814,13 +820,12 @@ VCリマインダーは、PB子VCまたは設定された監視VCに2人以上�
 
 Bot自身が先に `🤚` を付けます。
 
-ボタン式の場合は、次のメッセージと `通話に参加希望` ボタンを送ります。
+ボタン式の場合は、次のメッセージと `11:00から雑談希望` のような時刻入りボタンを送ります。
 
 ```text
-11:00から雑談したい方はこのメッセージの下のボタンを押してください。
-11:00時点で複数人がボタンを押していたらメンションします。
-メンションが来たらご参加ください。
-もちろん普通の募集もしてOKです
+11:00から少し雑談してみたい方は、下のボタンを押してください。
+11:00時点で複数人が集まっていたら、メンションでお知らせします。
+メンションが来た方は、VCへの参加をお願いします。
 ```
 
 ボタンを押した人には、自分だけに見える `希望をキャンセル` ボタンを表示します。
@@ -987,7 +992,7 @@ DISBOARDの `/bump` が成功し、DISBOARD Botがメッセージを投稿した
 送信内容:
 
 ```text
-@実行者 前回のbumpから２時間が経過しました
+前回のbumpから２時間が経過しました
 ```
 
 この機能は、このBot自身のスラッシュコマンドではありません。

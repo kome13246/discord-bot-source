@@ -217,6 +217,12 @@ export const settingCommand = new SlashCommandBuilder()
           .setDescription("フォーム入力内容の転送先テキストチャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
+      )
+      .addRoleOption((option) =>
+        option
+          .setName("moderator_role")
+          .setDescription("相談・苦情フォームでメンションするモデレーターロール")
+          .setRequired(false),
       ),
   )
   .addSubcommand((subcommand) =>
