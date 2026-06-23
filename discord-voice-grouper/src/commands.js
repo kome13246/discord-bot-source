@@ -243,13 +243,6 @@ export const settingCommand = new SlashCommandBuilder()
       )
       .addChannelOption((option) =>
         option
-          .setName("call_wait_channel")
-          .setDescription("互換用。募集と集合通知の両方に使うチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
           .setName("call_wait_prompt_channel")
           .setDescription("募集メッセージを送るテキストチャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)

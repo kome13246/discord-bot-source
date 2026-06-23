@@ -469,7 +469,6 @@ async function handleSetting(interaction) {
 async function handleCallWaitSetting(interaction) {
   const callWaitEnabled = interaction.options.getBoolean("call_wait_enabled", false);
   const callWaitRole = interaction.options.getRole("call_wait_role", false);
-  const callWaitChannel = interaction.options.getChannel("call_wait_channel", false);
   const callWaitPromptChannel = interaction.options.getChannel(
     "call_wait_prompt_channel",
     false,
@@ -497,10 +496,6 @@ async function handleCallWaitSetting(interaction) {
     patch.callWaitRoleId = callWaitRole.id;
   }
 
-  if (callWaitChannel) {
-    patch.callWaitChannelId = callWaitChannel.id;
-  }
-
   if (callWaitPromptChannel) {
     patch.callWaitPromptChannelId = callWaitPromptChannel.id;
   }
@@ -513,7 +508,7 @@ async function handleCallWaitSetting(interaction) {
     patch.callWaitVoiceCategoryId = callWaitVoiceCategory.id;
   }
 
-  if (normalizeCallWaitMode(callWaitMode)) {
+  if (callWaitMode !== null) {
     patch.callWaitMode = normalizeCallWaitMode(callWaitMode);
   }
 
@@ -539,7 +534,6 @@ async function handleCallWaitSetting(interaction) {
   if (
     currentSettings?.callWaitPrompt &&
     (callWaitEnabled === false ||
-      callWaitChannel ||
       callWaitPromptChannel ||
       callWaitMode)
   ) {
@@ -1021,6 +1015,8 @@ async function processCallWaitForGuild(guild, settings) {
       });
     }
 
+    await sendCallWaitSkippedNotice(configured.promptChannel, now);
+
     return;
   }
 
@@ -1414,7 +1410,7 @@ function createCallWaitJoinRow(targetAt) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(CALL_WAIT_JOIN_CUSTOM_ID)
-      .setLabel(`${formatJstHour(targetAt)}から雑談希望`)
+      .setLabel(`${formatJstHourNumber(targetAt)}時から雑談希望`)
       .setStyle(ButtonStyle.Primary),
   );
 }
@@ -1429,9 +1425,9 @@ function createCallWaitCancelRow(promptMessageId) {
 }
 
 function normalizeCallWaitMode(mode) {
-  return mode === CALL_WAIT_MODE_BUTTON
-    ? CALL_WAIT_MODE_BUTTON
-    : CALL_WAIT_MODE_REACTION;
+  return mode === CALL_WAIT_MODE_REACTION
+    ? CALL_WAIT_MODE_REACTION
+    : CALL_WAIT_MODE_BUTTON;
 }
 
 function normalizeCallWaitMemberIds(memberIds) {
@@ -1498,12 +1494,30 @@ async function runCallWaitFollowupCheck(guildId) {
   );
 
   if (activeVoiceMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
+    const promptChannel = await resolveConfiguredTextChannel(
+      guild,
+      getCallWaitPromptChannelId(settings),
+    );
+
+    if (promptChannel) {
+      await sendCallWaitSkippedNotice(promptChannel, new Date());
+    }
+
     return;
   }
 
   await sendCallWaitPromptForGuild(guild, settings, {
     force: false,
     now: new Date(),
+  });
+}
+
+async function sendCallWaitSkippedNotice(channel, now) {
+  await channel.send({
+    content: `複数人が雑談中なので${formatJstHourNumber(getNextHourStart(now))}時の募集は出ません`,
+    allowedMentions: { parse: [] },
+  }).catch((error) => {
+    console.error(`Failed to send skipped call wait notice: ${error.message}`);
   });
 }
 
@@ -1547,14 +1561,15 @@ function getCallWaitActiveVoiceMemberIds(guild, categoryId) {
   return [...memberIds];
 }
 
-function formatCallWaitPrompt(targetAt, mode = CALL_WAIT_MODE_REACTION) {
+function formatCallWaitPrompt(targetAt, mode = CALL_WAIT_MODE_BUTTON) {
   const targetHour = formatJstHour(targetAt);
 
   if (mode === CALL_WAIT_MODE_BUTTON) {
     return [
-      `${targetHour}から少し雑談してみたい方は、下のボタンを押してください。`,
+      "【お手軽募集ボタン】",
+      `${formatJstHourNumber(targetAt)}時から雑談してみたい方は、下のボタンを押してください。`,
       `${targetHour}時点で複数人が集まっていたら、メンションでお知らせします。`,
-      "メンションが来た方は、VCへの参加をお願いします。",
+      "メンションを受け取ったらVCへの参加をお願いします！",
     ].join("\n");
   }
 
@@ -1580,6 +1595,11 @@ function getNextHourStart(date) {
 function formatJstHour(date) {
   const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
   return `${String(jstDate.getUTCHours()).padStart(2, "0")}:00`;
+}
+
+function formatJstHourNumber(date) {
+  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  return String(jstDate.getUTCHours());
 }
 
 async function deletePreviousDailyWadaiMessage(guild, settings) {
@@ -2234,8 +2254,28 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
     return;
   }
 
-  const members = getNonBotVoiceMembers(voiceChannel);
   const existingMessageId = autoSplitSuggestionMessages.get(channelId);
+  const isTargetCategory = await isPbChildVoiceChannel(
+    guild,
+    settings,
+    voiceChannel,
+  );
+
+  if (!isTargetCategory) {
+    if (existingMessageId) {
+      await deleteAutoSplitSuggestionMessage(
+        guild,
+        settings,
+        voiceChannel,
+        existingMessageId,
+      );
+      autoSplitSuggestionMessages.delete(channelId);
+    }
+
+    return;
+  }
+
+  const members = getNonBotVoiceMembers(voiceChannel);
 
   if (members.length >= AUTO_SPLIT_THRESHOLD) {
     if (existingMessageId) {
@@ -2250,7 +2290,8 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
 
     const canAutoSplit = Boolean(settings?.voiceReminderParentChannelId && settings?.tempRoleId);
     const components = [createAutoSplitRow(channelId, !canAutoSplit)];
-    const mentionText = settings?.tempRoleId ? `<@&${settings.tempRoleId}> ` : "";
+    const mentionRoleId = settings?.voiceParticipantRoleId;
+    const mentionText = mentionRoleId ? `<@&${mentionRoleId}> ` : "";
     const content =
       `${mentionText}1つのvcに６人以上集まると喋れない人が出てきがちなので当チャンネルでは振り分けを推奨しています。\nまた、振り分け方が決まらないときは下の自動振り分けボタンをご活用ください！` +
       (canAutoSplit
@@ -2260,7 +2301,7 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
     const suggestionMessage = await reminderChannel.send({
       content,
       components,
-      allowedMentions: settings?.tempRoleId ? { roles: [settings.tempRoleId] } : { parse: [] },
+      allowedMentions: mentionRoleId ? { roles: [mentionRoleId] } : { parse: [] },
     });
 
     autoSplitSuggestionMessages.set(channelId, suggestionMessage.id);
@@ -2268,17 +2309,35 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
   }
 
   if (existingMessageId && members.length < AUTO_SPLIT_THRESHOLD) {
-    const reminderChannel = await findAssociatedTextChannel(guild, voiceChannel, settings);
-    if (reminderChannel && typeof reminderChannel.messages?.fetch === "function") {
-      const message = await reminderChannel.messages
-        .fetch(existingMessageId)
-        .catch(() => null);
-      if (message) {
-        await message.delete().catch(() => null);
-      }
-    }
-
+    await deleteAutoSplitSuggestionMessage(
+      guild,
+      settings,
+      voiceChannel,
+      existingMessageId,
+    );
     autoSplitSuggestionMessages.delete(channelId);
+  }
+}
+
+async function deleteAutoSplitSuggestionMessage(
+  guild,
+  settings,
+  voiceChannel,
+  messageId,
+) {
+  const reminderChannel = await findAssociatedTextChannel(
+    guild,
+    voiceChannel,
+    settings,
+  );
+
+  if (!reminderChannel || typeof reminderChannel.messages?.fetch !== "function") {
+    return;
+  }
+
+  const message = await reminderChannel.messages.fetch(messageId).catch(() => null);
+  if (message) {
+    await message.delete().catch(() => null);
   }
 }
 
@@ -4368,7 +4427,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `機能: ${settings.callWaitEnabled === true ? "有効" : "無効"}`,
       `募集方式: ${normalizeCallWaitMode(settings.callWaitMode) === CALL_WAIT_MODE_BUTTON ? "ボタン式" : "リアクション式"}`,
       `参加希望者ロール: ${settings.callWaitRoleId ? `<@&${settings.callWaitRoleId}>` : "未設定"}`,
-      `互換用送信先: ${settings.callWaitChannelId ? `<#${settings.callWaitChannelId}>` : "未設定"}`,
       `募集メッセージ送信先: ${getCallWaitPromptChannelId(settings) ? `<#${getCallWaitPromptChannelId(settings)}>` : "未設定"}`,
       `集合通知送信先: ${getCallWaitNoticeChannelId(settings) ? `<#${getCallWaitNoticeChannelId(settings)}>` : "未設定"}`,
       `参加確認VCカテゴリ: ${settings.callWaitVoiceCategoryId ? `<#${settings.callWaitVoiceCategoryId}>` : "未設定"}`,

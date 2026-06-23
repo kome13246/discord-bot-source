@@ -27,7 +27,7 @@
 - `/b` で募集メッセージを送信できます。
 - `/b` 実行者がVCに入っていて名目を指定した場合、そのVC名を名目で更新します。
 - VC集合フォームで、2人以上集まったVCに参加者ロールを付与し、開始時に話題フォーム付きメッセージを送れます。
-- 1つのVCに6人以上いる場合、自動振り分け提案を送れます。
+- VC集合フォームと同じPB子VCカテゴリ内で、1つのVCに6人以上いる場合だけ自動振り分け提案を送れます。
 - 話題フォームの内容を、送信者が参加中のVCチャンネルステータスへ `今の話題：...` として設定できます。
 - 毎日朝6:00に、おすすめ話題を指定チャンネルへ3択で投稿できます。
 - `/splitvc` の転送完了後、当日投稿済みのおすすめ話題を参加者ロールへメンションして再掲できます。
@@ -193,11 +193,10 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_ROLE_REMOVE_WAIT_MINUTES=3
 # PB_CALL_WAIT_ENABLED=true
 # PB_CALL_WAIT_ROLE_ID=123456789012345678
-# PB_CALL_WAIT_CHANNEL_ID=123456789012345678
 # PB_CALL_WAIT_PROMPT_CHANNEL_ID=123456789012345678
 # PB_CALL_WAIT_NOTICE_CHANNEL_ID=123456789012345678
 # PB_CALL_WAIT_VOICE_CATEGORY_ID=123456789012345678
-# PB_CALL_WAIT_MODE=reaction
+# PB_CALL_WAIT_MODE=button
 # PB_CALL_WAIT_BOSYU_NOTICE_ENABLED=false
 ```
 
@@ -232,11 +231,10 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_ROLE_REMOVE_WAIT_MINUTES` | 任意 | 終了通知後のロール解除待機分数です。未設定時は3分です。 |
 | `PB_CALL_WAIT_ENABLED` | 任意 | 通話待機システムの有効・無効です。`true` で有効化します。 |
 | `PB_CALL_WAIT_ROLE_ID` | 任意 | 通話希望者に30分だけ付与するロールIDです。 |
-| `PB_CALL_WAIT_CHANNEL_ID` | 任意 | 互換用です。募集メッセージと集合通知の両方に使うチャンネルIDです。 |
 | `PB_CALL_WAIT_PROMPT_CHANNEL_ID` | 任意 | 通話待機システムの募集メッセージを送るチャンネルIDです。 |
 | `PB_CALL_WAIT_NOTICE_CHANNEL_ID` | 任意 | 通話待機システムの集合通知を送るチャンネルIDです。 |
 | `PB_CALL_WAIT_VOICE_CATEGORY_ID` | 任意 | 毎時ちょうどに、すでに2人以上いるか確認するVCカテゴリIDです。 |
-| `PB_CALL_WAIT_MODE` | 任意 | `reaction` または `button` です。未設定時は `reaction` です。 |
+| `PB_CALL_WAIT_MODE` | 任意 | `reaction` または `button` です。未設定時は `button` です。 |
 | `PB_CALL_WAIT_BOSYU_NOTICE_ENABLED` | 任意 | 集合通知後に `/b` の募集ロールへ途中参加案内を送るかどうかです。 |
 
 テスト中は `DISCORD_GUILD_ID` を入れるのがおすすめです。
@@ -468,7 +466,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_CHANNEL_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
 Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting reminder` などで再設定が必要になることがあります。
 
@@ -587,7 +585,6 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `moderator_role` | 相談・苦情フォームの転送時にメンションするモデレーターロールです。 |
 | `call_wait_enabled` | 通話待機システムを有効・無効にします。 |
 | `call_wait_role` | 希望者が2人以上集まったとき、一時的に付与するロールです。 |
-| `call_wait_channel` | 互換用です。募集メッセージと集合通知の両方に使うチャンネルです。 |
 | `call_wait_prompt_channel` | リアクション式・ボタン式の募集メッセージを送るチャンネルです。 |
 | `call_wait_notice_channel` | 集合通知を送るチャンネルです。 |
 | `call_wait_voice_category` | 毎時ちょうどに、すでに2人以上いるか確認するVCカテゴリです。 |
@@ -792,7 +789,9 @@ VC集合フォームは、PB子VCまたは設定された監視VCに2人以上�
 - 対象VCが2人未満になった場合、5分待ってからセッションを終了します。5分以内に2人以上へ戻った場合はセッションを継続します。
 - 対象VCが2人未満になってから10分後に、集合メッセージと話題フォームを削除します。10分以内に2人以上へ戻った場合は削除を取り消し、同じフォームを継続します。
 - セッション終了時、他の有効なVCセッションにいないメンバーから参加者ロールを解除します。
-- 1つのVC単体で6人以上になると、自動振り分け提案を送ります。
+- `voice_reminder_child_category` で指定したカテゴリ内のVC単体で6人以上になると、自動振り分け提案を送ります。
+- `voice_reminder_child_category` が未設定の場合は、VC集合フォームと同じく `child_category`、またはPB親VCのカテゴリから判定します。
+- 自動振り分け提案では、`voice_participant_role` で指定したVC集合フォームの参加者ロールをメンションします。
 
 話題フォーム:
 
@@ -809,6 +808,7 @@ VC集合フォームは、PB子VCまたは設定された監視VCに2人以上�
 
 毎時ちょうどに、1時間後の雑談希望者を募集します。
 募集方式は `call_wait_mode` で、リアクション式またはボタン式から選べます。
+`call_wait_mode` を指定せずに有効・無効などを変更しても、直前の募集方式は維持されます。募集方式が一度も設定されていない場合はボタン式になります。
 
 リアクション式の場合、例として10:00に動くと、11:00から雑談したい人向けに次のようなメッセージを送ります。
 
@@ -820,14 +820,16 @@ VC集合フォームは、PB子VCまたは設定された監視VCに2人以上�
 
 Bot自身が先に `🤚` を付けます。
 
-ボタン式の場合は、次のメッセージと `11:00から雑談希望` のような時刻入りボタンを送ります。
+ボタン式の場合は、次のメッセージと `11時から雑談希望` のような時刻入りボタンを送ります。
 
 ```text
-11:00から少し雑談してみたい方は、下のボタンを押してください。
+【お手軽募集ボタン】
+11時から雑談してみたい方は、下のボタンを押してください。
 11:00時点で複数人が集まっていたら、メンションでお知らせします。
-メンションが来た方は、VCへの参加をお願いします。
+メンションを受け取ったらVCへの参加をお願いします！
 ```
 
+時刻が5:00の場合、本文とボタンでは `5時` と表示し、先頭に `0` は付けません。
 ボタンを押した人には、自分だけに見える `希望をキャンセル` ボタンを表示します。
 希望ボタン、キャンセルボタン、人数不足によるリセットが発生した場合は、`log_channel` に操作ユーザーと現在の希望者リストを送ります。
 
@@ -849,6 +851,7 @@ Bot自身が先に `🤚` を付けます。
 11:00時点で希望者が2人未満の場合、古い募集メッセージを削除し、希望者カウントをリセットして、12:00向けの募集メッセージを新しく送ります。
 
 `call_wait_voice_category` に設定したVCカテゴリ内に、毎時ちょうどの時点でBot以外の参加者が2人以上いる場合は、募集メッセージは送らず、残っている募集メッセージがあれば削除します。
+この場合、募集メッセージ送信先へ `複数人が雑談中なので12時の募集は出ません` のように、募集を出さなかった理由を送ります。集合通知30分後の再確認で2人以上いた場合も同様です。
 このカテゴリ内VC人数の確認だけでロール付与や集合通知は行いません。集合通知の対象は、あくまで募集メッセージに反応またはボタンで希望した人だけです。
 
 再デプロイ直後やイベント前など、定時を待たずに募集メッセージを出したい場合は、管理者が次を実行します。
