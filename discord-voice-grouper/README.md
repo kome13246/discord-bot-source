@@ -29,12 +29,14 @@
 - VC集合フォームで、2人以上集まったVCに参加者ロールを付与し、開始時に話題フォーム付きメッセージを送れます。
 - VC集合フォームと同じPB子VCカテゴリ内で、1つのVCに6人以上いる場合だけ自動振り分け提案を送れます。
 - 話題フォームの内容を、送信者が参加中のVCチャンネルステータスへ `今の話題：...` として設定できます。
-- 毎日朝6:00に、おすすめ話題を指定チャンネルへ3択で投稿できます。
-- `/splitvc` の転送完了後、当日投稿済みのおすすめ話題を参加者ロールへメンションして再掲できます。
-- `/splitvc` 後のおすすめ話題再掲先を、実行チャンネルとは別に指定できます。
+- `/kokuchi` で会話練習会の告知を投稿し、最初の話題を話題リストからランダムに選べます。
+- `/kokuchi` 当日20:40に集合VCを開放し、`/splitvc` 転送完了時に接続不可へ戻せます。
+- `/kokuchi` 当日20:55に、会話練習会の集合開始メッセージを告知送信先へ送れます。
+- `/splitvc` の転送完了後、最後に `/kokuchi` で選ばれた話題と、グループごとの発話順を参加者ロールへメンションして送信できます。
+- `/splitvc` 後の話題・発話順の送信先を、実行チャンネルとは別に指定できます。
+- `/splitvc` の参加者ロール解除時に、参加のお礼と次回案内を送信できます。
 - `/splitvc` 後にスタート・途中参加案内を指定チャンネルへ送り、待機VC削除時に締切済みの文面へ編集できます。
 - `/addwadai`、`/showwadai`、`/delwadai` でおすすめ話題の追加・確認・削除ができます。
-- `/sendwadai` で、管理者が定時外におすすめ話題を投稿できます。
 - 運用ログを指定チャンネルにまとめられます。
 - 話題提供、提案・要望、相談・苦情フォームを設置し、入力内容を指定チャンネルへ転送できます。
 - 通話待機システムで、毎時ちょうどに次の1時間後の雑談希望者をリアクションで募集できます。
@@ -152,6 +154,7 @@ Bot Permissions:
 - 参加者ロールを付与・解除するため、Manage Roles権限が必要です。
 - 参加者ロールはBotの最上位ロールより下に置いてください。
 - 途中参加用の待機VCを作成・削除するため、Manage Channels権限が必要です。
+- 集合VCのeveryone接続権限を20:40に許可し、`/splitvc` 転送完了時に不可へ戻すため、対象VCのManage Channels権限が必要です。
 - 話題フォームの内容をVCチャンネルステータスへ設定するため、Set Voice Channel Status権限が必要です。Botが対象VCに入っていない場合はManage Channels権限も必要です。
 - おすすめ話題、運用ログ、フォーム設置、フォーム転送先の各チャンネルへメッセージを送信できる必要があります。
 - 通話待機システムでは、募集メッセージにリアクションを付けるため `Add Reactions`、リアクションしたユーザーを確認するため `Read Message History` が必要です。
@@ -184,6 +187,8 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_WADAI_CHANNEL_ID=123456789012345678
 # PB_POST_SPLIT_WADAI_CHANNEL_ID=123456789012345678
 # PB_SPLIT_START_CHANNEL_ID=123456789012345678
+# PB_GATHERING_VOICE_CHANNEL_ID=123456789012345678
+# PB_SPLIT_FEEDBACK_CHANNEL_ID=1513457664041160765
 # PB_LOG_CHANNEL_ID=123456789012345678
 # PB_FORM_CHANNEL_ID=123456789012345678
 # PB_FORM_SEND_CHANNEL_ID=123456789012345678
@@ -219,9 +224,11 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_VOICE_TOPIC_CHANNEL_ID` | 任意 | 旧設定との互換用です。現在のリマインダー話題フォームでは使いません。 |
 | `PB_VOICE_REMINDER_PARENT_CHANNEL_ID` | 任意 | リマインダー対象にするPB親VCのIDです。 |
 | `PB_VOICE_REMINDER_CHILD_CATEGORY_ID` | 任意 | リマインダー対象にするPB子VCカテゴリIDです。未設定時はPB親VCのカテゴリから判定します。 |
-| `PB_WADAI_CHANNEL_ID` | 任意 | 毎朝6時のおすすめ話題を送るテキストチャンネルIDです。 |
-| `PB_POST_SPLIT_WADAI_CHANNEL_ID` | 任意 | `/splitvc` 後におすすめ話題を再掲するテキストチャンネルIDです。未設定時は実行チャンネルへ送ります。 |
+| `PB_WADAI_CHANNEL_ID` | 任意 | `/kokuchi` の告知送信先として使うテキストチャンネルIDです。 |
+| `PB_POST_SPLIT_WADAI_CHANNEL_ID` | 任意 | `/splitvc` 後に最初の話題と発話順を送るテキストチャンネルIDです。未設定時は実行チャンネルへ送ります。 |
 | `PB_SPLIT_START_CHANNEL_ID` | 任意 | `/splitvc` 後にスタート・途中参加案内を送るテキストチャンネルIDです。未設定時は送信しません。 |
+| `PB_GATHERING_VOICE_CHANNEL_ID` | 任意 | `/kokuchi` 当日20:40にeveryone接続権限を許可し、`/splitvc` 転送完了時に不可へ戻す集合VCのIDです。 |
+| `PB_SPLIT_FEEDBACK_CHANNEL_ID` | 任意 | `/splitvc` 終了後のお礼メッセージで、意見・苦情案内として表示するチャンネルIDです。未設定時は `1513457664041160765` です。 |
 | `PB_LOG_CHANNEL_ID` | 任意 | 運用ログをまとめるテキストチャンネルIDです。 |
 | `PB_FORM_CHANNEL_ID` | 任意 | フォームボタンを設置するテキストチャンネルIDです。 |
 | `PB_FORM_SEND_CHANNEL_ID` | 任意 | フォーム入力内容を転送するテキストチャンネルIDです。 |
@@ -466,7 +473,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
 Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting reminder` などで再設定が必要になることがあります。
 
@@ -544,10 +551,10 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 `/setting set` は使わず、次のように機能別サブコマンドで設定します。
 
 ```text
-/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題再掲先 split_start_channel:スタート案内先 transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
+/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 split_start_channel:スタート案内先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
 /setting bosyu bosyu_channel:募集チャンネル bosyu_mention_role:@募集通知
 /setting reminder voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_channel:リマインダー送信先 voice_reminder_parent_channel:PB親VC voice_reminder_child_category:PB子VCカテゴリ
-/setting wadai wadaich:毎朝話題送信先
+/setting wadai wadaich:告知送信先
 /setting logs log_channel:運用ログ
 /setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
 /setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:募集チャンネル call_wait_notice_channel:集合通知チャンネル call_wait_voice_category:VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true
@@ -576,9 +583,11 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `voice_topic_channel` | 旧設定との互換用です。現在のリマインダー話題フォームでは使いません。 |
 | `voice_reminder_parent_channel` | リマインダー対象にするPB親VCです。 |
 | `voice_reminder_child_category` | リマインダー対象にするPB子VCカテゴリです。未設定時はPB親VCのカテゴリから判定します。 |
-| `wadaich` | 毎朝6時のおすすめ話題を送るテキストチャンネルです。 |
-| `post_split_wadai_channel` | `/splitvc` 後のおすすめ話題再掲先です。未設定時は実行チャンネルへ送ります。 |
+| `wadaich` | `/kokuchi` の告知送信先です。`/kokuchi` の `channel` を省略した場合に使います。 |
+| `post_split_wadai_channel` | `/splitvc` 後の最初の話題と発話順の送信先です。未設定時は実行チャンネルへ送ります。 |
 | `split_start_channel` | `/splitvc` 後のスタート・途中参加案内送信先です。未設定時は送信しません。 |
+| `gathering_voice_channel` | `/kokuchi` 当日20:40にeveryone接続権限を許可し、`/splitvc` 転送完了時に不可へ戻す集合VCです。 |
+| `split_feedback_channel` | `/splitvc` 終了後のお礼メッセージで、意見・苦情案内として表示するチャンネルです。未設定時は `1513457664041160765` です。 |
 | `log_channel` | 転送結果、待機VC作成、途中参加転送、PB子VC削除による終了通知自動キャンセル、ロール解除結果などの運用ログをまとめるチャンネルです。未設定時は従来どおり実行チャンネルへ送ります。 |
 | `form_channel` | フォームボタンを設置するチャンネルです。 |
 | `form_send_channel` | フォーム入力内容を転送するチャンネルです。 |
@@ -606,66 +615,90 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 
 ### おすすめ話題
 
-毎日朝6:00に、`wadaich` で設定したチャンネルへおすすめ話題を3択で投稿します。
-定時投稿では参加者ロールへのメンションは行いません。
+話題は1つのリストで管理します。
+`/kokuchi` を実行すると、話題リストから1つランダムに選び、会話練習会の告知に入れて投稿します。
+全ての話題が1回ずつ選ばれるまでは、同じ話題は重複しません。
 
-定時投稿の形式:
-
-```text
-本日のお薦め話題
-①好きな食べ物は？
-②最近うれしかったことは？
-③無人島に一つだけ持っていくなら何？
-
-ぜひ使ってみてください！
-```
-
-新しい話題を投稿すると、前回投稿した話題メッセージは自動削除します。
-デプロイ直後や確認用に定時外で投稿したい場合は、管理者が次を実行します。
+初期状態では、次の話題が登録されています。
 
 ```text
-/sendwadai
+最近の趣味
+最近やろうと思っていること
+休みの日にやりがちなこと
+最近あったちょっとよかったこと
+最近食べておいしかったもの
+買ってよかったもの
+今ほしいと思ってるもの
+今ハマってるもの
 ```
 
-`/splitvc` の転送が完了し、参加者ロール付与が終わった後は、当日投稿済みの話題をコピーして送信します。
+#### `/kokuchi`
 
-`/splitvc` 後の送信形式:
+会話練習会の告知を投稿します。
+`channel` を省略した場合は、`/setting wadai wadaich:...` で設定したチャンネルに投稿します。
+
+```text
+/kokuchi weekday:火曜日 overview_channel:#概要 channel:#告知
+```
+
+投稿形式:
+
+```text
+本日は火曜日！
+21:00から会話練習会です！
+（概要は #概要 から）
+
+今回の最初の話題は「最近の趣味」です！
+
+ただ雑談したい方はもちろん、少しずつ会話に慣れていきたいという方にも参加していただきたいです！
+時間の都合が合う方はぜひご参加ください！！
+```
+
+`/kokuchi` で選ばれた話題は保存され、次の `/splitvc` 後メッセージでも使われます。
+まだ `/kokuchi` で話題が選ばれていない場合は、`/splitvc` 後の送信時にその場でランダム選出します。
+`gathering_voice_channel` が設定されている場合、`/kokuchi` を送信した日の20:40に、その集合VCのeveryone接続権限を許可します。
+同じ日の20:55には、`/kokuchi` を送信したチャンネルへ次の集合開始メッセージを送ります。
+
+```text
+@ロール @ロール 会話練習会の集合が開始しました！ #集合VC からぜひご参加ください！5分後に締め切られます
+```
+
+`/splitvc` の転送が完了し、参加者ロール付与が終わった後は、最初の話題とグループごとの発話順を送信します。
 
 ```text
 @参加者ロール
-おすすめの話題
-①好きな食べ物は？
-②最近うれしかったことは？
-③無人島に一つだけ持っていくなら何？
-話題に詰まったらここから選んでみてください！
+今日の最初の話題：
+「最近の趣味」
+
+話す量は一言くらいで大丈夫です！
+まずは以下の順番で、一人ずつ軽く話してみてください。
+言葉がまとまらなかったら、順番を後ろに回しても大丈夫です。
+
+【練習部屋.1】
+1. ユーザーA
+2. ユーザーB
+3. ユーザーC
+
+【練習部屋.2】
+1. ユーザーD
+2. ユーザーE
+3. ユーザーF
+
+ひとことずつ話した後は自由に会話してください！
 ```
 
-`/splitvc` 後のコピー送信は、`/splitvc` を実行したチャンネルへ送ります。
-まだ本日分の話題が投稿されていない場合、`/splitvc` 後のコピー送信は行われません。
-
-話題は3つの分野ごとに管理します。
-
-| 分野 | 内容 |
-| --- | --- |
-| `1` | 大まかな話題です。趣味や好きな食べ物などを入れます。 |
-| `2` | 最近ベースの話題です。最近の出来事や近況を入れます。 |
-| `3` | 思考実験やディベート的な話題です。 |
-
-各分野から1つずつランダムに選びます。
-一度選ばれた話題は、同じ分野で最低3回は選ばれないようにします。
-登録数が少なくて条件を満たせない場合だけ、再選択されることがあります。
-
-初期状態では、各分野に5個ずつ話題が登録されています。
+発話順は、グループごとにランダムで決まります。
+ユーザー名はメンションではなく表示名で出します。
+送信先は `/setting splitvc post_split_wadai_channel:...` で指定できます。未設定時は `/splitvc` を実行したチャンネルへ送ります。
 
 #### `/addwadai`
 
 話題を追加します。
 
 ```text
-/addwadai category:1 content:好きな季節は？
+/addwadai content:好きな季節は？
 ```
 
-`category` は `1`、`2`、`3` から選びます。
 追加と削除にはサーバー管理権限が必要です。
 
 #### `/showwadai`
@@ -679,15 +712,10 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 表示例:
 
 ```text
-①大まかな話題
-1. 好きな食べ物は？
-2. 趣味は何？
-
-②最近ベースの話題
-1. 最近うれしかったことは？
-
-③思考実験やディベート的なもの
-1. 無人島に一つだけ持っていくなら何？
+話題リスト
+1. 最近の趣味
+2. 最近やろうと思っていること
+3. 休みの日にやりがちなこと
 ```
 
 #### `/delwadai`
@@ -695,10 +723,10 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 `/showwadai` に表示された添え字で話題を削除します。
 
 ```text
-/delwadai target:1-2
+/delwadai target:2
 ```
 
-上の例では、①大まかな話題の2番目を削除します。
+上の例では、2番目の話題を削除します。
 削除後の添え字は自動で詰められます。
 
 ### フォーム
@@ -722,7 +750,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 1つ目:
 
 ```text
-日替わり話題にちょうどいい話題があればぜひ！
+会話練習会の最初の話題にちょうどいい話題があればぜひ！
 ```
 
 この下に `話題提供フォーム` ボタンが付きます。
@@ -852,6 +880,7 @@ Bot自身が先に `🤚` を付けます。
 
 `call_wait_voice_category` に設定したVCカテゴリ内に、毎時ちょうどの時点でBot以外の参加者が2人以上いる場合は、募集メッセージは送らず、残っている募集メッセージがあれば削除します。
 この場合、募集メッセージ送信先へ `複数人が雑談中なので12時の募集は出ません` のように、募集を出さなかった理由を送ります。集合通知30分後の再確認で2人以上いた場合も同様です。
+理由メッセージは募集メッセージと同じ扱いで、次に募集メッセージまたは新しい理由メッセージを送るときに古いものを削除します。
 このカテゴリ内VC人数の確認だけでロール付与や集合通知は行いません。集合通知の対象は、あくまで募集メッセージに反応またはボタンで希望した人だけです。
 
 再デプロイ直後やイベント前など、定時を待たずに募集メッセージを出したい場合は、管理者が次を実行します。
@@ -892,12 +921,18 @@ PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も�
 3. 30秒待機し、待機中だけ転送キャンセルボタンを表示します。
 4. 各グループから1人をPB親VCへ移動します。
 5. PBが作成した子VCを検出し、同じグループの残りメンバーを移動します。
-6. 転送と参加者ロール付与が終わった後、当日投稿済みのおすすめ話題をコピーして送信します。
-7. 25分後に参加者ロールへメンションして終了通知を送信します。
-8. 終了通知の3分後に参加者ロールを解除します。
+6. 転送と参加者ロール付与が終わった後、集合VCのeveryone接続権限を不可に戻します。
+7. 最初の話題とグループごとの発話順を送信します。
+8. 25分後に参加者ロールへメンションして終了通知を送信します。
+9. 終了通知の3分後に参加者ロールを解除します。
+10. `split_start_channel` に、参加のお礼と次回案内を送信します。
 
-おすすめ話題の再掲先は `/setting splitvc post_split_wadai_channel:...` で指定できます。
+最初の話題と発話順の送信先は `/setting splitvc post_split_wadai_channel:...` で指定できます。
 未設定の場合は、従来どおり `/splitvc` を実行したチャンネルへ送ります。
+
+参加者ロール解除時のお礼メッセージは、`split_start_channel` へ送ります。
+意見・苦情案内のチャンネルは `/setting splitvc split_feedback_channel:...` で指定できます。
+未設定時は `<#1513457664041160765>` を使います。
 
 `waiting_vc_category` が設定されている場合、振り分け完了後に待機VCを自動作成し、10分間だけ途中参加者を監視します。
 

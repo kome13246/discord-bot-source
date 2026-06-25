@@ -72,6 +72,8 @@ function getEnvironmentSettings(guildId) {
   const wadaiChannelId = process.env.PB_WADAI_CHANNEL_ID;
   const postSplitWadaiChannelId = process.env.PB_POST_SPLIT_WADAI_CHANNEL_ID;
   const splitStartChannelId = process.env.PB_SPLIT_START_CHANNEL_ID;
+  const gatheringVoiceChannelId = process.env.PB_GATHERING_VOICE_CHANNEL_ID;
+  const splitFeedbackChannelId = process.env.PB_SPLIT_FEEDBACK_CHANNEL_ID;
   const logChannelId = process.env.PB_LOG_CHANNEL_ID;
   const formChannelId = process.env.PB_FORM_CHANNEL_ID;
   const formSendChannelId = process.env.PB_FORM_SEND_CHANNEL_ID;
@@ -108,6 +110,8 @@ function getEnvironmentSettings(guildId) {
     !wadaiChannelId &&
     !postSplitWadaiChannelId &&
     !splitStartChannelId &&
+    !gatheringVoiceChannelId &&
+    !splitFeedbackChannelId &&
     !logChannelId &&
     !formChannelId &&
     !formSendChannelId &&
@@ -145,6 +149,8 @@ function getEnvironmentSettings(guildId) {
     wadaiChannelId,
     postSplitWadaiChannelId,
     splitStartChannelId,
+    gatheringVoiceChannelId,
+    splitFeedbackChannelId,
     logChannelId,
     formChannelId,
     formSendChannelId,

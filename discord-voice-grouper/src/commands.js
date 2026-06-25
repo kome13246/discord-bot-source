@@ -73,7 +73,7 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("post_split_wadai_channel")
-          .setDescription("/splitvc後のおすすめ話題再掲先")
+          .setDescription("/splitvc後の最初の話題・発話順の送信先")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
@@ -81,6 +81,20 @@ export const settingCommand = new SlashCommandBuilder()
         option
           .setName("split_start_channel")
           .setDescription("/splitvc後のスタート・途中参加案内送信先")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("gathering_voice_channel")
+          .setDescription("/kokuchi当日20:40に接続許可する集合VC")
+          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("split_feedback_channel")
+          .setDescription("終了後の意見・苦情案内に表示するチャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
@@ -179,11 +193,11 @@ export const settingCommand = new SlashCommandBuilder()
   .addSubcommand((subcommand) =>
     subcommand
       .setName("wadai")
-      .setDescription("おすすめ話題設定を保存します")
+      .setDescription("会話練習会告知の送信先設定を保存します")
       .addChannelOption((option) =>
         option
           .setName("wadaich")
-          .setDescription("毎朝6時のおすすめ話題を送るテキストチャンネル")
+          .setDescription("/kokuchi の告知送信先")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       ),
@@ -314,17 +328,6 @@ export const bCommand = new SlashCommandBuilder()
 export const addWadaiCommand = new SlashCommandBuilder()
   .setName("addwadai")
   .setDescription("おすすめ話題を追加します")
-  .addIntegerOption((option) =>
-    option
-      .setName("category")
-      .setDescription("1:大まかな話題 2:最近ベース 3:思考実験・ディベート")
-      .addChoices(
-        { name: "1 大まかな話題", value: 1 },
-        { name: "2 最近ベースの話題", value: 2 },
-        { name: "3 思考実験・ディベート", value: 3 },
-      )
-      .setRequired(true),
-  )
   .addStringOption((option) =>
     option
       .setName("content")
@@ -343,14 +346,38 @@ export const delWadaiCommand = new SlashCommandBuilder()
   .addStringOption((option) =>
     option
       .setName("target")
-      .setDescription("削除対象。例: 1-2")
+      .setDescription("削除対象。例: 2")
       .setRequired(true)
       .setMaxLength(20),
   );
 
-export const sendWadaiCommand = new SlashCommandBuilder()
-  .setName("sendwadai")
-  .setDescription("本日のおすすめ話題を今すぐ投稿します");
+export const kokuchiCommand = new SlashCommandBuilder()
+  .setName("kokuchi")
+  .setDescription("会話練習会の告知を投稿します")
+  .addStringOption((option) =>
+    option
+      .setName("weekday")
+      .setDescription("告知に入れる曜日")
+      .addChoices(
+        { name: "火曜日", value: "火" },
+        { name: "土曜日", value: "土" },
+      )
+      .setRequired(true),
+  )
+  .addChannelOption((option) =>
+    option
+      .setName("overview_channel")
+      .setDescription("概要案内として表示するチャンネル")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(true),
+  )
+  .addChannelOption((option) =>
+    option
+      .setName("channel")
+      .setDescription("告知を送るチャンネル。省略時は /setting wadai の設定を使用")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(false),
+  );
 
 export const sendCallWaitCommand = new SlashCommandBuilder()
   .setName("sendcallwait")
@@ -367,7 +394,7 @@ export const commands = [
   addWadaiCommand.toJSON(),
   showWadaiCommand.toJSON(),
   delWadaiCommand.toJSON(),
-  sendWadaiCommand.toJSON(),
+  kokuchiCommand.toJSON(),
   sendCallWaitCommand.toJSON(),
   setupFormsCommand.toJSON(),
 ];
