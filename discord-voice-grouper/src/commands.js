@@ -291,6 +291,13 @@ export const settingCommand = new SlashCommandBuilder()
           .setName("call_wait_bosyu_notice_enabled")
           .setDescription("集合通知後に募集ロールへ途中参加案内を送るか")
           .setRequired(false),
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("otebo_quick_confirm_seconds")
+          .setDescription("お手軽募集の即時募集でキャンセルを受け付ける秒数。省略時は30秒")
+          .setMinValue(0)
+          .setRequired(false),
       ),
   )
   .addSubcommand((subcommand) =>
@@ -381,7 +388,11 @@ export const kokuchiCommand = new SlashCommandBuilder()
 
 export const sendCallWaitCommand = new SlashCommandBuilder()
   .setName("sendcallwait")
-  .setDescription("通話待機システムのリアクション募集メッセージを今すぐ送信します");
+  .setDescription("通話待機システムの募集メッセージを今すぐ送信します");
+
+export const sendOteboCommand = new SlashCommandBuilder()
+  .setName("sendotebo")
+  .setDescription("お手軽募集の作成ボタン付きメッセージを送信します");
 
 export const setupFormsCommand = new SlashCommandBuilder()
   .setName("setupforms")
@@ -396,5 +407,6 @@ export const commands = [
   delWadaiCommand.toJSON(),
   kokuchiCommand.toJSON(),
   sendCallWaitCommand.toJSON(),
+  sendOteboCommand.toJSON(),
   setupFormsCommand.toJSON(),
 ];

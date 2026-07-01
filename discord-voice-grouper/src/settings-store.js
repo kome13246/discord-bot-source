@@ -92,6 +92,7 @@ function getEnvironmentSettings(guildId) {
   const callWaitBosyuNoticeEnabled = parseOptionalBoolean(
     process.env.PB_CALL_WAIT_BOSYU_NOTICE_ENABLED,
   );
+  const oteboQuickConfirmSeconds = process.env.PB_OTEBO_QUICK_CONFIRM_SECONDS;
 
   if (
     !tempRoleId &&
@@ -127,7 +128,8 @@ function getEnvironmentSettings(guildId) {
     !callWaitNoticeChannelId &&
     !callWaitVoiceCategoryId &&
     !callWaitMode &&
-    callWaitBosyuNoticeEnabled === undefined
+    callWaitBosyuNoticeEnabled === undefined &&
+    !oteboQuickConfirmSeconds
   ) {
     return null;
   }
@@ -167,6 +169,7 @@ function getEnvironmentSettings(guildId) {
     callWaitVoiceCategoryId,
     callWaitMode,
     callWaitBosyuNoticeEnabled,
+    oteboQuickConfirmSeconds: parseOptionalInteger(oteboQuickConfirmSeconds),
     updatedAt: "environment",
   };
 }
