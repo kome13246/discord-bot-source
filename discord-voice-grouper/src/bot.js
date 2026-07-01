@@ -2693,6 +2693,10 @@ function createOteboCreateRow() {
 function createOteboDraftRows(draft) {
   const timeOptions = createOteboTimeOptions(new Date());
   let selectedTargetAt = draft.targetAt;
+  const selectedType =
+    draft.type === OTEBO_TYPE_IMMEDIATE ? OTEBO_TYPE_IMMEDIATE : OTEBO_TYPE_SCHEDULED;
+  const selectedDuration = normalizeOteboDuration(draft.duration);
+  const selectedMention = draft.mentionBosyu === true ? "yes" : "no";
 
   if (!timeOptions.some((option) => option.value === selectedTargetAt)) {
     selectedTargetAt = timeOptions.defaultTargetAt.toISOString();
@@ -2706,14 +2710,20 @@ function createOteboDraftRows(draft) {
         .setPlaceholder("募集タイプ")
         .addOptions(
           {
-            label: "指定した時間になったら",
+            label:
+              selectedType === OTEBO_TYPE_SCHEDULED
+                ? "募集タイプ：指定した時間になったら"
+                : "指定した時間になったら",
             value: OTEBO_TYPE_SCHEDULED,
-            default: draft.type !== OTEBO_TYPE_IMMEDIATE,
+            default: selectedType === OTEBO_TYPE_SCHEDULED,
           },
           {
-            label: "人が集まったらすぐ",
+            label:
+              selectedType === OTEBO_TYPE_IMMEDIATE
+                ? "募集タイプ：人が集まったらすぐ"
+                : "人が集まったらすぐ",
             value: OTEBO_TYPE_IMMEDIATE,
-            default: draft.type === OTEBO_TYPE_IMMEDIATE,
+            default: selectedType === OTEBO_TYPE_IMMEDIATE,
           },
         ),
     ),
@@ -2723,7 +2733,10 @@ function createOteboDraftRows(draft) {
         .setPlaceholder("メンション・掲載終了時刻")
         .addOptions(
           timeOptions.map((option) => ({
-            label: option.label,
+            label:
+              option.value === selectedTargetAt
+                ? `メンション・掲載終了時刻：${option.label}`
+                : option.label,
             value: option.value,
             default: option.value === selectedTargetAt,
           })),
@@ -2735,19 +2748,28 @@ function createOteboDraftRows(draft) {
         .setPlaceholder("通話時間")
         .addOptions(
           {
-            label: "設定なし",
+            label:
+              selectedDuration === OTEBO_DURATION_NONE
+                ? "通話時間：設定しない"
+                : "設定しない",
             value: OTEBO_DURATION_NONE,
-            default: normalizeOteboDuration(draft.duration) === OTEBO_DURATION_NONE,
+            default: selectedDuration === OTEBO_DURATION_NONE,
           },
           {
-            label: "30分間だけ",
+            label:
+              selectedDuration === OTEBO_DURATION_30
+                ? "通話時間：30分間だけ"
+                : "30分間だけ",
             value: OTEBO_DURATION_30,
-            default: normalizeOteboDuration(draft.duration) === OTEBO_DURATION_30,
+            default: selectedDuration === OTEBO_DURATION_30,
           },
           {
-            label: "1時間だけ",
+            label:
+              selectedDuration === OTEBO_DURATION_60
+                ? "通話時間：1時間だけ"
+                : "1時間だけ",
             value: OTEBO_DURATION_60,
-            default: normalizeOteboDuration(draft.duration) === OTEBO_DURATION_60,
+            default: selectedDuration === OTEBO_DURATION_60,
           },
         ),
     ),
@@ -2757,14 +2779,20 @@ function createOteboDraftRows(draft) {
         .setPlaceholder("@通話へのメンション")
         .addOptions(
           {
-            label: "しない",
+            label:
+              selectedMention === "no"
+                ? "@通話へのメンション：しない"
+                : "しない",
             value: "no",
-            default: draft.mentionBosyu !== true,
+            default: selectedMention === "no",
           },
           {
-            label: "する",
+            label:
+              selectedMention === "yes"
+                ? "@通話へのメンション：する"
+                : "する",
             value: "yes",
-            default: draft.mentionBosyu === true,
+            default: selectedMention === "yes",
           },
         ),
     ),
@@ -2892,11 +2920,11 @@ function formatOteboRecruitmentMessage(recruitment, settings) {
 
   if (recruitment.type === OTEBO_TYPE_IMMEDIATE) {
     return [
-      mention || null,
-      `${getOteboImmediateDurationPrefix(recruitment.duration)}雑談の募集です。`,
-      "ボタンが押され次第メンションします。",
+      `【雑談募集】${mention ? ` ${mention}` : ""}`,
+      `${time}まで掲載される${getOteboImmediateDurationPrefix(recruitment.duration)}雑談の募集です。`,
+      "下のボタンが押されたらすぐに集合メンションされます。",
       noteLine,
-    ].filter(Boolean).join("\n");
+    ].filter((line) => line !== null).join("\n");
   }
 
   return [
