@@ -2,6 +2,8 @@
 
 ボイスチャンネル内にいるメンバーを読み取り、3人組を基本にして自動でグループ分けするDiscord Botです。
 
+読みやすく整理したHTML版は `README.html` にあります。
+
 余りが出た場合は、余った人だけを別グループにするのではなく、既存のグループへ寄せて4人グループを作ります。
 たとえば7人なら `4人 + 3人`、8人なら `4人 + 4人`、11人なら `4人 + 4人 + 3人` になります。
 
@@ -30,8 +32,10 @@
 - VC集合フォームと同じPB子VCカテゴリ内で、1つのVCに6人以上いる場合だけ自動振り分け提案を送れます。
 - 話題フォームの内容を、送信者が参加中のVCチャンネルステータスへ `今の話題：...` として設定できます。
 - `/kokuchi` で会話練習会の告知を投稿し、最初の話題を話題リストからランダムに選べます。
+- `/kokuchi` 当日20:30に、告知送信先へ30分前案内を送れます。
 - `/kokuchi` 当日20:40に集合VCを開放し、`/splitvc` 転送完了時に接続不可へ戻せます。
 - `/kokuchi` 当日20:55に、会話練習会の集合開始メッセージを告知送信先へ送れます。
+- `/kokuchi send_topic:false` を選ぶと、その回は告知にも次回 `/splitvc` 後にも最初の話題を送信しません。
 - `/splitvc` の転送完了後、最後に `/kokuchi` で選ばれた話題と、グループごとの発話順を参加者ロールへメンションして送信できます。
 - `/splitvc` 後の話題・発話順の送信先を、実行チャンネルとは別に指定できます。
 - `/splitvc` の参加者ロール解除時に、参加のお礼と次回案内を送信できます。
@@ -226,9 +230,9 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_VOICE_TOPIC_CHANNEL_ID` | 任意 | 旧設定との互換用です。現在のリマインダー話題フォームでは使いません。 |
 | `PB_VOICE_REMINDER_PARENT_CHANNEL_ID` | 任意 | リマインダー対象にするPB親VCのIDです。 |
 | `PB_VOICE_REMINDER_CHILD_CATEGORY_ID` | 任意 | リマインダー対象にするPB子VCカテゴリIDです。未設定時はPB親VCのカテゴリから判定します。 |
-| `PB_WADAI_CHANNEL_ID` | 任意 | `/kokuchi` の告知送信先として使うテキストチャンネルIDです。 |
+| `PB_WADAI_CHANNEL_ID` | 任意 | `/kokuchi` の告知送信先、20:30案内送信先、`/splitvc` 後のスタート案内・参加お礼送信先として使うテキストチャンネルIDです。 |
 | `PB_POST_SPLIT_WADAI_CHANNEL_ID` | 任意 | `/splitvc` 後に最初の話題と発話順を送るテキストチャンネルIDです。未設定時は実行チャンネルへ送ります。 |
-| `PB_SPLIT_START_CHANNEL_ID` | 任意 | `/splitvc` 後にスタート・途中参加案内を送るテキストチャンネルIDです。未設定時は送信しません。 |
+| `PB_SPLIT_START_CHANNEL_ID` | 任意 | 旧互換用です。現在は `PB_WADAI_CHANNEL_ID` と同じ送信先として扱います。 |
 | `PB_GATHERING_VOICE_CHANNEL_ID` | 任意 | `/kokuchi` 当日20:40にeveryone接続権限を許可し、`/splitvc` 転送完了時に不可へ戻す集合VCのIDです。 |
 | `PB_SPLIT_FEEDBACK_CHANNEL_ID` | 任意 | `/splitvc` 終了後のお礼メッセージで、意見・苦情案内として表示するチャンネルIDです。未設定時は `1513457664041160765` です。 |
 | `PB_LOG_CHANNEL_ID` | 任意 | 運用ログをまとめるテキストチャンネルIDです。 |
@@ -554,10 +558,10 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 `/setting set` は使わず、次のように機能別サブコマンドで設定します。
 
 ```text
-/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 split_start_channel:スタート案内先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
+/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
 /setting bosyu bosyu_channel:募集チャンネル bosyu_mention_role:@募集通知
 /setting reminder voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_channel:リマインダー送信先 voice_reminder_parent_channel:PB親VC voice_reminder_child_category:PB子VCカテゴリ
-/setting wadai wadaich:告知送信先
+/setting wadai wadaich:告知・スタート案内送信先
 /setting logs log_channel:運用ログ
 /setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
 /setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:募集チャンネル call_wait_notice_channel:集合通知チャンネル call_wait_voice_category:VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true otebo_quick_confirm_seconds:30
@@ -586,9 +590,9 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `voice_topic_channel` | 旧設定との互換用です。現在のリマインダー話題フォームでは使いません。 |
 | `voice_reminder_parent_channel` | リマインダー対象にするPB親VCです。 |
 | `voice_reminder_child_category` | リマインダー対象にするPB子VCカテゴリです。未設定時はPB親VCのカテゴリから判定します。 |
-| `wadaich` | `/kokuchi` の告知送信先です。`/kokuchi` の `channel` を省略した場合に使います。 |
+| `wadaich` | `/kokuchi` の告知送信先と、`/splitvc` 後のスタート案内・参加お礼送信先を兼ねます。`/kokuchi` の `channel` を省略した場合にも使います。 |
 | `post_split_wadai_channel` | `/splitvc` 後の最初の話題と発話順の送信先です。未設定時は実行チャンネルへ送ります。 |
-| `split_start_channel` | `/splitvc` 後のスタート・途中参加案内送信先です。未設定時は送信しません。 |
+| `split_start_channel` | 旧設定との互換用です。現在は `wadaich` と同じ送信先として扱います。 |
 | `gathering_voice_channel` | `/kokuchi` 当日20:40にeveryone接続権限を許可し、`/splitvc` 転送完了時に不可へ戻す集合VCです。 |
 | `split_feedback_channel` | `/splitvc` 終了後のお礼メッセージで、意見・苦情案内として表示するチャンネルです。未設定時は `1513457664041160765` です。 |
 | `log_channel` | 転送結果、待機VC作成、途中参加転送、PB子VC削除による終了通知自動キャンセル、ロール解除結果などの運用ログをまとめるチャンネルです。未設定時は従来どおり実行チャンネルへ送ります。 |
@@ -639,9 +643,10 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 
 会話練習会の告知を投稿します。
 `channel` を省略した場合は、`/setting wadai wadaich:...` で設定したチャンネルに投稿します。
+`send_topic:false` を指定すると、その回は告知に最初の話題を入れず、次回の `/splitvc` 後にも最初の話題メッセージを送りません。
 
 ```text
-/kokuchi weekday:火曜日 overview_channel:#概要 channel:#告知
+/kokuchi weekday:火曜日 overview_channel:#概要 channel:#告知 send_topic:true
 ```
 
 投稿形式:
@@ -659,6 +664,13 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 
 `/kokuchi` で選ばれた話題は保存され、次の `/splitvc` 後メッセージでも使われます。
 まだ `/kokuchi` で話題が選ばれていない場合は、`/splitvc` 後の送信時にその場でランダム選出します。
+`send_topic:false` の `/kokuchi` が最後に実行されている場合は、次の `/splitvc` 後の最初の話題メッセージは送られません。
+同じ日の20:30には、`/kokuchi` の告知送信先へ次の30分前案内を送ります。
+
+```text
+30分前です！ぜひご参加ください！
+```
+
 `gathering_voice_channel` が設定されている場合、`/kokuchi` を送信した日の20:40に、その集合VCのeveryone接続権限を許可します。
 同じ日の20:55には、`/kokuchi` を送信したチャンネルへ次の集合開始メッセージを送ります。
 
@@ -924,12 +936,16 @@ Discordの仕様上、ラジオボタンではなく選択メニューで次の�
 ひとこと欄に `@everyone` やロールメンションを書いても、メンションとして通知されないように処理します。
 
 同時に作成できる募集は一人一つまでです。
-内容を変更したい場合は、作成者だけに表示される `募集をキャンセル` ボタンで既存の募集を削除してから作り直します。
+募集作成者も、初期状態で参加予定者リストに入っている参加予定者として扱います。
+募集メッセージには `参加希望` または `参加を予定` ボタンと、常設の `参加をキャンセル` ボタンが付きます。
+参加予定者が0人になった場合のみ、募集メッセージを削除して募集を終了します。
 
 `指定した時間になったら` の場合:
 
 - 募集者本人は最初から参加予定者に含まれます。
-- 他のユーザーが `参加を予定` ボタンを押すと参加予定者に追加され、自分だけに見えるキャンセルボタンが表示されます。
+- 募集本文に `現在の参加予定者数：x人` を表示し、参加予定者の増減時に更新します。
+- 他のユーザーが `参加を予定` ボタンを押すと参加予定者に追加されます。
+- 参加を取り消す場合は、募集メッセージ下の `参加をキャンセル` ボタンを押します。
 - 指定時刻に募集者を含めて2人以上いれば、参加予定者に `call_wait_role` を付与して集合通知を送ります。
 - 2人未満の場合は募集メッセージを削除します。
 
@@ -937,11 +953,13 @@ Discordの仕様上、ラジオボタンではなく選択メニューで次の�
 
 - 募集者本人は最初から参加予定者に含まれます。
 - 他のユーザーが `参加希望` ボタンを押すと参加希望者に追加され、`otebo_quick_confirm_seconds` 秒だけキャンセルできます。
+- キャンセル猶予中の一時メッセージは、残り秒数を毎秒更新します。
 - キャンセルされずに猶予時間が過ぎると、募集者と参加希望者に `call_wait_role` を付与して集合通知を送ります。
 - 掲載終了時刻まで誰も参加希望しなかった場合は、募集メッセージを削除します。
 
 集合通知後、`call_wait_role` は20分後に自動解除します。
-作成者が募集をキャンセルした時点で募集者以外の参加希望者がいた場合、その参加希望者に `call_wait_role` を付与し、`参加しようとしていた募集はキャンセルされました` と通知します。
+会話時間に `30分間だけ` または `1時間だけ` が選ばれていた場合、集合通知後20分以内にロール付与対象者が同じVCへ最初に2人以上集まると、そのVCのチャンネルステータスを `会話時間：30分(予定)` または `会話時間：1時間(予定)` に設定します。
+設定したステータスは、会話時間 + 15分後に空へ戻します。
 参加・キャンセル・リセットのログは、定時募集と同じように `log_channel` へ送ります。
 
 ### `/splitvc`
@@ -978,12 +996,12 @@ PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も�
 7. 最初の話題とグループごとの発話順を送信します。
 8. 25分後に参加者ロールへメンションして終了通知を送信します。
 9. 終了通知の3分後に参加者ロールを解除します。
-10. `split_start_channel` に、参加のお礼と次回案内を送信します。
+10. `wadaich` で指定した告知・スタート案内送信先に、参加のお礼と次回案内を送信します。
 
 最初の話題と発話順の送信先は `/setting splitvc post_split_wadai_channel:...` で指定できます。
 未設定の場合は、従来どおり `/splitvc` を実行したチャンネルへ送ります。
 
-参加者ロール解除時のお礼メッセージは、`split_start_channel` へ送ります。
+参加者ロール解除時のお礼メッセージは、`wadaich` で指定した告知・スタート案内送信先へ送ります。
 意見・苦情案内のチャンネルは `/setting splitvc split_feedback_channel:...` で指定できます。
 未設定時は `<#1513457664041160765>` を使います。
 
@@ -991,7 +1009,7 @@ PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も�
 
 - 待機VCは `/setting splitvc waiting_vc_category:...` で設定したカテゴリ内に作成されます。
 - 待機VC名は `/setting splitvc waiting_vc_name:...` で変更できます。
-- `split_start_channel` が設定されている場合、待機VC作成後に次の案内を送ります。
+- `wadaich` が設定されている場合、待機VC作成後に次の案内を送ります。
 
 ```text
 集合開始から5分経ったのでスタートします

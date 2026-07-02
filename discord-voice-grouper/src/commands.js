@@ -80,7 +80,7 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("split_start_channel")
-          .setDescription("/splitvc後のスタート・途中参加案内送信先")
+          .setDescription("/kokuchi告知・/splitvc後のスタート案内送信先")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
@@ -197,7 +197,7 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("wadaich")
-          .setDescription("/kokuchi の告知送信先")
+          .setDescription("/kokuchi告知・/splitvc後のスタート案内送信先")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       ),
@@ -383,6 +383,12 @@ export const kokuchiCommand = new SlashCommandBuilder()
       .setName("channel")
       .setDescription("告知を送るチャンネル。省略時は /setting wadai の設定を使用")
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(false),
+  )
+  .addBooleanOption((option) =>
+    option
+      .setName("send_topic")
+      .setDescription("最初の話題を告知と次回/splitvc後に送るか。省略時は送る")
       .setRequired(false),
   );
 

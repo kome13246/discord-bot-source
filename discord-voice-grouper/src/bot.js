@@ -57,6 +57,7 @@ const OTEBO_NOTE_MODAL_CUSTOM_ID = "otebo_note_modal";
 const OTEBO_JOIN_CUSTOM_ID = "otebo_join";
 const OTEBO_MEMBER_CANCEL_CUSTOM_ID = "otebo_member_cancel";
 const OTEBO_OWNER_CANCEL_CUSTOM_ID = "otebo_owner_cancel";
+const OTEBO_OWNER_CANCEL_CONFIRM_CUSTOM_ID = "otebo_owner_cancel_confirm";
 const OTEBO_TYPE_SCHEDULED = "scheduled";
 const OTEBO_TYPE_IMMEDIATE = "immediate";
 const OTEBO_DURATION_NONE = "none";
@@ -64,8 +65,12 @@ const OTEBO_DURATION_30 = "30";
 const OTEBO_DURATION_60 = "60";
 const OTEBO_DEFAULT_QUICK_CONFIRM_SECONDS = 30;
 const OTEBO_ROLE_REMOVE_MS = 20 * 60 * 1000;
+const OTEBO_VOICE_STATUS_DEADLINE_MS = 20 * 60 * 1000;
+const OTEBO_VOICE_STATUS_EXTRA_MS = 15 * 60 * 1000;
 const GATHERING_VC_OPEN_HOUR_JST = 20;
 const GATHERING_VC_OPEN_MINUTE_JST = 40;
+const KOKUCHI_PRE_NOTICE_HOUR_JST = 20;
+const KOKUCHI_PRE_NOTICE_MINUTE_JST = 30;
 const KOKUCHI_GATHERING_REMINDER_HOUR_JST = 20;
 const KOKUCHI_GATHERING_REMINDER_MINUTE_JST = 55;
 const KOKUCHI_GATHERING_REMINDER_ROLE_IDS = [
@@ -86,6 +91,7 @@ const autoSplitSuggestionMessages = new Map();
 const callWaitRoleRemovalTimers = new Map();
 const callWaitFollowupTimers = new Map();
 const gatheringVcUnlockTimers = new Map();
+const kokuchiPreNoticeTimers = new Map();
 const kokuchiGatheringReminderTimers = new Map();
 const oteboDrafts = new Map();
 const oteboRecruitmentTimers = new Map();
@@ -227,7 +233,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         interaction.customId === OTEBO_DRAFT_CANCEL_CUSTOM_ID ||
         interaction.customId.startsWith(`${OTEBO_JOIN_CUSTOM_ID}:`) ||
         interaction.customId.startsWith(`${OTEBO_MEMBER_CANCEL_CUSTOM_ID}:`) ||
-        interaction.customId.startsWith(`${OTEBO_OWNER_CANCEL_CUSTOM_ID}:`)
+        interaction.customId.startsWith(`${OTEBO_OWNER_CANCEL_CUSTOM_ID}:`) ||
+        interaction.customId.startsWith(`${OTEBO_OWNER_CANCEL_CONFIRM_CUSTOM_ID}:`)
       ) {
         await handleOteboButton(interaction);
         return;
@@ -446,6 +453,7 @@ async function handleSetting(interaction) {
 
   if (wadaiChannel) {
     patch.wadaiChannelId = wadaiChannel.id;
+    patch.splitStartChannelId = wadaiChannel.id;
   }
 
   if (postSplitWadaiChannel) {
@@ -453,6 +461,7 @@ async function handleSetting(interaction) {
   }
 
   if (splitStartChannel) {
+    patch.wadaiChannelId = splitStartChannel.id;
     patch.splitStartChannelId = splitStartChannel.id;
   }
 
@@ -776,6 +785,11 @@ async function sendPostSplitWadaiTopic({
   settings,
 }) {
   const currentSettings = (await getGuildSettings(guild.id)) ?? settings;
+
+  if (currentSettings?.kokuchiTopicEnabled === false) {
+    return;
+  }
+
   const { settings: nextSettings, topic } = await getOrChooseCurrentWadaiTopic(
     guild.id,
     currentSettings,
@@ -801,8 +815,9 @@ async function sendPostSplitWadaiTopic({
 }
 
 async function sendSplitStartAnnouncement({ guild, settings, waitingChannel }) {
-  const sendChannel = settings?.splitStartChannelId
-    ? await resolveConfiguredTextChannel(guild, settings.splitStartChannelId)
+  const channelId = getKokuchiAnnouncementChannelId(settings);
+  const sendChannel = channelId
+    ? await resolveConfiguredTextChannel(guild, channelId)
     : null;
 
   if (!sendChannel) {
@@ -816,13 +831,15 @@ async function sendSplitStartAnnouncement({ guild, settings, waitingChannel }) {
 }
 
 async function sendSplitClosingThanks(guild, settings) {
-  if (!settings?.splitStartChannelId) {
+  const channelId = getKokuchiAnnouncementChannelId(settings);
+
+  if (!channelId) {
     return null;
   }
 
   const sendChannel = await resolveConfiguredTextChannel(
     guild,
-    settings.splitStartChannelId,
+    channelId,
   );
 
   if (!sendChannel) {
@@ -850,11 +867,16 @@ function formatSplitClosingThanks(settings) {
   ].join("\n");
 }
 
+function getKokuchiAnnouncementChannelId(settings) {
+  return settings?.wadaiChannelId ?? settings?.splitStartChannelId ?? null;
+}
+
 async function resolveWadaiSendChannel(guild, settings, fallbackChannel) {
   const textTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+  const channelId = getKokuchiAnnouncementChannelId(settings);
 
-  if (settings?.wadaiChannelId) {
-    const configured = await guild.channels.fetch(settings.wadaiChannelId).catch(() => null);
+  if (channelId) {
+    const configured = await guild.channels.fetch(channelId).catch(() => null);
 
     if (
       configured &&
@@ -931,6 +953,7 @@ async function handleKokuchi(interaction) {
   const weekday = interaction.options.getString("weekday", true);
   const overviewChannel = interaction.options.getChannel("overview_channel", true);
   const targetChannel = interaction.options.getChannel("channel", false);
+  const sendTopic = interaction.options.getBoolean("send_topic", false) ?? true;
   const settings = await getGuildSettings(interaction.guildId);
   const sendChannel =
     targetChannel && typeof targetChannel.send === "function"
@@ -946,17 +969,27 @@ async function handleKokuchi(interaction) {
     return;
   }
 
-  const { settings: nextSettings, topic } = await chooseAndStoreKokuchiWadaiTopic(
-    interaction.guildId,
-    settings,
-  );
+  let nextSettings = settings;
+  let topic = null;
+
+  if (sendTopic) {
+    const result = await chooseAndStoreKokuchiWadaiTopic(
+      interaction.guildId,
+      settings,
+    );
+    nextSettings = result.settings;
+    topic = result.topic;
+  }
   const postedAt = new Date();
+  const kokuchiPreNoticeAt = getKokuchiPreNoticeAt(postedAt);
   const gatheringVcUnlockAt = getGatheringVcUnlockAt(postedAt);
   const kokuchiGatheringReminderAt = getKokuchiGatheringReminderAt(postedAt);
-  const selectedTopic = topic ?? {
+  const selectedTopic = sendTopic
+    ? topic ?? {
     id: "missing",
     text: "未登録です。/addwadai で追加してください。",
-  };
+      }
+    : null;
   const message = await sendChannel.send({
     content: formatKokuchiMessage({
       weekday,
@@ -969,6 +1002,11 @@ async function handleKokuchi(interaction) {
   const savedSettings = await saveGuildSettingsWithCurrent(interaction.guildId, nextSettings, {
     lastKokuchiWeekday: weekday,
     lastKokuchiPostedAt: postedAt.toISOString(),
+    kokuchiTopicEnabled: sendTopic,
+    ...(sendTopic ? {} : { wadaiCurrentTopic: null }),
+    kokuchiPreNoticeAt: kokuchiPreNoticeAt.toISOString(),
+    kokuchiPreNoticeChannelId: sendChannel.id,
+    kokuchiPreNoticeState: "pending",
     gatheringVcUnlockAt: gatheringVcUnlockAt.toISOString(),
     gatheringVcUnlockState: "pending",
     kokuchiGatheringReminderAt: kokuchiGatheringReminderAt.toISOString(),
@@ -980,11 +1018,14 @@ async function handleKokuchi(interaction) {
       postedAt: postedAt.toISOString(),
     },
   });
+  await scheduleKokuchiPreNotice(interaction.guild, savedSettings);
   await scheduleGatheringVcUnlock(interaction.guild, savedSettings);
   await scheduleKokuchiGatheringReminder(interaction.guild, savedSettings);
 
   await replyOrFollowUp(interaction, {
-    content: `告知を ${sendChannel} に投稿しました。\n今回の最初の話題: ${selectedTopic.text}`,
+    content: sendTopic
+      ? `告知を ${sendChannel} に投稿しました。\n今回の最初の話題: ${selectedTopic.text}`
+      : `告知を ${sendChannel} に投稿しました。\n今回は最初の話題を送信しません。`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
@@ -993,9 +1034,109 @@ async function handleKokuchi(interaction) {
 async function restoreGatheringVcUnlockSchedules() {
   for (const guild of client.guilds.cache.values()) {
     const settings = await getGuildSettings(guild.id);
+    await scheduleKokuchiPreNotice(guild, settings);
     await scheduleGatheringVcUnlock(guild, settings);
     await scheduleKokuchiGatheringReminder(guild, settings);
   }
+}
+
+async function scheduleKokuchiPreNotice(guild, settings) {
+  clearKokuchiPreNoticeTimer(guild.id);
+
+  if (
+    !settings?.kokuchiPreNoticeChannelId ||
+    settings.kokuchiPreNoticeState !== "pending"
+  ) {
+    return;
+  }
+
+  const noticeAt = new Date(settings.kokuchiPreNoticeAt);
+
+  if (!Number.isFinite(noticeAt.getTime())) {
+    return;
+  }
+
+  const now = new Date();
+
+  if (noticeAt.getTime() <= now.getTime()) {
+    await saveGuildSettingsWithCurrent(guild.id, settings, {
+      kokuchiPreNoticeState: "skipped",
+    });
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    kokuchiPreNoticeTimers.delete(guild.id);
+    void sendKokuchiPreNotice(guild.id).catch((error) => {
+      console.error(`Failed to send kokuchi pre notice: ${error.message}`, error);
+    });
+  }, noticeAt.getTime() - now.getTime());
+
+  kokuchiPreNoticeTimers.set(guild.id, timer);
+}
+
+function clearKokuchiPreNoticeTimer(guildId) {
+  const timer = kokuchiPreNoticeTimers.get(guildId);
+
+  if (timer) {
+    clearTimeout(timer);
+    kokuchiPreNoticeTimers.delete(guildId);
+  }
+}
+
+async function sendKokuchiPreNotice(guildId) {
+  const guild =
+    client.guilds.cache.get(guildId) ??
+    (await client.guilds.fetch(guildId).catch(() => null));
+
+  if (!guild) {
+    return;
+  }
+
+  const settings = await getGuildSettings(guild.id);
+
+  if (
+    !settings?.kokuchiPreNoticeChannelId ||
+    settings.kokuchiPreNoticeState !== "pending"
+  ) {
+    return;
+  }
+
+  const noticeAt = new Date(settings.kokuchiPreNoticeAt);
+
+  if (!Number.isFinite(noticeAt.getTime()) || !isSameJstDate(noticeAt, new Date())) {
+    return;
+  }
+
+  const channel = await resolveConfiguredTextChannel(
+    guild,
+    settings.kokuchiPreNoticeChannelId,
+  );
+
+  if (!channel) {
+    return;
+  }
+
+  const message = await channel.send({
+    content: "30分前です！ぜひご参加ください！",
+    allowedMentions: { parse: [] },
+  }).catch((error) => {
+    console.error(`Failed to send kokuchi pre notice: ${error.message}`);
+    return null;
+  });
+
+  if (!message) {
+    return;
+  }
+
+  await saveGuildSettingsWithCurrent(guild.id, settings, {
+    kokuchiPreNoticeState: "sent",
+    kokuchiPreNoticeMessage: {
+      channelId: channel.id,
+      messageId: message.id,
+      sentAt: new Date().toISOString(),
+    },
+  });
 }
 
 async function scheduleGatheringVcUnlock(guild, settings) {
@@ -1249,6 +1390,19 @@ async function setGatheringVcConnectPermission({
   return Boolean(updatedChannel);
 }
 
+function getKokuchiPreNoticeAt(date) {
+  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  return new Date(Date.UTC(
+    jstDate.getUTCFullYear(),
+    jstDate.getUTCMonth(),
+    jstDate.getUTCDate(),
+    KOKUCHI_PRE_NOTICE_HOUR_JST - 9,
+    KOKUCHI_PRE_NOTICE_MINUTE_JST,
+    0,
+    0,
+  ));
+}
+
 function getGatheringVcUnlockAt(date) {
   const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
   return new Date(Date.UTC(
@@ -1415,6 +1569,14 @@ async function handleOteboButton(interaction) {
       interaction,
       interaction.customId.slice(`${OTEBO_OWNER_CANCEL_CUSTOM_ID}:`.length),
     );
+    return;
+  }
+
+  if (interaction.customId.startsWith(`${OTEBO_OWNER_CANCEL_CONFIRM_CUSTOM_ID}:`)) {
+    await handleOteboOwnerCancelConfirmButton(
+      interaction,
+      interaction.customId.slice(`${OTEBO_OWNER_CANCEL_CONFIRM_CUSTOM_ID}:`.length),
+    );
   }
 }
 
@@ -1494,6 +1656,11 @@ async function handleOteboDraftNoteButton(interaction) {
     return;
   }
 
+  draft.menuMessageId = interaction.message?.id ?? null;
+  draft.menuInteractionToken = interaction.token;
+  draft.menuApplicationId = interaction.applicationId;
+  oteboDrafts.set(getOteboDraftKey(interaction.guildId, interaction.user.id), draft);
+
   const modal = new ModalBuilder()
     .setCustomId(OTEBO_NOTE_MODAL_CUSTOM_ID)
     .setTitle("お手軽募集");
@@ -1525,7 +1692,7 @@ async function handleOteboDraftSubmitButton(interaction) {
 
   await interaction.update({
     content: formatOteboOwnerCancelMessage(),
-    components: [createOteboOwnerCancelRow(result.recruitment.id)],
+    components: [],
     allowedMentions: { parse: [] },
   });
 }
@@ -1543,9 +1710,10 @@ async function handleOteboNoteModal(interaction) {
     return;
   }
 
+  await updateOteboDraftMenuAfterModal(result.draftMenu);
+
   await interaction.reply({
     content: formatOteboOwnerCancelMessage(),
-    components: [createOteboOwnerCancelRow(result.recruitment.id)],
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
@@ -1611,6 +1779,11 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
     createdAt: new Date().toISOString(),
     quickConfirmSeconds: getOteboQuickConfirmSeconds(settings),
   };
+  const draftMenu = {
+    applicationId: draft.menuApplicationId,
+    token: draft.menuInteractionToken,
+    messageId: draft.menuMessageId,
+  };
   const message = await configured.noticeChannel.send({
     content: formatOteboRecruitmentMessage(recruitment, settings),
     components: [createOteboJoinRow(recruitment)],
@@ -1638,6 +1811,7 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
   return {
     ok: true,
     recruitment,
+    draftMenu,
   };
 }
 
@@ -1648,14 +1822,6 @@ async function handleOteboJoinButton(interaction, recruitmentId) {
   if (!isActiveOteboRecruitment(recruitment, interaction.message?.id)) {
     await interaction.reply({
       content: "この募集は現在有効ではありません。",
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (interaction.user.id === recruitment.ownerId) {
-    await interaction.reply({
-      content: "自身が作成した募集なのですでに参加予定です。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1672,8 +1838,7 @@ async function handleOteboJoinButton(interaction, recruitmentId) {
 
   if (normalizeCallWaitMemberIds(recruitment.memberIds).includes(interaction.user.id)) {
     await interaction.reply({
-      content: "すでに参加希望を受け付けています。取り消す場合は下のボタンを押してください。",
-      components: [createOteboMemberCancelRow(recruitment.id)],
+      content: "すでに参加希望を受け付けています。キャンセルする場合はメッセージ下のキャンセルボタンから行えます。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1702,10 +1867,10 @@ async function handleOteboJoinButton(interaction, recruitmentId) {
     userId: interaction.user.id,
     memberIds,
   });
+  await editOteboRecruitmentMessage(interaction.guild, nextSettings, nextRecruitment);
 
   await interaction.reply({
-    content: "参加予定を受け付けました。取り消す場合は下のボタンを押してください。",
-    components: [createOteboMemberCancelRow(recruitment.id)],
+    content: "参加希望を受け付けました。キャンセルする場合はメッセージ下のキャンセルボタンから行えます。",
     flags: MessageFlags.Ephemeral,
   });
 }
@@ -1744,40 +1909,62 @@ async function handleOteboImmediateJoin(interaction, settings, recruitment) {
   });
 
   await interaction.reply({
-    content: `参加希望を受け付けました。${confirmSeconds}秒以内なら下のボタンからキャンセルできます。`,
-    components: [createOteboMemberCancelRow(recruitment.id)],
+    content: formatOteboImmediateJoinReply(confirmSeconds),
     flags: MessageFlags.Ephemeral,
   });
 
-  if (confirmSeconds > 0) {
-    setTimeout(() => {
-      void removeOteboCancelButtonIfStillPending({
-        interaction,
-        guildId: interaction.guildId,
-        recruitmentId: recruitment.id,
-        userId: interaction.user.id,
-      });
-    }, secondsToMs(confirmSeconds));
-  }
+  startOteboImmediateReplyCountdown({
+    interaction,
+    guildId: interaction.guildId,
+    recruitmentId: recruitment.id,
+    userId: interaction.user.id,
+    confirmSeconds,
+  });
 }
 
-async function removeOteboCancelButtonIfStillPending({
+function formatOteboImmediateJoinReply(remainingSeconds) {
+  return [
+    "参加希望を受け付けました。キャンセルはメッセージ下のキャンセルボタンから行えます。",
+    `あと${Math.max(0, remainingSeconds)}秒間キャンセルがなかったら集合メンションが送られます。`,
+  ].join("\n");
+}
+
+function startOteboImmediateReplyCountdown({
   interaction,
   guildId,
   recruitmentId,
   userId,
+  confirmSeconds,
 }) {
-  const settings = await getGuildSettings(guildId);
-  const recruitment = getOteboRecruitment(settings, recruitmentId);
+  let remainingSeconds = Number(confirmSeconds);
 
-  if (recruitment && !recruitment.pendingConfirmations?.[userId]) {
+  if (!Number.isInteger(remainingSeconds) || remainingSeconds <= 0) {
     return;
   }
 
-  await interaction.editReply({
-    content: "参加希望を受け付けました。",
-    components: [],
-  }).catch(() => null);
+  const timer = setInterval(() => {
+    remainingSeconds -= 1;
+
+    void (async () => {
+      const settings = await getGuildSettings(guildId);
+      const recruitment = getOteboRecruitment(settings, recruitmentId);
+
+      if (!recruitment?.pendingConfirmations?.[userId]) {
+        clearInterval(timer);
+        return;
+      }
+
+      await interaction.editReply({
+        content: formatOteboImmediateJoinReply(remainingSeconds),
+      }).catch(() => null);
+
+      if (remainingSeconds <= 0) {
+        clearInterval(timer);
+      }
+    })().catch(() => {
+      clearInterval(timer);
+    });
+  }, 1000);
 }
 
 async function handleOteboMemberCancelButton(interaction, recruitmentId) {
@@ -1785,49 +1972,38 @@ async function handleOteboMemberCancelButton(interaction, recruitmentId) {
   const recruitment = getOteboRecruitment(settings, recruitmentId);
 
   if (!isActiveOteboRecruitment(recruitment)) {
-    await interaction.update({
+    await interaction.reply({
       content: "この募集は現在有効ではありません。",
-      components: [],
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const memberIds = normalizeCallWaitMemberIds(recruitment.memberIds);
+
+  if (!memberIds.includes(interaction.user.id)) {
+    await interaction.reply({
+      content: "この募集への参加の予定はありません。",
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
   if (interaction.user.id === recruitment.ownerId) {
-    await interaction.update({
-      content: "募集者本人は参加予定から外せません。募集自体を取り消す場合は、作成時に表示された募集キャンセルボタンを使ってください。",
-      components: [],
+    await interaction.reply({
+      content: "自身が作成した募集ですがキャンセルしてもよろしいですか？",
+      components: [createOteboOwnerCancelConfirmRow(recruitment.id)],
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const pendingConfirmations = { ...(recruitment.pendingConfirmations ?? {}) };
-  delete pendingConfirmations[interaction.user.id];
-  clearOteboConfirmationTimer(interaction.guildId, recruitment.id, interaction.user.id);
-
-  const nextRecruitment = {
-    ...recruitment,
-    memberIds: normalizeCallWaitMemberIds(recruitment.memberIds).filter(
-      (memberId) => memberId !== interaction.user.id,
-    ),
-    pendingConfirmations,
-  };
-  const nextSettings = await saveOteboRecruitmentState(
-    interaction.guildId,
+  await cancelOteboParticipation({
+    interaction,
     settings,
-    nextRecruitment,
-  );
-
-  await sendOteboApplicantLog({
-    guild: interaction.guild,
-    settings: nextSettings,
-    action: "cancel",
+    recruitment,
     userId: interaction.user.id,
-    memberIds: nextRecruitment.memberIds,
-  });
-
-  await interaction.update({
-    content: "参加希望をキャンセルしました。",
-    components: [],
+    response: "reply",
   });
 }
 
@@ -1836,9 +2012,9 @@ async function handleOteboOwnerCancelButton(interaction, recruitmentId) {
   const recruitment = getOteboRecruitment(settings, recruitmentId);
 
   if (!isActiveOteboRecruitment(recruitment)) {
-    await interaction.update({
+    await interaction.reply({
       content: "この募集は現在有効ではありません。",
-      components: [],
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -1851,57 +2027,119 @@ async function handleOteboOwnerCancelButton(interaction, recruitmentId) {
     return;
   }
 
-  const participantIds = normalizeCallWaitMemberIds(recruitment.memberIds).filter(
-    (memberId) => memberId !== recruitment.ownerId,
-  );
-  await deleteOteboRecruitmentMessage(interaction.guild, recruitment);
-  const nextSettings = await deleteOteboRecruitmentState(
-    interaction.guildId,
-    settings,
-    recruitment.id,
-  );
-  clearOteboRecruitmentTimers(interaction.guildId, recruitment.id);
+  await interaction.reply({
+    content: "自身が作成した募集ですがキャンセルしてもよろしいですか？",
+    components: [createOteboOwnerCancelConfirmRow(recruitment.id)],
+    flags: MessageFlags.Ephemeral,
+  });
+}
 
-  if (participantIds.length > 0 && settings?.callWaitRoleId) {
-    const roleMemberIds = await addTemporaryRoleToMembers({
-      guild: interaction.guild,
-      roleId: settings.callWaitRoleId,
-      memberIds: participantIds,
-      reason: "お手軽募集キャンセル通知",
+async function handleOteboOwnerCancelConfirmButton(interaction, recruitmentId) {
+  const settings = await getGuildSettings(interaction.guildId);
+  const recruitment = getOteboRecruitment(settings, recruitmentId);
+
+  if (!isActiveOteboRecruitment(recruitment)) {
+    await interaction.update({
+      content: "この募集は現在有効ではありません。",
+      components: [],
     });
-
-    if (roleMemberIds.length > 0) {
-      const channel = await resolveConfiguredTextChannel(
-        interaction.guild,
-        getCallWaitNoticeChannelId(settings),
-      );
-
-      if (channel) {
-        await channel.send({
-          content: `<@&${settings.callWaitRoleId}> 参加しようとしていた募集はキャンセルされました`,
-          allowedMentions: { roles: [settings.callWaitRoleId] },
-        });
-      }
-
-      scheduleOteboRoleRemoval({
-        guild: interaction.guild,
-        roleId: settings.callWaitRoleId,
-        memberIds: roleMemberIds,
-      });
-    }
+    return;
   }
 
+  if (interaction.user.id !== recruitment.ownerId) {
+    await interaction.update({
+      content: "この確認ボタンを使えるのは募集作成者だけです。",
+      components: [],
+    });
+    return;
+  }
+
+  if (!normalizeCallWaitMemberIds(recruitment.memberIds).includes(interaction.user.id)) {
+    await interaction.update({
+      content: "この募集への参加の予定はありません。",
+      components: [],
+    });
+    return;
+  }
+
+  await cancelOteboParticipation({
+    interaction,
+    settings,
+    recruitment,
+    userId: interaction.user.id,
+    response: "update",
+  });
+}
+
+async function cancelOteboParticipation({
+  interaction,
+  settings,
+  recruitment,
+  userId,
+  response,
+}) {
+  const pendingConfirmations = { ...(recruitment.pendingConfirmations ?? {}) };
+  delete pendingConfirmations[userId];
+  clearOteboConfirmationTimer(interaction.guildId, recruitment.id, userId);
+
+  const memberIds = normalizeCallWaitMemberIds(recruitment.memberIds).filter(
+    (memberId) => memberId !== userId,
+  );
+
+  if (memberIds.length === 0) {
+    await deleteOteboRecruitmentMessage(interaction.guild, recruitment);
+    const nextSettings = await deleteOteboRecruitmentState(
+      interaction.guildId,
+      settings,
+      recruitment.id,
+    );
+    clearOteboRecruitmentTimers(interaction.guildId, recruitment.id);
+    await sendOteboApplicantLog({
+      guild: interaction.guild,
+      settings: nextSettings,
+      action: "cancel",
+      userId,
+      memberIds: [],
+    });
+    await respondOteboCancel(interaction, response);
+    return;
+  }
+
+  const nextRecruitment = {
+    ...recruitment,
+    memberIds,
+    pendingConfirmations,
+  };
+  const nextSettings = await saveOteboRecruitmentState(
+    interaction.guildId,
+    settings,
+    nextRecruitment,
+  );
+
+  await editOteboRecruitmentMessage(interaction.guild, nextSettings, nextRecruitment);
   await sendOteboApplicantLog({
     guild: interaction.guild,
     settings: nextSettings,
-    action: "owner_cancel",
-    userId: interaction.user.id,
-    memberIds: [],
+    action: "cancel",
+    userId,
+    memberIds,
   });
 
-  await interaction.update({
-    content: "お手軽募集をキャンセルしました。",
-    components: [],
+  await respondOteboCancel(interaction, response);
+}
+
+async function respondOteboCancel(interaction, response) {
+  if (response === "update") {
+    await interaction.update({
+      content: "参加の希望をキャンセルしました。",
+      components: [],
+    });
+    return;
+  }
+
+  await interaction.reply({
+    content: "参加の希望をキャンセルしました。",
+    flags: MessageFlags.Ephemeral,
   });
 }
 
@@ -2878,7 +3116,31 @@ function formatOteboDraftContent(draft) {
 }
 
 function formatOteboOwnerCancelMessage() {
-  return "お手軽募集を使用していただきありがとうございます！もし急用等で参加できなくなった時はこちらのキャンセルボタンから募集をキャンセルできますのでご活用ください。";
+  return [
+    "お手軽募集を使用していただきありがとうございます！",
+    "キャンセルは募集メッセージ下のキャンセルボタンから行えます。",
+  ].join("\n");
+}
+
+async function updateOteboDraftMenuAfterModal(draftMenu) {
+  if (!draftMenu?.applicationId || !draftMenu?.token || !draftMenu?.messageId) {
+    return;
+  }
+
+  await client.rest.patch(
+    Routes.webhookMessage(
+      draftMenu.applicationId,
+      draftMenu.token,
+      draftMenu.messageId,
+    ),
+    {
+      body: {
+        content: formatOteboOwnerCancelMessage(),
+        components: [],
+        allowed_mentions: { parse: [] },
+      },
+    },
+  ).catch(() => null);
 }
 
 function createOteboJoinRow(recruitment) {
@@ -2887,6 +3149,10 @@ function createOteboJoinRow(recruitment) {
       .setCustomId(`${OTEBO_JOIN_CUSTOM_ID}:${recruitment.id}`)
       .setLabel(recruitment.type === OTEBO_TYPE_IMMEDIATE ? "参加希望" : "参加を予定")
       .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`${OTEBO_MEMBER_CANCEL_CUSTOM_ID}:${recruitment.id}`)
+      .setLabel("参加をキャンセル")
+      .setStyle(ButtonStyle.Secondary),
   );
 }
 
@@ -2899,11 +3165,11 @@ function createOteboMemberCancelRow(recruitmentId) {
   );
 }
 
-function createOteboOwnerCancelRow(recruitmentId) {
+function createOteboOwnerCancelConfirmRow(recruitmentId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`${OTEBO_OWNER_CANCEL_CUSTOM_ID}:${recruitmentId}`)
-      .setLabel("募集をキャンセル")
+      .setCustomId(`${OTEBO_OWNER_CANCEL_CONFIRM_CUSTOM_ID}:${recruitmentId}`)
+      .setLabel("キャンセル")
       .setStyle(ButtonStyle.Danger),
   );
 }
@@ -2930,11 +3196,38 @@ function formatOteboRecruitmentMessage(recruitment, settings) {
   return [
     `【雑談募集】${mention ? ` ${mention}` : ""}`,
     `${time}から${getOteboScheduledDurationText(recruitment.duration)}の雑談の募集です`,
-    `${time}時点で募集者を含めて2人以上の参加予定者がいたらメンションします`,
+    `${time}時点で2人以上の参加予定者がいたら集合メンションします。`,
+    `現在の参加予定者数：${normalizeCallWaitMemberIds(recruitment.memberIds).length}人`,
     noteLine,
     "",
     "ボタンを押してからのキャンセルも可能ですのでお気軽に押してみてください！",
   ].filter((line) => line !== null).join("\n");
+}
+
+async function editOteboRecruitmentMessage(guild, settings, recruitment) {
+  if (!recruitment?.channelId || !recruitment?.messageId) {
+    return;
+  }
+
+  const channel = await resolveConfiguredTextChannel(guild, recruitment.channelId);
+
+  if (!channel || typeof channel.messages?.fetch !== "function") {
+    return;
+  }
+
+  const message = await channel.messages.fetch(recruitment.messageId).catch(() => null);
+
+  if (!message) {
+    return;
+  }
+
+  await message.edit({
+    content: formatOteboRecruitmentMessage(recruitment, settings),
+    components: [createOteboJoinRow(recruitment)],
+    allowedMentions: getOteboRecruitmentAllowedMentions(recruitment, settings),
+  }).catch((error) => {
+    console.error(`Failed to edit otebo recruitment message: ${error.message}`);
+  });
 }
 
 function getOteboRecruitmentAllowedMentions(recruitment, settings) {
@@ -3066,6 +3359,14 @@ function getOteboRecruitment(settings, recruitmentId) {
   return recruitment && typeof recruitment === "object" ? recruitment : null;
 }
 
+function getOteboVoiceStatusSessions(settings) {
+  return settings?.oteboVoiceStatusSessions &&
+    typeof settings.oteboVoiceStatusSessions === "object" &&
+    !Array.isArray(settings.oteboVoiceStatusSessions)
+    ? settings.oteboVoiceStatusSessions
+    : {};
+}
+
 function isActiveOteboRecruitment(recruitment, messageId = null) {
   if (!recruitment || recruitment.status !== "active") {
     return false;
@@ -3106,6 +3407,51 @@ function addUniqueMemberId(memberIds, memberId) {
   return [...new Set([...normalizeCallWaitMemberIds(memberIds), memberId].filter(Boolean))];
 }
 
+function createOteboVoiceStatusSession({ recruitment, memberIds, notifiedAt }) {
+  const durationMinutes = getOteboDurationMinutes(recruitment.duration);
+
+  if (!durationMinutes) {
+    return null;
+  }
+
+  return {
+    id: createOteboRecruitmentId(),
+    recruitmentId: recruitment.id,
+    memberIds: normalizeCallWaitMemberIds(memberIds),
+    duration: normalizeOteboDuration(recruitment.duration),
+    durationMinutes,
+    notifiedAt: notifiedAt.toISOString(),
+    statusChannelId: null,
+    statusSetAt: null,
+    clearAt: null,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function getOteboDurationMinutes(duration) {
+  if (normalizeOteboDuration(duration) === OTEBO_DURATION_30) {
+    return 30;
+  }
+
+  if (normalizeOteboDuration(duration) === OTEBO_DURATION_60) {
+    return 60;
+  }
+
+  return null;
+}
+
+function getOteboVoiceStatusLabel(duration) {
+  if (normalizeOteboDuration(duration) === OTEBO_DURATION_30) {
+    return "30分";
+  }
+
+  if (normalizeOteboDuration(duration) === OTEBO_DURATION_60) {
+    return "1時間";
+  }
+
+  return "";
+}
+
 async function restoreOteboRecruitmentTimers() {
   for (const guild of client.guilds.cache.values()) {
     const settings = await getGuildSettings(guild.id);
@@ -3115,6 +3461,16 @@ async function restoreOteboRecruitmentTimers() {
         scheduleOteboRecruitmentTimers(guild, recruitment);
       }
     }
+
+    for (const session of Object.values(getOteboVoiceStatusSessions(settings))) {
+      if (session?.statusChannelId) {
+        scheduleOteboVoiceStatusClear(guild, session);
+      } else {
+        scheduleOteboVoiceStatusDeadline(guild, session);
+      }
+    }
+
+    await processOteboVoiceStatusSessions(guild, settings);
   }
 }
 
@@ -3307,6 +3663,7 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
     guild,
     getCallWaitNoticeChannelId(settings),
   );
+  const notifiedAt = new Date();
 
   if (channel) {
     await channel.send({
@@ -3321,11 +3678,23 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
     memberIds: roleMemberIds,
   });
   await deleteOteboRecruitmentMessage(guild, recruitment);
-  const nextSettings = await deleteOteboRecruitmentState(
-    guild.id,
-    settings,
-    recruitment.id,
-  );
+  const recruitments = { ...getOteboRecruitments(settings) };
+  delete recruitments[recruitment.id];
+  const voiceStatusSessions = { ...getOteboVoiceStatusSessions(settings) };
+  const voiceStatusSession = createOteboVoiceStatusSession({
+    recruitment,
+    memberIds: roleMemberIds,
+    notifiedAt,
+  });
+
+  if (voiceStatusSession) {
+    voiceStatusSessions[voiceStatusSession.id] = voiceStatusSession;
+  }
+
+  const nextSettings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+    oteboRecruitments: recruitments,
+    oteboVoiceStatusSessions: voiceStatusSessions,
+  });
   clearOteboRecruitmentTimers(guild.id, recruitment.id);
   await sendOteboApplicantLog({
     guild,
@@ -3333,6 +3702,11 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
     action: "notify",
     memberIds: roleMemberIds,
   });
+
+  if (voiceStatusSession) {
+    scheduleOteboVoiceStatusDeadline(guild, voiceStatusSession);
+    await processOteboVoiceStatusSessions(guild, nextSettings);
+  }
 
   return true;
 }
@@ -3397,6 +3771,230 @@ async function removeTemporaryRoleFromMembers({ guild, roleId, memberIds, reason
       console.error(`Failed to remove temporary role from ${member.id}: ${error.message}`);
     });
   }
+}
+
+async function processOteboVoiceStatusSessions(guild, settings) {
+  let sessions = { ...getOteboVoiceStatusSessions(settings) };
+  let changed = false;
+  const now = Date.now();
+
+  for (const session of Object.values(sessions)) {
+    if (!session?.id) {
+      continue;
+    }
+
+    if (session.statusChannelId) {
+      const clearAt = new Date(session.clearAt);
+
+      if (Number.isFinite(clearAt.getTime()) && clearAt.getTime() <= now) {
+        await clearOteboVoiceStatusSession(guild, session);
+        delete sessions[session.id];
+        changed = true;
+      } else {
+        scheduleOteboVoiceStatusClear(guild, session);
+      }
+
+      continue;
+    }
+
+    const notifiedAt = new Date(session.notifiedAt);
+
+    if (
+      !Number.isFinite(notifiedAt.getTime()) ||
+      now - notifiedAt.getTime() >= OTEBO_VOICE_STATUS_DEADLINE_MS
+    ) {
+      delete sessions[session.id];
+      changed = true;
+      continue;
+    }
+
+    const voiceChannel = findFirstOteboVoiceStatusChannel(guild, session.memberIds);
+
+    if (!voiceChannel) {
+      scheduleOteboVoiceStatusDeadline(guild, session);
+      continue;
+    }
+
+    const statusText = `会話時間：${getOteboVoiceStatusLabel(session.duration)}(予定)`;
+
+    await setVoiceChannelStatus(
+      voiceChannel,
+      statusText,
+      "お手軽募集の参加予定者がVCに集まったため",
+    ).then(() => {
+      const statusSetAt = new Date();
+      sessions[session.id] = {
+        ...session,
+        statusChannelId: voiceChannel.id,
+        statusSetAt: statusSetAt.toISOString(),
+        clearAt: new Date(
+          statusSetAt.getTime() +
+            minutesToMs(session.durationMinutes) +
+            OTEBO_VOICE_STATUS_EXTRA_MS,
+        ).toISOString(),
+      };
+      scheduleOteboVoiceStatusClear(guild, sessions[session.id]);
+      changed = true;
+    }).catch((error) => {
+      console.error(`Failed to set otebo voice status: ${error.message}`);
+      scheduleOteboVoiceStatusDeadline(guild, session);
+    });
+  }
+
+  if (!changed) {
+    return settings;
+  }
+
+  return saveGuildSettingsWithCurrent(guild.id, settings, {
+    oteboVoiceStatusSessions: sessions,
+  });
+}
+
+function findFirstOteboVoiceStatusChannel(guild, memberIds) {
+  const targetMemberIds = new Set(normalizeCallWaitMemberIds(memberIds));
+  const voiceTypes = new Set([ChannelType.GuildVoice, ChannelType.GuildStageVoice]);
+
+  for (const channel of guild.channels.cache.values()) {
+    if (!voiceTypes.has(channel.type) || !channel?.isVoiceBased?.()) {
+      continue;
+    }
+
+    let count = 0;
+
+    for (const member of channel.members.values()) {
+      if (!member.user?.bot && targetMemberIds.has(member.id)) {
+        count += 1;
+      }
+    }
+
+    if (count >= CALL_WAIT_MIN_MEMBERS) {
+      return channel;
+    }
+  }
+
+  return null;
+}
+
+async function clearOteboVoiceStatusSession(guild, session) {
+  const channel = await guild.channels.fetch(session.statusChannelId).catch(() => null);
+
+  if (!channel?.isVoiceBased?.()) {
+    return;
+  }
+
+  await setVoiceChannelStatus(
+    channel,
+    "",
+    "お手軽募集で設定した会話時間ステータスの自動解除",
+  ).catch((error) => {
+    console.error(`Failed to clear otebo voice status: ${error.message}`);
+  });
+}
+
+function scheduleOteboVoiceStatusClear(guild, session) {
+  const clearAt = new Date(session.clearAt);
+
+  if (!Number.isFinite(clearAt.getTime())) {
+    return;
+  }
+
+  const key = getOteboVoiceStatusTimerKey(guild.id, session.id);
+  const existingTimer = oteboRecruitmentTimers.get(key);
+
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const timer = setTimeout(() => {
+    oteboRecruitmentTimers.delete(key);
+    void processOteboVoiceStatusClear(guild.id, session.id).catch((error) => {
+      console.error(`Failed to process otebo voice status clear: ${error.message}`, error);
+    });
+  }, Math.max(1000, clearAt.getTime() - Date.now()));
+
+  oteboRecruitmentTimers.set(key, timer);
+}
+
+function scheduleOteboVoiceStatusDeadline(guild, session) {
+  const notifiedAt = new Date(session.notifiedAt);
+
+  if (!Number.isFinite(notifiedAt.getTime())) {
+    return;
+  }
+
+  const key = getOteboVoiceStatusTimerKey(guild.id, session.id);
+  const existingTimer = oteboRecruitmentTimers.get(key);
+
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const deadlineAt = notifiedAt.getTime() + OTEBO_VOICE_STATUS_DEADLINE_MS;
+  const timer = setTimeout(() => {
+    oteboRecruitmentTimers.delete(key);
+    void processOteboVoiceStatusDeadline(guild.id, session.id).catch((error) => {
+      console.error(`Failed to process otebo voice status deadline: ${error.message}`, error);
+    });
+  }, Math.max(1000, deadlineAt - Date.now()));
+
+  oteboRecruitmentTimers.set(key, timer);
+}
+
+async function processOteboVoiceStatusClear(guildId, sessionId) {
+  const guild =
+    client.guilds.cache.get(guildId) ??
+    (await client.guilds.fetch(guildId).catch(() => null));
+
+  if (!guild) {
+    return;
+  }
+
+  const settings = await getGuildSettings(guild.id);
+  const sessions = { ...getOteboVoiceStatusSessions(settings) };
+  const session = sessions[sessionId];
+
+  if (!session) {
+    return;
+  }
+
+  await clearOteboVoiceStatusSession(guild, session);
+  delete sessions[sessionId];
+  await saveGuildSettingsWithCurrent(guild.id, settings, {
+    oteboVoiceStatusSessions: sessions,
+  });
+}
+
+async function processOteboVoiceStatusDeadline(guildId, sessionId) {
+  const guild =
+    client.guilds.cache.get(guildId) ??
+    (await client.guilds.fetch(guildId).catch(() => null));
+
+  if (!guild) {
+    return;
+  }
+
+  const settings = await getGuildSettings(guild.id);
+  const sessions = { ...getOteboVoiceStatusSessions(settings) };
+  const session = sessions[sessionId];
+
+  if (!session || session.statusChannelId) {
+    return;
+  }
+
+  const notifiedAt = new Date(session.notifiedAt);
+
+  if (
+    Number.isFinite(notifiedAt.getTime()) &&
+    Date.now() - notifiedAt.getTime() < OTEBO_VOICE_STATUS_DEADLINE_MS
+  ) {
+    scheduleOteboVoiceStatusDeadline(guild, session);
+    return;
+  }
+
+  delete sessions[sessionId];
+  await saveGuildSettingsWithCurrent(guild.id, settings, {
+    oteboVoiceStatusSessions: sessions,
+  });
 }
 
 async function sendOteboApplicantLog({
@@ -3465,19 +4063,29 @@ function getOteboRoleTimerKey(guildId, roleId, startedAt) {
   return `${guildId}:role:${roleId}:${startedAt}`;
 }
 
+function getOteboVoiceStatusTimerKey(guildId, sessionId) {
+  return `${guildId}:voice-status:${sessionId}`;
+}
+
 function formatKokuchiMessage({ weekday, overviewChannelId, topic }) {
   const weekdayLabel = weekday === "土" ? "土曜日" : "火曜日";
-
-  return [
+  const lines = [
     `本日は${weekdayLabel}！`,
     "21:00から会話練習会です！",
     `（概要は <#${overviewChannelId}> から）`,
-    "",
-    `今回の最初の話題は「${topic.text}」です！`,
+  ];
+
+  if (topic?.text) {
+    lines.push("", `今回の最初の話題は「${topic.text}」です！`);
+  }
+
+  lines.push(
     "",
     "ただ雑談したい方はもちろん、少しずつ会話に慣れていきたいという方にも参加していただきたいです！",
     "時間の都合が合う方はぜひご参加ください！！",
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
 async function chooseAndStoreKokuchiWadaiTopic(guildId, settings) {
@@ -3997,6 +4605,7 @@ async function handleVoiceStateUpdate(oldState, newState) {
   const changedChannelIds = new Set();
 
   await maybeSendPendingCallWaitStartNotice(guild, settings);
+  await processOteboVoiceStatusSessions(guild, settings);
 
   if (oldState.channelId) {
     changedChannelIds.add(oldState.channelId);
@@ -6281,10 +6890,10 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `旧話題転送先: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "未設定"}`,
       "",
       "【おすすめ話題・案内】",
-      `/kokuchi 告知送信先: ${settings.wadaiChannelId ? `<#${settings.wadaiChannelId}>` : "未設定"}`,
+      `/kokuchi告知・スタート案内送信先: ${getKokuchiAnnouncementChannelId(settings) ? `<#${getKokuchiAnnouncementChannelId(settings)}>` : "未設定"}`,
       `/splitvc後の最初の話題送信先: ${settings.postSplitWadaiChannelId ? `<#${settings.postSplitWadaiChannelId}>` : "実行チャンネル"}`,
+      `/kokuchi話題送信: ${settings.kokuchiTopicEnabled === false ? "送信しない" : "送信する"}`,
       `最後に選ばれた話題: ${settings.wadaiCurrentTopic?.text ?? "未設定"}`,
-      `スタート案内送信先: ${settings.splitStartChannelId ? `<#${settings.splitStartChannelId}>` : "未設定"}`,
       `集合VC: ${settings.gatheringVoiceChannelId ? `<#${settings.gatheringVoiceChannelId}>` : "未設定"}`,
       `終了後意見・苦情チャンネル: ${settings.splitFeedbackChannelId ? `<#${settings.splitFeedbackChannelId}>` : `<#${DEFAULT_SPLIT_FEEDBACK_CHANNEL_ID}>`}`,
       "",
