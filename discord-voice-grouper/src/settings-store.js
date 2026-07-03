@@ -87,6 +87,7 @@ function getEnvironmentSettings(guildId) {
   const callWaitChannelId = process.env.PB_CALL_WAIT_CHANNEL_ID;
   const callWaitPromptChannelId = process.env.PB_CALL_WAIT_PROMPT_CHANNEL_ID;
   const callWaitNoticeChannelId = process.env.PB_CALL_WAIT_NOTICE_CHANNEL_ID;
+  const oteboPreviewChannelId = process.env.PB_OTEBO_PREVIEW_CHANNEL_ID;
   const callWaitVoiceCategoryId = process.env.PB_CALL_WAIT_VOICE_CATEGORY_ID;
   const callWaitMode = process.env.PB_CALL_WAIT_MODE;
   const callWaitBosyuNoticeEnabled = parseOptionalBoolean(
@@ -126,6 +127,7 @@ function getEnvironmentSettings(guildId) {
     !callWaitChannelId &&
     !callWaitPromptChannelId &&
     !callWaitNoticeChannelId &&
+    !oteboPreviewChannelId &&
     !callWaitVoiceCategoryId &&
     !callWaitMode &&
     callWaitBosyuNoticeEnabled === undefined &&
@@ -166,6 +168,7 @@ function getEnvironmentSettings(guildId) {
     callWaitChannelId,
     callWaitPromptChannelId,
     callWaitNoticeChannelId,
+    oteboPreviewChannelId,
     callWaitVoiceCategoryId,
     callWaitMode,
     callWaitBosyuNoticeEnabled,

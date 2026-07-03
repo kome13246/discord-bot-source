@@ -271,6 +271,13 @@ export const settingCommand = new SlashCommandBuilder()
       )
       .addChannelOption((option) =>
         option
+          .setName("otebo_preview_channel")
+          .setDescription("時間指定のお手軽募集を30分前まで掲載するチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
           .setName("call_wait_voice_category")
           .setDescription("参加者確認に使うVCカテゴリ")
           .addChannelTypes(ChannelType.GuildCategory)

@@ -743,6 +743,7 @@ npm start</code></pre></div>
                   <tr><td><code>PB_CALL_WAIT_ROLE_ID</code></td><td>通話待機・お手軽募集で希望者へ付与するロールです。</td></tr>
                   <tr><td><code>PB_CALL_WAIT_PROMPT_CHANNEL_ID</code></td><td>募集メッセージ、またはお手軽募集作成ボタンの送信先です。</td></tr>
                   <tr><td><code>PB_CALL_WAIT_NOTICE_CHANNEL_ID</code></td><td>集合通知、お手軽募集本文の送信先です。</td></tr>
+                  <tr><td><code>PB_OTEBO_PREVIEW_CHANNEL_ID</code></td><td>時間指定のお手軽募集を30分前まで掲載する送信先です。</td></tr>
                   <tr><td><code>PB_CALL_WAIT_VOICE_CATEGORY_ID</code></td><td>毎時ちょうどにVC人数を確認するカテゴリです。</td></tr>
                   <tr><td><code>PB_CALL_WAIT_MODE</code></td><td><code>reaction</code> または <code>button</code> です。</td></tr>
                   <tr><td><code>PB_CALL_WAIT_BOSYU_NOTICE_ENABLED</code></td><td>集合通知後に/b募集ロールへ案内するかどうかです。</td></tr>
@@ -895,7 +896,7 @@ npm start</code></pre></div>
         <section id="callwait" data-search-section>
           <h2>通話待機システム</h2>
           <p>毎時ちょうどに、1時間後の雑談希望者を募集します。リアクション式またはボタン式を選べます。</p>
-          <div class="codeblock"><button class="copy">コピー</button><pre><code>/setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:#募集 call_wait_notice_channel:#集合通知 call_wait_voice_category:雑談VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true
+          <div class="codeblock"><button class="copy">コピー</button><pre><code>/setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:#募集 call_wait_notice_channel:#集合通知 otebo_preview_channel:#事前掲載 call_wait_voice_category:雑談VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true
 /sendcallwait</code></pre></div>
           <details open>
             <summary>ボタン式の流れ</summary>
@@ -918,7 +919,7 @@ npm start</code></pre></div>
 
         <section id="otebo" data-search-section>
           <h2>お手軽募集システム</h2>
-          <p><code>/sendotebo</code> で、ユーザーが自分で募集を作成できるボタンを設置します。作成された募集は <code>call_wait_notice_channel</code> へ投稿されます。</p>
+          <p><code>/sendotebo</code> で、ユーザーが自分で募集を作成できるボタンを設置します。作成された募集は基本的に <code>call_wait_notice_channel</code> へ投稿されます。時間指定の募集で <code>otebo_preview_channel</code> が設定され、指定時刻まで30分以上ある場合は、30分前まで <code>otebo_preview_channel</code> に掲載し、その後 <code>call_wait_notice_channel</code> へ移動します。</p>
           <div class="codeblock"><button class="copy">コピー</button><pre><code>/sendotebo</code></pre></div>
           <div class="grid two">
             <div class="card">
@@ -945,6 +946,7 @@ npm start</code></pre></div>
           </div>
           <div class="notice">
             <p>募集作成者も参加予定者の一人として扱います。参加予定者が0人になった場合のみ募集メッセージを削除します。会話時間が選ばれている募集では、集合通知後20分以内に対象者が最初に2人以上集まったVCへ <code>会話時間：30分(予定)</code> または <code>会話時間：1時間(予定)</code> を設定し、会話時間 + 15分後に空へ戻します。</p>
+            <p><code>call_wait_bosyu_notice_enabled:true</code>、<code>bosyu_mention_role</code> 設定済み、メンションなし、通話時間なしのお手軽募集では、ロール付与者が同じVCへ2人以上集まった時点で募集ロールへ途中参加案内を送ります。</p>
           </div>
         </section>
 

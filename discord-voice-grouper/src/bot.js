@@ -67,6 +67,7 @@ const OTEBO_DEFAULT_QUICK_CONFIRM_SECONDS = 30;
 const OTEBO_ROLE_REMOVE_MS = 20 * 60 * 1000;
 const OTEBO_VOICE_STATUS_DEADLINE_MS = 20 * 60 * 1000;
 const OTEBO_VOICE_STATUS_EXTRA_MS = 15 * 60 * 1000;
+const OTEBO_SCHEDULED_NOTICE_LEAD_MS = 30 * 60 * 1000;
 const GATHERING_VC_OPEN_HOUR_JST = 20;
 const GATHERING_VC_OPEN_MINUTE_JST = 40;
 const KOKUCHI_PRE_NOTICE_HOUR_JST = 20;
@@ -545,6 +546,10 @@ async function handleCallWaitSetting(interaction) {
     "call_wait_notice_channel",
     false,
   );
+  const oteboPreviewChannel = interaction.options.getChannel(
+    "otebo_preview_channel",
+    false,
+  );
   const callWaitVoiceCategory = interaction.options.getChannel(
     "call_wait_voice_category",
     false,
@@ -574,6 +579,10 @@ async function handleCallWaitSetting(interaction) {
 
   if (callWaitNoticeChannel) {
     patch.callWaitNoticeChannelId = callWaitNoticeChannel.id;
+  }
+
+  if (oteboPreviewChannel) {
+    patch.oteboPreviewChannelId = oteboPreviewChannel.id;
   }
 
   if (callWaitVoiceCategory) {
@@ -1763,6 +1772,13 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
     };
   }
 
+  const shouldUsePreviewChannel =
+    draft.type !== OTEBO_TYPE_IMMEDIATE &&
+    configured.previewChannel &&
+    targetAt.getTime() - OTEBO_SCHEDULED_NOTICE_LEAD_MS > Date.now();
+  const sendChannel = shouldUsePreviewChannel
+    ? configured.previewChannel
+    : configured.noticeChannel;
   const recruitment = {
     id: createOteboRecruitmentId(),
     ownerId: interaction.user.id,
@@ -1771,8 +1787,11 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
     duration: normalizeOteboDuration(draft.duration),
     mentionBosyu: draft.mentionBosyu === true,
     note: normalizeOteboNote(note),
-    channelId: configured.noticeChannel.id,
+    channelId: sendChannel.id,
     messageId: null,
+    noticeChannelId: configured.noticeChannel.id,
+    previewChannelId: shouldUsePreviewChannel ? configured.previewChannel.id : null,
+    publishedToNotice: !shouldUsePreviewChannel,
     memberIds: [interaction.user.id],
     pendingConfirmations: {},
     status: "active",
@@ -1784,7 +1803,7 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
     token: draft.menuInteractionToken,
     messageId: draft.menuMessageId,
   };
-  const message = await configured.noticeChannel.send({
+  const message = await sendChannel.send({
     content: formatOteboRecruitmentMessage(recruitment, settings),
     components: [createOteboJoinRow(recruitment)],
     allowedMentions: getOteboRecruitmentAllowedMentions(recruitment, settings),
@@ -2687,6 +2706,28 @@ async function sendCallWaitBosyuNotice(guild, settings, fallbackChannel) {
   });
 }
 
+async function sendOteboBosyuFollowupNotice(guild, settings) {
+  if (settings.callWaitBosyuNoticeEnabled !== true || !settings.bosyuMentionRoleId) {
+    return;
+  }
+
+  const channel = await resolveConfiguredTextChannel(
+    guild,
+    getCallWaitNoticeChannelId(settings),
+  );
+
+  if (!channel || typeof channel.send !== "function") {
+    return;
+  }
+
+  await channel.send({
+    content: `<@&${settings.bosyuMentionRoleId}> 雑談が始まりました！ぜひ途中参加してみてください！`,
+    allowedMentions: { roles: [settings.bosyuMentionRoleId] },
+  }).catch((error) => {
+    console.error(`Failed to send otebo bosyu follow-up notice: ${error.message}`);
+  });
+}
+
 function createCallWaitJoinRow(targetAt) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -3178,7 +3219,7 @@ function formatOteboRecruitmentMessage(recruitment, settings) {
   const targetAt = new Date(recruitment.targetAt);
   const time = formatJstTime(targetAt);
   const mention =
-    recruitment.mentionBosyu && settings?.bosyuMentionRoleId
+    shouldMentionBosyuInOteboRecruitment(recruitment, settings)
       ? `<@&${settings.bosyuMentionRoleId}>`
       : "";
   const note = normalizeOteboNote(recruitment.note);
@@ -3231,9 +3272,36 @@ async function editOteboRecruitmentMessage(guild, settings, recruitment) {
 }
 
 function getOteboRecruitmentAllowedMentions(recruitment, settings) {
-  return recruitment.mentionBosyu && settings?.bosyuMentionRoleId
+  return shouldMentionBosyuInOteboRecruitment(recruitment, settings)
     ? { roles: [settings.bosyuMentionRoleId] }
     : { parse: [] };
+}
+
+function shouldMentionBosyuInOteboRecruitment(recruitment, settings) {
+  return Boolean(
+    recruitment?.mentionBosyu &&
+      settings?.bosyuMentionRoleId &&
+      (recruitment.publishedToNotice !== false ||
+        recruitment.channelId === getCallWaitNoticeChannelId(settings)),
+  );
+}
+
+function formatOteboStartNoticeMessage(roleId, recruitment) {
+  const lines = [
+    `<@&${roleId}> お手軽募集の参加予定者が集まりました！VCへの参加お願いします！`,
+  ];
+  const durationText = getOteboScheduledDurationText(recruitment?.duration);
+  const note = normalizeOteboNote(recruitment?.note);
+
+  if (durationText) {
+    lines.push(`通話時間：${durationText}`);
+  }
+
+  if (note) {
+    lines.push(`ひとこと：${sanitizeDiscordMentions(note)}`);
+  }
+
+  return lines.join("\n");
 }
 
 function getOteboScheduledDurationText(duration) {
@@ -3323,6 +3391,10 @@ async function validateOteboSettings(guild, settings, draft) {
     guild,
     getCallWaitNoticeChannelId(settings),
   );
+  const previewChannel = await resolveConfiguredTextChannel(
+    guild,
+    settings?.oteboPreviewChannelId,
+  );
   const role = await guild.roles.fetch(settings.callWaitRoleId).catch(() => null);
 
   if (!noticeChannel) {
@@ -3342,6 +3414,7 @@ async function validateOteboSettings(guild, settings, draft) {
   return {
     ok: true,
     noticeChannel,
+    previewChannel,
     role,
   };
 }
@@ -3407,10 +3480,14 @@ function addUniqueMemberId(memberIds, memberId) {
   return [...new Set([...normalizeCallWaitMemberIds(memberIds), memberId].filter(Boolean))];
 }
 
-function createOteboVoiceStatusSession({ recruitment, memberIds, notifiedAt }) {
+function createOteboVoiceStatusSession({ recruitment, memberIds, notifiedAt, settings }) {
   const durationMinutes = getOteboDurationMinutes(recruitment.duration);
+  const shouldSendBosyuNotice = shouldSendOteboBosyuFollowupNotice(
+    recruitment,
+    settings,
+  );
 
-  if (!durationMinutes) {
+  if (!durationMinutes && !shouldSendBosyuNotice) {
     return null;
   }
 
@@ -3420,6 +3497,8 @@ function createOteboVoiceStatusSession({ recruitment, memberIds, notifiedAt }) {
     memberIds: normalizeCallWaitMemberIds(memberIds),
     duration: normalizeOteboDuration(recruitment.duration),
     durationMinutes,
+    sendBosyuNotice: shouldSendBosyuNotice,
+    bosyuNoticeSentAt: null,
     notifiedAt: notifiedAt.toISOString(),
     statusChannelId: null,
     statusSetAt: null,
@@ -3438,6 +3517,15 @@ function getOteboDurationMinutes(duration) {
   }
 
   return null;
+}
+
+function shouldSendOteboBosyuFollowupNotice(recruitment, settings) {
+  return Boolean(
+    settings?.callWaitBosyuNoticeEnabled === true &&
+      settings?.bosyuMentionRoleId &&
+      recruitment?.mentionBosyu !== true &&
+      normalizeOteboDuration(recruitment?.duration) === OTEBO_DURATION_NONE,
+  );
 }
 
 function getOteboVoiceStatusLabel(duration) {
@@ -3477,6 +3565,20 @@ async function restoreOteboRecruitmentTimers() {
 function scheduleOteboRecruitmentTimers(guild, recruitment) {
   clearOteboRecruitmentTimers(guild.id, recruitment.id);
 
+  if (shouldScheduleOteboNoticePublish(recruitment)) {
+    const publishAt = getOteboNoticePublishAt(recruitment);
+    const key = getOteboPublishTimerKey(guild.id, recruitment.id);
+    const publishDelayMs = Math.max(1000, publishAt.getTime() - Date.now());
+    const publishTimer = setTimeout(() => {
+      oteboRecruitmentTimers.delete(key);
+      void processOteboNoticePublish(guild.id, recruitment.id).catch((error) => {
+        console.error(`Failed to publish otebo notice message: ${error.message}`, error);
+      });
+    }, publishDelayMs);
+
+    oteboRecruitmentTimers.set(key, publishTimer);
+  }
+
   const targetAt = new Date(recruitment.targetAt);
   if (Number.isFinite(targetAt.getTime())) {
     const delayMs = Math.max(1000, targetAt.getTime() - Date.now());
@@ -3496,6 +3598,92 @@ function scheduleOteboRecruitmentTimers(guild, recruitment) {
   )) {
     scheduleOteboImmediateConfirmation(guild, recruitment, memberId, expiresAt);
   }
+}
+
+function shouldScheduleOteboNoticePublish(recruitment) {
+  if (
+    recruitment?.status !== "active" ||
+    recruitment.type !== OTEBO_TYPE_SCHEDULED ||
+    recruitment.publishedToNotice !== false
+  ) {
+    return false;
+  }
+
+  const publishAt = getOteboNoticePublishAt(recruitment);
+  const targetAt = new Date(recruitment.targetAt);
+
+  return (
+    Number.isFinite(publishAt.getTime()) &&
+    Number.isFinite(targetAt.getTime()) &&
+    Date.now() < targetAt.getTime()
+  );
+}
+
+function getOteboNoticePublishAt(recruitment) {
+  const targetAt = new Date(recruitment?.targetAt);
+
+  if (!Number.isFinite(targetAt.getTime())) {
+    return new Date(Number.NaN);
+  }
+
+  return new Date(targetAt.getTime() - OTEBO_SCHEDULED_NOTICE_LEAD_MS);
+}
+
+async function processOteboNoticePublish(guildId, recruitmentId) {
+  const guild =
+    client.guilds.cache.get(guildId) ??
+    (await client.guilds.fetch(guildId).catch(() => null));
+
+  if (!guild) {
+    return;
+  }
+
+  const settings = await getGuildSettings(guild.id);
+  const recruitment = getOteboRecruitment(settings, recruitmentId);
+
+  if (!shouldScheduleOteboNoticePublish(recruitment)) {
+    return;
+  }
+
+  const noticeChannel = await resolveConfiguredTextChannel(
+    guild,
+    recruitment.noticeChannelId ?? getCallWaitNoticeChannelId(settings),
+  );
+
+  if (!noticeChannel) {
+    return;
+  }
+
+  await deleteOteboRecruitmentMessage(guild, recruitment);
+
+  const nextRecruitment = {
+    ...recruitment,
+    channelId: noticeChannel.id,
+    messageId: null,
+    noticeChannelId: noticeChannel.id,
+    publishedToNotice: true,
+  };
+  const message = await noticeChannel.send({
+    content: formatOteboRecruitmentMessage(nextRecruitment, settings),
+    components: [createOteboJoinRow(nextRecruitment)],
+    allowedMentions: getOteboRecruitmentAllowedMentions(nextRecruitment, settings),
+  });
+
+  nextRecruitment.messageId = message.id;
+
+  const nextSettings = await saveOteboRecruitmentState(
+    guild.id,
+    settings,
+    nextRecruitment,
+  );
+
+  scheduleOteboRecruitmentTimers(guild, nextRecruitment);
+  await sendOteboApplicantLog({
+    guild,
+    settings: nextSettings,
+    action: "publish",
+    memberIds: normalizeCallWaitMemberIds(nextRecruitment.memberIds),
+  });
 }
 
 function scheduleOteboImmediateConfirmation(
@@ -3667,7 +3855,7 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
 
   if (channel) {
     await channel.send({
-      content: `<@&${settings.callWaitRoleId}> お手軽募集の参加予定者が集まりました！VCへの参加お願いします！`,
+      content: formatOteboStartNoticeMessage(settings.callWaitRoleId, recruitment),
       allowedMentions: { roles: [settings.callWaitRoleId] },
     });
   }
@@ -3685,6 +3873,7 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
     recruitment,
     memberIds: roleMemberIds,
     notifiedAt,
+    settings,
   });
 
   if (voiceStatusSession) {
@@ -3815,6 +4004,23 @@ async function processOteboVoiceStatusSessions(guild, settings) {
       continue;
     }
 
+    let nextSession = session;
+
+    if (session.sendBosyuNotice && !session.bosyuNoticeSentAt) {
+      await sendOteboBosyuFollowupNotice(guild, settings);
+      nextSession = {
+        ...nextSession,
+        bosyuNoticeSentAt: new Date().toISOString(),
+      };
+      changed = true;
+    }
+
+    if (!session.durationMinutes) {
+      delete sessions[session.id];
+      changed = true;
+      continue;
+    }
+
     const statusText = `会話時間：${getOteboVoiceStatusLabel(session.duration)}(予定)`;
 
     await setVoiceChannelStatus(
@@ -3824,7 +4030,7 @@ async function processOteboVoiceStatusSessions(guild, settings) {
     ).then(() => {
       const statusSetAt = new Date();
       sessions[session.id] = {
-        ...session,
+        ...nextSession,
         statusChannelId: voiceChannel.id,
         statusSetAt: statusSetAt.toISOString(),
         clearAt: new Date(
@@ -3837,6 +4043,7 @@ async function processOteboVoiceStatusSessions(guild, settings) {
       changed = true;
     }).catch((error) => {
       console.error(`Failed to set otebo voice status: ${error.message}`);
+      sessions[session.id] = nextSession;
       scheduleOteboVoiceStatusDeadline(guild, session);
     });
   }
@@ -4015,6 +4222,8 @@ async function sendOteboApplicantLog({
             ? "集合通知を送信しました"
             : action === "owner_cancel"
               ? "募集者が募集をキャンセルしました"
+              : action === "publish"
+                ? "募集メッセージを集合通知送信先へ移動しました"
               : "希望者リストをリセットしました";
   const list = await formatCallWaitApplicantList(guild, memberIds);
 
@@ -4053,6 +4262,10 @@ function clearOteboConfirmationTimer(guildId, recruitmentId, memberId) {
 
 function getOteboDeadlineTimerKey(guildId, recruitmentId) {
   return `${guildId}:${recruitmentId}:deadline`;
+}
+
+function getOteboPublishTimerKey(guildId, recruitmentId) {
+  return `${guildId}:${recruitmentId}:publish`;
 }
 
 function getOteboConfirmationTimerKey(guildId, recruitmentId, memberId) {
@@ -4641,16 +4854,21 @@ async function handleVoiceStateUpdate(oldState, newState) {
     settings?.voiceParticipantRoleId &&
     (await isVoiceChannelMonitored(guild, settings, oldState.channelId))
   ) {
+    const ignoredSessionKey = getVoiceMonitorSessionKey(guild.id, oldState.channelId);
+    const participantRoleId =
+      voiceMonitorSessions.get(ignoredSessionKey)?.participantRoleId ??
+      settings.voiceParticipantRoleId;
     const stillInActiveSession = await isMemberInActiveVoiceMonitorContext(
       guild,
       settings,
       oldState.member.id,
+      ignoredSessionKey,
     );
 
     if (!stillInActiveSession) {
       const member = await guild.members.fetch(oldState.member.id).catch(() => null);
       if (member) {
-        await removeVoiceParticipantRole(member, settings.voiceParticipantRoleId);
+        await removeVoiceParticipantRole(member, participantRoleId);
       }
     }
   }
@@ -5146,8 +5364,10 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
     ],
   );
 
+  const participantRoleId = session.participantRoleId ?? settings.voiceParticipantRoleId;
+
   for (const memberId of memberIds) {
-    if (!settings.voiceParticipantRoleId) {
+    if (!participantRoleId) {
       continue;
     }
 
@@ -5164,7 +5384,7 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
         continue;
       }
 
-      await removeVoiceParticipantRole(member, settings.voiceParticipantRoleId);
+      await removeVoiceParticipantRole(member, participantRoleId);
     }
   }
 
@@ -6911,6 +7131,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `参加希望者ロール: ${settings.callWaitRoleId ? `<@&${settings.callWaitRoleId}>` : "未設定"}`,
       `募集メッセージ送信先: ${getCallWaitPromptChannelId(settings) ? `<#${getCallWaitPromptChannelId(settings)}>` : "未設定"}`,
       `集合通知送信先: ${getCallWaitNoticeChannelId(settings) ? `<#${getCallWaitNoticeChannelId(settings)}>` : "未設定"}`,
+      `お手軽募集の30分前までの掲載先: ${settings.oteboPreviewChannelId ? `<#${settings.oteboPreviewChannelId}>` : "未設定"}`,
       `参加確認VCカテゴリ: ${settings.callWaitVoiceCategoryId ? `<#${settings.callWaitVoiceCategoryId}>` : "未設定"}`,
       `募集ロール途中参加案内: ${settings.callWaitBosyuNoticeEnabled === true ? "有効" : "無効"}`,
       `お手軽募集の即時募集キャンセル猶予: ${getOteboQuickConfirmSeconds(settings)}秒`,

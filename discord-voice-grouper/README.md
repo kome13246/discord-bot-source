@@ -46,6 +46,8 @@
 - 通話待機システムで、毎時ちょうどに次の1時間後の雑談希望者をリアクションまたはボタンで募集できます。
 - 希望者が2人以上集まった場合、参加希望者ロールを付与し、VCに2人入った確認後に集合通知できます。
 - `/sendotebo` で、ユーザーが任意の時刻・ひとことを指定して作るお手軽募集ボタンを設置できます。
+- 時間指定のお手軽募集は、30分前まで別チャンネルに事前掲載し、30分前に集合通知送信先へ移動できます。
+- 条件を満たすお手軽募集では、参加者が同じVCへ2人集まった時点で募集ロールへ途中参加案内を送れます。
 
 ## グループ分けのルール
 
@@ -205,6 +207,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_CALL_WAIT_ROLE_ID=123456789012345678
 # PB_CALL_WAIT_PROMPT_CHANNEL_ID=123456789012345678
 # PB_CALL_WAIT_NOTICE_CHANNEL_ID=123456789012345678
+# PB_OTEBO_PREVIEW_CHANNEL_ID=123456789012345678
 # PB_CALL_WAIT_VOICE_CATEGORY_ID=123456789012345678
 # PB_CALL_WAIT_MODE=button
 # PB_CALL_WAIT_BOSYU_NOTICE_ENABLED=false
@@ -246,6 +249,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_CALL_WAIT_ROLE_ID` | 任意 | 通話待機・お手軽募集で参加希望者に付与するロールIDです。 |
 | `PB_CALL_WAIT_PROMPT_CHANNEL_ID` | 任意 | 通話待機システムの募集メッセージを送るチャンネルIDです。 |
 | `PB_CALL_WAIT_NOTICE_CHANNEL_ID` | 任意 | 通話待機システムの集合通知を送るチャンネルIDです。 |
+| `PB_OTEBO_PREVIEW_CHANNEL_ID` | 任意 | 時間指定のお手軽募集を、メンション・掲載終了時刻の30分前まで掲載するチャンネルIDです。 |
 | `PB_CALL_WAIT_VOICE_CATEGORY_ID` | 任意 | 毎時ちょうどに、すでに2人以上いるか確認するVCカテゴリIDです。 |
 | `PB_CALL_WAIT_MODE` | 任意 | `reaction` または `button` です。未設定時は `button` です。 |
 | `PB_CALL_WAIT_BOSYU_NOTICE_ENABLED` | 任意 | 集合通知後に `/b` の募集ロールへ途中参加案内を送るかどうかです。 |
@@ -480,7 +484,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_OTEBO_PREVIEW_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
 Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting reminder` などで再設定が必要になることがあります。
 
@@ -564,7 +568,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 /setting wadai wadaich:告知・スタート案内送信先
 /setting logs log_channel:運用ログ
 /setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
-/setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:募集チャンネル call_wait_notice_channel:集合通知チャンネル call_wait_voice_category:VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true otebo_quick_confirm_seconds:30
+/setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:募集チャンネル call_wait_notice_channel:集合通知チャンネル otebo_preview_channel:事前掲載チャンネル call_wait_voice_category:VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true otebo_quick_confirm_seconds:30
 ```
 
 `child_category` は任意です。
@@ -603,6 +607,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `call_wait_role` | 希望者が2人以上集まったとき、一時的に付与するロールです。 |
 | `call_wait_prompt_channel` | リアクション式・ボタン式の募集メッセージを送るチャンネルです。 |
 | `call_wait_notice_channel` | 集合通知を送るチャンネルです。 |
+| `otebo_preview_channel` | 時間指定のお手軽募集を、メンション・掲載終了時刻の30分前まで掲載するチャンネルです。未設定時は最初から `call_wait_notice_channel` に投稿します。 |
 | `call_wait_voice_category` | 毎時ちょうどに、すでに2人以上いるか確認するVCカテゴリです。 |
 | `call_wait_mode` | `reaction` でリアクション式、`button` でボタン式にします。 |
 | `call_wait_bosyu_notice_enabled` | 集合通知後に `/b` の募集ロールへ途中参加案内を送るかどうかです。 |
@@ -931,8 +936,11 @@ Discordの仕様上、ラジオボタンではなく選択メニューで次の�
 - ひとこと: 任意入力
 - `@通話へのメンション`: `しない` / `する`
 
-募集は `call_wait_notice_channel` に投稿されます。
+募集は基本的に `call_wait_notice_channel` に投稿されます。
+`指定した時間になったら` の募集で `otebo_preview_channel` が設定されており、指定時刻まで30分以上ある場合は、まず `otebo_preview_channel` に投稿します。
+指定時刻の30分前になったら、そのメッセージを削除し、同じ内容を `call_wait_notice_channel` へ投稿し直します。
 `@通話へのメンション` を `する` にした場合は、`bosyu_mention_role` を本文に入れます。
+ただし `otebo_preview_channel` に掲載している間はメンションせず、30分前に `call_wait_notice_channel` へ移動した後だけメンションします。
 ひとこと欄に `@everyone` やロールメンションを書いても、メンションとして通知されないように処理します。
 
 同時に作成できる募集は一人一つまでです。
@@ -960,6 +968,12 @@ Discordの仕様上、ラジオボタンではなく選択メニューで次の�
 集合通知後、`call_wait_role` は20分後に自動解除します。
 会話時間に `30分間だけ` または `1時間だけ` が選ばれていた場合、集合通知後20分以内にロール付与対象者が同じVCへ最初に2人以上集まると、そのVCのチャンネルステータスを `会話時間：30分(予定)` または `会話時間：1時間(予定)` に設定します。
 設定したステータスは、会話時間 + 15分後に空へ戻します。
+`call_wait_bosyu_notice_enabled:true`、`bosyu_mention_role` 設定済み、`@通話へのメンション:しない`、通話時間 `設定なし` のお手軽募集では、集合通知後20分以内にロール付与対象者が同じVCへ2人以上集まった時点で、`call_wait_notice_channel` に次の途中参加案内を送ります。
+
+```text
+@募集ロール 雑談が始まりました！ぜひ途中参加してみてください！
+```
+
 参加・キャンセル・リセットのログは、定時募集と同じように `log_channel` へ送ります。
 
 ### `/splitvc`
