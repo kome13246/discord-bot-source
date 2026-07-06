@@ -7363,4 +7363,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     });
   }
 
-  client.login(DISCORD_TOKEN);
+  console.log("Attempting to login to Discord...");
+  client.login(DISCORD_TOKEN).catch((error) => {
+    console.error("Failed to login to Discord. Check DISCORD_TOKEN and bot application settings.", error);
+  });
