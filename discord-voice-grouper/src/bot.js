@@ -16,6 +16,7 @@ import {
   GatewayIntentBits,
   MessageFlags,
   PermissionsBitField,
+  version as discordJsVersion,
 } from "discord.js";
 import {
   deleteBumpReminder,
@@ -25,7 +26,7 @@ import {
 import { buildGroups, describeGroups, shuffle } from "./grouping.js";
 import { getGuildSettings, saveGuildSettings } from "./settings-store.js";
 
-const { DISCORD_TOKEN, DISBOARD_BOT_ID, KEEP_ALIVE_PORT, PORT } = process.env;
+const { DISCORD_TOKEN, DISBOARD_BOT_ID, DISCORD_DEBUG_LOGS, KEEP_ALIVE_PORT, PORT } = process.env;
 
 const DISBOARD_DEFAULT_BOT_ID = "302050872383242240";
 const BUMP_REMINDER_WAIT_MS = 2 * 60 * 60 * 1000;
@@ -149,6 +150,8 @@ const client = new Client({
   ],
 });
 
+let discordReadyWatchdog = null;
+
 const healthPort = Number(PORT ?? KEEP_ALIVE_PORT);
 
 if (Number.isInteger(healthPort) && healthPort > 0) {
@@ -156,6 +159,10 @@ if (Number.isInteger(healthPort) && healthPort > 0) {
 }
 
 client.once(Events.ClientReady, (readyClient) => {
+  if (discordReadyWatchdog) {
+    clearTimeout(discordReadyWatchdog);
+    discordReadyWatchdog = null;
+  }
   console.log(`Logged in as ${readyClient.user.tag}`);
   void restoreBumpReminders().catch((error) => {
     console.error(error);
@@ -168,6 +175,36 @@ client.once(Events.ClientReady, (readyClient) => {
   });
   scheduleNextCallWaitTick();
 });
+
+client.on(Events.Error, (error) => {
+  console.error("Discord client error:", error);
+});
+
+client.on(Events.Warn, (message) => {
+  console.warn(`Discord client warning: ${message}`);
+});
+
+client.on(Events.ShardError, (error, shardId) => {
+  console.error(`Discord shard ${shardId} error:`, error);
+});
+
+client.on(Events.ShardDisconnect, (event, shardId) => {
+  console.error(`Discord shard ${shardId} disconnected: code=${event.code} reason=${event.reason ?? ""}`);
+});
+
+client.on(Events.ShardReady, (shardId) => {
+  console.log(`Discord shard ${shardId} ready.`);
+});
+
+client.on(Events.ShardReconnecting, (shardId) => {
+  console.warn(`Discord shard ${shardId} reconnecting...`);
+});
+
+if (DISCORD_DEBUG_LOGS === "true") {
+  client.on(Events.Debug, (message) => {
+    console.debug(`Discord debug: ${message}`);
+  });
+}
 
 client.on(Events.MessageCreate, async (message) => {
   try {
@@ -7363,7 +7400,22 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     });
   }
 
+  console.log(`Node.js runtime: ${process.version}`);
+  console.log(`discord.js version: ${discordJsVersion}`);
   console.log("Attempting to login to Discord...");
+
+  discordReadyWatchdog = setTimeout(() => {
+    if (!client.isReady()) {
+      console.error(
+        `Discord client did not become ready within 30 seconds. wsStatus=${client.ws.status}`,
+      );
+    }
+  }, 30_000);
+
   client.login(DISCORD_TOKEN).catch((error) => {
+    if (discordReadyWatchdog) {
+      clearTimeout(discordReadyWatchdog);
+      discordReadyWatchdog = null;
+    }
     console.error("Failed to login to Discord. Check DISCORD_TOKEN and bot application settings.", error);
   });
