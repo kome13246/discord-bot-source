@@ -3167,7 +3167,7 @@ function createDefaultOteboDraft(guildId, userId) {
     type: OTEBO_TYPE_SCHEDULED,
     targetAt: timeOptions.defaultTargetAt.toISOString(),
     duration: OTEBO_DURATION_NONE,
-    mentionBosyu: false,
+    mentionBosyu: true,
     createdAt: new Date().toISOString(),
   };
 }
