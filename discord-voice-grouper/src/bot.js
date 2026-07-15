@@ -236,11 +236,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      if (interaction.customId.startsWith("topic_form_button:")) {
-        await handleTopicFormButton(interaction);
-        return;
-      }
-
       if (interaction.customId.startsWith("auto_split:")) {
         await handleAutoSplitButton(interaction);
         return;
@@ -291,11 +286,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith("bosyu_edit_modal:")) {
         await handleBosyuEditModal(interaction);
-        return;
-      }
-
-      if (interaction.customId.startsWith("topic_form:")) {
-        await handleTopicFormModal(interaction);
         return;
       }
 
@@ -404,19 +394,19 @@ async function handleSetting(interaction) {
     return;
   }
 
+  if (subcommand === "shugo") {
+    await handleShugoSetting(interaction);
+    return;
+  }
+
   const tempRole = interaction.options.getRole("participant_role", false);
   const parentChannel = interaction.options.getChannel("parent_channel", false);
   const childCategory = interaction.options.getChannel("child_category", false);
+  const kokuchiOverviewChannel = interaction.options.getChannel("kokuchi_overview_channel", false);
   const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
   const waitingVcName = interaction.options.getString("waiting_vc_name", false);
   const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
-  const voiceParticipantRole = interaction.options.getRole("voice_participant_role", false);
-  const voiceReminderEnabled = interaction.options.getBoolean("voice_reminder_enabled", false);
-  const voiceReminderChannel = interaction.options.getChannel("voice_reminder_channel", false);
-  const voiceTopicChannel = interaction.options.getChannel("voice_topic_channel", false);
-  const voiceReminderParentChannel = interaction.options.getChannel("voice_reminder_parent_channel", false);
-  const voiceReminderChildCategory = interaction.options.getChannel("voice_reminder_child_category", false);
   const wadaiChannel = interaction.options.getChannel("wadaich", false);
   const postSplitWadaiChannel = interaction.options.getChannel("post_split_wadai_channel", false);
   const splitStartChannel = interaction.options.getChannel("split_start_channel", false);
@@ -453,6 +443,10 @@ async function handleSetting(interaction) {
     patch.childCategoryId = childCategory.id;
   }
 
+  if (kokuchiOverviewChannel) {
+    patch.kokuchiOverviewChannelId = kokuchiOverviewChannel.id;
+  }
+
   if (waitingVcCategory) {
     patch.waitingVcCategoryId = waitingVcCategory.id;
   }
@@ -467,26 +461,6 @@ async function handleSetting(interaction) {
 
   if (bosyuMentionRole) {
     patch.bosyuMentionRoleId = bosyuMentionRole.id;
-  }
-
-  if (voiceParticipantRole) {
-    patch.voiceParticipantRoleId = voiceParticipantRole.id;
-  }
-
-  if (voiceReminderChannel) {
-    patch.voiceReminderChannelId = voiceReminderChannel.id;
-  }
-
-  if (voiceTopicChannel) {
-    patch.voiceTopicChannelId = voiceTopicChannel.id;
-  }
-
-  if (voiceReminderParentChannel) {
-    patch.voiceReminderParentChannelId = voiceReminderParentChannel.id;
-  }
-
-  if (voiceReminderChildCategory) {
-    patch.voiceReminderChildCategoryId = voiceReminderChildCategory.id;
   }
 
   if (wadaiChannel) {
@@ -529,10 +503,6 @@ async function handleSetting(interaction) {
 
   if (finishMessage?.trim()) {
     patch.finishMessage = finishMessage.trim();
-  }
-
-  if (voiceReminderEnabled !== null) {
-    patch.voiceReminderEnabled = voiceReminderEnabled;
   }
 
   if (transferWaitSeconds !== null) {
@@ -690,6 +660,57 @@ async function handleCallWaitSetting(interaction) {
 
   await replyOrFollowUp(interaction, {
     content: `通話待機システム設定を保存しました。\n\n${formatSettings(settings)}`,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleShugoSetting(interaction) {
+  const voiceParticipantRole = interaction.options.getRole("voice_participant_role", false);
+  const voiceReminderEnabled = interaction.options.getBoolean("voice_reminder_enabled", false);
+  const voiceReminderParentChannel = interaction.options.getChannel(
+    "voice_reminder_parent_channel",
+    false,
+  );
+  const voiceReminderChildCategory = interaction.options.getChannel(
+    "voice_reminder_child_category",
+    false,
+  );
+  const patch = {};
+
+  if (voiceParticipantRole) {
+    patch.voiceParticipantRoleId = voiceParticipantRole.id;
+  }
+
+  if (voiceReminderEnabled !== null) {
+    patch.voiceReminderEnabled = voiceReminderEnabled;
+  }
+
+  if (voiceReminderParentChannel) {
+    patch.voiceReminderParentChannelId = voiceReminderParentChannel.id;
+  }
+
+  if (voiceReminderChildCategory) {
+    patch.voiceReminderChildCategoryId = voiceReminderChildCategory.id;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    await replyOrFollowUp(interaction, {
+      content: "変更するVC集合フォーム設定を1つ以上指定してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const currentSettings = await getGuildSettings(interaction.guildId);
+  const settings = await saveGuildSettingsWithCurrent(
+    interaction.guildId,
+    currentSettings,
+    patch,
+  );
+
+  await replyOrFollowUp(interaction, {
+    content: `VC集合フォーム設定を保存しました。\n\n${formatSettings(settings)}`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
@@ -917,6 +938,10 @@ function getKokuchiAnnouncementChannelId(settings) {
   return settings?.wadaiChannelId ?? settings?.splitStartChannelId ?? null;
 }
 
+function getKokuchiOverviewChannelId(settings) {
+  return settings?.kokuchiOverviewChannelId ?? null;
+}
+
 async function resolveWadaiSendChannel(guild, settings, fallbackChannel) {
   const textTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
   const channelId = getKokuchiAnnouncementChannelId(settings);
@@ -997,7 +1022,7 @@ async function handleKokuchi(interaction) {
   }
 
   const weekday = interaction.options.getString("weekday", true);
-  const overviewChannel = interaction.options.getChannel("overview_channel", true);
+  const overviewChannel = interaction.options.getChannel("overview_channel", false);
   const targetChannel = interaction.options.getChannel("channel", false);
   const sendTopic = interaction.options.getBoolean("send_topic", false) ?? true;
   const settings = await getGuildSettings(interaction.guildId);
@@ -1010,6 +1035,23 @@ async function handleKokuchi(interaction) {
     await replyOrFollowUp(interaction, {
       content:
         "告知送信先を取得できませんでした。`channel` を指定するか、`/setting wadai wadaich:送信先` を設定してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const resolvedOverviewChannel =
+    overviewChannel ??
+    (settings?.kokuchiOverviewChannelId
+      ? await interaction.guild.channels
+          .fetch(settings.kokuchiOverviewChannelId)
+          .catch(() => null)
+      : null);
+
+  if (!resolvedOverviewChannel || typeof resolvedOverviewChannel.send !== "function") {
+    await replyOrFollowUp(interaction, {
+      content:
+        "概要案内チャンネルが未設定です。`/setting splitvc kokuchi_overview_channel:概要案内チャンネル` を設定してください。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1039,7 +1081,7 @@ async function handleKokuchi(interaction) {
   const message = await sendChannel.send({
     content: formatKokuchiMessage({
       weekday,
-      overviewChannelId: overviewChannel.id,
+      overviewChannelId: resolvedOverviewChannel.id,
       topic: selectedTopic,
     }),
     allowedMentions: { parse: [] },
@@ -5055,10 +5097,6 @@ async function isVoiceChannelMonitored(guild, settings, channelId) {
     return false;
   }
 
-  if (settings?.voiceReminderEnabled === false) {
-    return false;
-  }
-
   const voiceChannel =
     guild.channels.cache.get(channelId) ??
     (await guild.channels.fetch(channelId).catch(() => null));
@@ -5184,16 +5222,9 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
         return;
       }
 
-      const reminderChannel = await findAssociatedTextChannel(guild, voiceChannel, settings);
-
-      if (!reminderChannel || typeof reminderChannel.send !== "function") {
-        return;
-      }
-
       const session = {
         guildId: guild.id,
         voiceChannelId: channelId,
-        reminderChannelId: reminderChannel.id,
         participantRoleId: settings.voiceParticipantRoleId,
         memberIds: new Set(),
         topicForms: new Map(),
@@ -5201,7 +5232,7 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
       };
 
       voiceMonitorSessions.set(sessionKey, session);
-      await startVoiceMonitorSession(session, voiceChannel, members, reminderChannel);
+      await startVoiceMonitorSession(session, voiceChannel, members, settings);
       return;
     }
 
@@ -5217,16 +5248,6 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
     }
 
     await ensureSessionMembersHaveRole(existingSession, voiceChannel, members);
-
-    if (existingSession.topicForms.size === 0) {
-      const reminderChannel = await client.channels
-        .fetch(existingSession.reminderChannelId)
-        .catch(() => null);
-
-      if (reminderChannel && typeof reminderChannel.send === "function") {
-        await sendVoiceMonitorTopicFormMessage(existingSession, reminderChannel);
-      }
-    }
 
     return;
   }
@@ -5272,39 +5293,35 @@ async function stopVoiceMonitorSessionIfStillUnderfilled(
   await stopVoiceMonitorSession(session, guild, voiceChannel, settings);
 }
 
-async function startVoiceMonitorSession(session, voiceChannel, members, reminderChannel) {
+async function startVoiceMonitorSession(session, voiceChannel, members, settings) {
   await ensureSessionMembersHaveRole(session, voiceChannel, members);
-  await sendVoiceMonitorTopicFormMessage(session, reminderChannel);
+  await sendVoiceMonitorStartNotice(voiceChannel, settings);
 }
 
-async function sendVoiceMonitorTopicFormMessage(session, reminderChannel) {
-  const formId = createSessionId();
-  const mentionText = session.participantRoleId
-    ? `<@&${session.participantRoleId}> `
+async function sendVoiceMonitorStartNotice(voiceChannel, settings) {
+  if (settings?.voiceReminderEnabled === false) {
+    return;
+  }
+
+  const bosyuChannel = await resolveConfiguredTextChannel(
+    voiceChannel.guild,
+    settings?.bosyuChannelId,
+  );
+
+  if (!bosyuChannel) {
+    return;
+  }
+
+  const mentionText = settings?.bosyuMentionRoleId
+    ? `<@&${settings.bosyuMentionRoleId}> `
     : "";
-  const message = await reminderChannel.send({
-    content: [
-      `${mentionText}お集まりいただきありがとうございます！`,
-      "お暇があれば今の話題をフォームへお願いします！",
-      "送信された内容はチャンネルステータスとして表示されます！",
-    ].join("\n"),
-    components: [createTopicFormRow(formId)],
-    allowedMentions: session.participantRoleId
-      ? { roles: [session.participantRoleId] }
+
+  await bosyuChannel.send({
+    content: `${mentionText}<#${voiceChannel.id}> にて通話が始まりました！`,
+    allowedMentions: settings?.bosyuMentionRoleId
+      ? { roles: [settings.bosyuMentionRoleId] }
       : { parse: [] },
   });
-
-  const topicForm = {
-    guildId: session.guildId,
-    voiceChannelId: session.voiceChannelId,
-    reminderChannelId: session.reminderChannelId,
-    expiresAt: Number.POSITIVE_INFINITY,
-    messageId: message.id,
-    disableTimer: null,
-  };
-
-  topicFormSessions.set(formId, topicForm);
-  session.topicForms.set(formId, topicForm);
 }
 
 async function deleteVoiceMonitorTopicForms(session) {
@@ -5788,14 +5805,13 @@ async function handleSplitVoice(interaction) {
   }
 
   const includeBots = interaction.options.getBoolean("include_bots") ?? false;
-  const shouldShuffle = interaction.options.getBoolean("shuffle") ?? true;
   const members = [...sourceChannel.members.values()]
     .filter((member) => includeBots || !member.user.bot)
     .sort((left, right) =>
       left.displayName.localeCompare(right.displayName, "ja"),
     );
 
-  const targetMembers = shouldShuffle ? shuffle(members) : members;
+  const targetMembers = shuffle(members);
   const groups = buildGroups(targetMembers);
 
   if (targetMembers.length === 0) {
@@ -6066,6 +6082,7 @@ async function handleBosyu(interaction) {
 
   const timeValue = interaction.options.getString("time", false)?.trim() ?? "";
   let purposeValue = interaction.options.getString("purpose", false)?.trim() ?? "";
+  const anonymous = interaction.options.getBoolean("anonymous", false) ?? false;
   const noteValue = interaction.options.getString("note", true).trim();
 
   const currentVoiceChannel = interaction.member?.voice?.channel;
@@ -6083,7 +6100,13 @@ async function handleBosyu(interaction) {
     }
   }
 
-  const content = formatBosyuMessage(timeValue, purposeValue, noteValue, bosyuMentionRoleId);
+  const content = formatBosyuMessage(
+    timeValue,
+    purposeValue,
+    noteValue,
+    bosyuMentionRoleId,
+    anonymous,
+  );
 
   await replyOrFollowUp(interaction, {
     content,
@@ -6100,6 +6123,7 @@ async function handleBosyu(interaction) {
     ownerId: interaction.user.id,
     expiresAt,
     bosyuMentionRoleId,
+    anonymous,
     voiceChannelId: currentVoiceChannel?.isVoiceBased() ? currentVoiceChannel.id : null,
   });
 
@@ -6193,7 +6217,13 @@ async function handleBosyuEditModal(interaction) {
   const timeValue = interaction.fields.getTextInputValue("bosyu_time");
   const purposeValue = interaction.fields.getTextInputValue("bosyu_purpose");
   const noteValue = interaction.fields.getTextInputValue("bosyu_note");
-  const content = formatBosyuMessage(timeValue, purposeValue, noteValue, session.bosyuMentionRoleId);
+  const content = formatBosyuMessage(
+    timeValue,
+    purposeValue,
+    noteValue,
+    session.bosyuMentionRoleId,
+    session.anonymous,
+  );
 
   const channel = interaction.channel;
   const replyMessage = await channel.messages.fetch(messageId).catch(() => null);
@@ -6320,10 +6350,10 @@ function parseBosyuContent(content) {
   };
 }
 
-function formatBosyuMessage(time, purpose, note, mentionRoleId) {
+function formatBosyuMessage(time, purpose, note, mentionRoleId, anonymous = false) {
   const lines = [];
 
-  if (mentionRoleId) {
+  if (mentionRoleId && !anonymous) {
     lines.push(`<@&${mentionRoleId}>`);
   }
 
@@ -7127,6 +7157,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `参加者ロール: ${settings.tempRoleId ? `<@&${settings.tempRoleId}>` : "未設定"}`,
       `PB親チャンネル: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
       `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
+      `告知の概要案内チャンネル: ${getKokuchiOverviewChannelId(settings) ? `<#${getKokuchiOverviewChannelId(settings)}>` : "未設定"}`,
       `待機VCカテゴリ: ${settings.waitingVcCategoryId ? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
       `待機VC名: ${settings.waitingVcName || DEFAULT_WAITING_VC_NAME}`,
       `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
@@ -7143,8 +7174,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
       `対象子VCカテゴリ: ${settings.voiceReminderChildCategoryId ? `<#${settings.voiceReminderChildCategoryId}>` : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
-      `フォーム送信先: ${settings.voiceReminderChannelId ? `<#${settings.voiceReminderChannelId}>` : "ボイスチャンネルに付随するテキストチャンネルを自動参照"}`,
-      `旧話題転送先: ${settings.voiceTopicChannelId ? `<#${settings.voiceTopicChannelId}>` : "未設定"}`,
       "",
       "【おすすめ話題・案内】",
       `/kokuchi告知・スタート案内送信先: ${getKokuchiAnnouncementChannelId(settings) ? `<#${getKokuchiAnnouncementChannelId(settings)}>` : "未設定"}`,

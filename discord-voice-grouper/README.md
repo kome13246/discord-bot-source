@@ -486,7 +486,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
 確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_OTEBO_PREVIEW_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_MODE`、`PB_CALL_WAIT_BOSYU_NOTICE_ENABLED`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
-Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting reminder` などで再設定が必要になることがあります。
+Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting shugo` などで再設定が必要になることがあります。
 
 ### 5. デプロイする
 
@@ -562,9 +562,9 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 `/setting set` は使わず、次のように機能別サブコマンドで設定します。
 
 ```text
-/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
+/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ kokuchi_overview_channel:告知概要チャンネル waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
 /setting bosyu bosyu_channel:募集チャンネル bosyu_mention_role:@募集通知
-/setting reminder voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_channel:リマインダー送信先 voice_reminder_parent_channel:PB親VC voice_reminder_child_category:PB子VCカテゴリ
+/setting shugo voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_parent_channel:PB親VC voice_reminder_child_category:PB子VCカテゴリ
 /setting wadai wadaich:告知・スタート案内送信先
 /setting logs log_channel:運用ログ
 /setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
@@ -589,9 +589,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `bosyu_channel` | `/b` を使えるテキストチャンネルを制限します。未設定なら制限なしです。 |
 | `bosyu_mention_role` | `/b` の募集メッセージでメンションするロールです。 |
 | `voice_participant_role` | VCリマインダーの対象VCに2人以上集まったとき付与するロールです。 |
-| `voice_reminder_enabled` | VCリマインダーを有効・無効にします。`false` で監視しません。 |
-| `voice_reminder_channel` | リマインダー送信先テキストチャンネルです。未設定時はVC名などから関連テキストチャンネルを探します。 |
-| `voice_topic_channel` | 旧設定との互換用です。現在のリマインダー話題フォームでは使いません。 |
+| `voice_reminder_enabled` | VC集合フォームの開始通知の有効・無効を保存します。`false` でも参加者ロールの付与・解除は行います。 |
 | `voice_reminder_parent_channel` | リマインダー対象にするPB親VCです。 |
 | `voice_reminder_child_category` | リマインダー対象にするPB子VCカテゴリです。未設定時はPB親VCのカテゴリから判定します。 |
 | `wadaich` | `/kokuchi` の告知送信先と、`/splitvc` 後のスタート案内・参加お礼送信先を兼ねます。`/kokuchi` の `channel` を省略した場合にも使います。 |
@@ -648,10 +646,11 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 
 会話練習会の告知を投稿します。
 `channel` を省略した場合は、`/setting wadai wadaich:...` で設定したチャンネルに投稿します。
+`overview_channel` を省略した場合は、`/setting splitvc kokuchi_overview_channel:...` で設定したチャンネルを使います。
 `send_topic:false` を指定すると、その回は告知に最初の話題を入れず、次回の `/splitvc` 後にも最初の話題メッセージを送りません。
 
 ```text
-/kokuchi weekday:火曜日 overview_channel:#概要 channel:#告知 send_topic:true
+/kokuchi weekday:火曜日 channel:#告知 send_topic:true
 ```
 
 投稿形式:
@@ -807,7 +806,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 募集メッセージを送信します。
 
 ```text
-/b note:遠慮せずご参加ください！ time:30分 purpose:雑談
+/b note:遠慮せずご参加ください！ time:30分 purpose:雑談 anonymous:true
 ```
 
 オプション:
@@ -817,6 +816,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `note` | 必須 | 募集のひとことです。 |
 | `time` | 任意 | 募集時間です。 |
 | `purpose` | 任意 | 名目です。 |
+| `anonymous` | 任意 | `true` のときは公開メンションを抑えます。 |
 
 `/b` は同じユーザーが15分以内に連続使用できないようになっています。
 送信後15分間は、募集メッセージの「募集内容を編集」ボタンから内容を編集できます。
@@ -832,10 +832,11 @@ Discord APIのチャンネルステータス項目は使わず、募集メッセ
 VC集合フォームは、PB子VCまたは設定された監視VCに2人以上集まったときに開始します。
 
 - 開始時に送信先へ参加者ロールをメンションし、話題フォームボタン付きの集合メッセージを1回送ります。
+- 開始時に `/b` の使用可能チャンネルへ参加者ロールをメンションした開始通知を送ります。`voice_reminder_enabled:false` の場合はこの公開通知を送りませんが、参加者ロールの付与・解除は継続します。
 - `voice_participant_role` が設定されている場合、対象VC内の参加者へロールを付与します。
 - 30分ごとの確認メッセージは送信しません。
 - 対象VCが2人未満になった場合、5分待ってからセッションを終了します。5分以内に2人以上へ戻った場合はセッションを継続します。
-- 対象VCが2人未満になってから10分後に、集合メッセージと話題フォームを削除します。10分以内に2人以上へ戻った場合は削除を取り消し、同じフォームを継続します。
+- 対象VCが2人未満になってから10分後に、対象セッションを終了します。10分以内に2人以上へ戻った場合は終了を取り消し、ロール付与を継続します。
 - セッション終了時、他の有効なVCセッションにいないメンバーから参加者ロールを解除します。
 - `voice_reminder_child_category` で指定したカテゴリ内のVC単体で6人以上になると、自動振り分け提案を送ります。
 - `voice_reminder_child_category` が未設定の場合は、VC集合フォームと同じく `child_category`、またはPB親VCのカテゴリから判定します。
@@ -987,7 +988,7 @@ Discordの仕様上、ラジオボタンではなく選択メニューで次の�
 | オプション | 型 | 省略時 | 説明 |
 | --- | --- | --- | --- |
 | `channel` | ボイスチャンネル | 実行者が入っているVC | 対象のボイスチャンネルを指定します。 |
-| `shuffle` | 真偽値 | `true` | ランダムに並べ替えてから分けます。 |
+| `shuffle` | 真偽値 | `true` | 旧オプションです。現在は使いません。 |
 | `include_bots` | 真偽値 | `false` | Botユーザーもグループ分けに含めます。 |
 | `private` | 真偽値 | `false` | 結果を自分だけに表示します。 |
 
@@ -995,7 +996,6 @@ Discordの仕様上、ラジオボタンではなく選択メニューで次の�
 
 - 自分が入っているVCをランダムに分ける: `/splitvc`
 - 指定したVCを分ける: `/splitvc channel:一般`
-- 表示名順で固定分けする: `/splitvc shuffle:false`
 - 結果を自分だけに表示する: `/splitvc private:true`
 - Botも含めて分ける: `/splitvc include_bots:true`
 
@@ -1202,4 +1202,4 @@ DISBOARD_BOT_ID=302050872383242240
 - 複数サーバーで使う場合は、動作確認後にグローバルコマンド登録へ切り替えると便利です。
 - 30人を超えても処理できますが、結果メッセージが長くなりすぎる場合はDiscord側の文字数制限に注意してください。
 - 参加者名はDiscord上の表示名を使います。
-- `shuffle:false` の場合は表示名順で分けます。
+- `shuffle` オプションは現在ありません。分け方は常にランダムです。

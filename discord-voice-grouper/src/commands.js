@@ -12,12 +12,6 @@ export const splitVoiceCommand = new SlashCommandBuilder()
   )
   .addBooleanOption((option) =>
     option
-      .setName("shuffle")
-      .setDescription("ランダムに並べ替えるか")
-      .setRequired(false),
-  )
-  .addBooleanOption((option) =>
-    option
       .setName("include_bots")
       .setDescription("Botも対象に含めるか")
       .setRequired(false),
@@ -54,6 +48,13 @@ export const settingCommand = new SlashCommandBuilder()
           .setName("child_category")
           .setDescription("PBが子VCを作るカテゴリ")
           .addChannelTypes(ChannelType.GuildCategory)
+          .setRequired(false),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("kokuchi_overview_channel")
+          .setDescription("/kokuchiで使う概要案内チャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
       .addChannelOption((option) =>
@@ -147,8 +148,8 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
-      .setName("reminder")
-      .setDescription("VCリマインダー設定を保存します")
+      .setName("shugo")
+      .setDescription("VC集合フォーム設定を保存します")
       .addRoleOption((option) =>
         option
           .setName("voice_participant_role")
@@ -159,20 +160,6 @@ export const settingCommand = new SlashCommandBuilder()
         option
           .setName("voice_reminder_enabled")
           .setDescription("VCリマインダーを有効または無効にする")
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_reminder_channel")
-          .setDescription("VCリマインダー送信先テキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("voice_topic_channel")
-          .setDescription("旧設定との互換用。現在は使用しません")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
       .addChannelOption((option) =>
@@ -337,6 +324,12 @@ export const bCommand = new SlashCommandBuilder()
       .setDescription("名目を入力してください。入力すると参加中VC名として設定されます")
       .setRequired(false)
       .setMaxLength(100),
+  )
+  .addBooleanOption((option) =>
+    option
+      .setName("anonymous")
+      .setDescription("実行者が分からない形で募集を送る")
+      .setRequired(false),
   );
 
 export const addWadaiCommand = new SlashCommandBuilder()
@@ -383,7 +376,7 @@ export const kokuchiCommand = new SlashCommandBuilder()
       .setName("overview_channel")
       .setDescription("概要案内として表示するチャンネル")
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-      .setRequired(true),
+      .setRequired(false),
   )
   .addChannelOption((option) =>
     option

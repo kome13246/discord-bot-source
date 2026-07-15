@@ -58,6 +58,7 @@ function getEnvironmentSettings(guildId) {
     process.env.PB_PARTICIPANT_ROLE_ID ?? process.env.PB_TEMP_ROLE_ID;
   const parentChannelId = process.env.PB_PARENT_CHANNEL_ID;
   const childCategoryId = process.env.PB_CHILD_CATEGORY_ID;
+  const kokuchiOverviewChannelId = process.env.PB_KOKUCHI_OVERVIEW_CHANNEL_ID;
   const waitingVcCategoryId =
     process.env.PB_WAITING_VC_CATEGORY_ID ?? process.env.PB_WAITING_CHANNEL_ID;
   const waitingVcName = process.env.PB_WAITING_VC_NAME;
@@ -99,6 +100,7 @@ function getEnvironmentSettings(guildId) {
     !tempRoleId &&
     !parentChannelId &&
     !childCategoryId &&
+    !kokuchiOverviewChannelId &&
     !waitingVcCategoryId &&
     !waitingVcName &&
     !bosyuChannelId &&
@@ -140,6 +142,7 @@ function getEnvironmentSettings(guildId) {
     tempRoleId,
     parentChannelId,
     childCategoryId,
+    kokuchiOverviewChannelId,
     waitingVcCategoryId,
     waitingVcName,
     bosyuChannelId,
