@@ -4471,11 +4471,26 @@ function formatSplitStartAnnouncement(waitingChannel) {
   ].join("\n");
 }
 
+function formatSplitStartExtendedAnnouncement(waitingChannel) {
+  return `まだ途中参加可能です。ぜひ${waitingChannel}からご参加ください。`;
+}
+
 function formatSplitStartClosedAnnouncement() {
   return [
     "集合開始から５分経ったのでスタートします",
-    "スタートから10分経過したので途中参加は締め切られました",
+    "人数が集まったので途中参加は締め切られました。",
   ].join("\n");
+}
+
+async function editSplitStartAnnouncementExtended(message, waitingChannel) {
+  if (!message) {
+    return;
+  }
+
+  await editSafely(message, {
+    content: formatSplitStartExtendedAnnouncement(waitingChannel),
+    allowedMentions: { parse: [] },
+  });
 }
 
 async function editSplitStartAnnouncementClosed(message) {
@@ -5980,9 +5995,27 @@ async function handleSplitVoice(interaction) {
             ).catch(() => null);
 
           if (fetchedChannel) {
+            const keepMonitoring = await shouldKeepWaitingRoomAlive({
+              guild: interaction.guild,
+              childChannelIds,
+            });
+
+            if (keepMonitoring) {
+              await editSplitStartAnnouncementExtended(splitStartMessage, fetchedChannel);
+
+              await sendOperationalLog({
+                guild: interaction.guild,
+                settings,
+                fallbackChannel: operationChannel,
+                content: "2人以下の子VCが残っているため、待機用VCの自動削除を延長しました。",
+              });
+
+              return;
+            }
+
             await notifyWaitingVcClosure(operationChannel, fetchedChannel);
-            await fetchedChannel.delete();
             await editSplitStartAnnouncementClosed(splitStartMessage);
+            await fetchedChannel.delete();
 
             await sendOperationalLog({
               guild: interaction.guild,
@@ -6663,8 +6696,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   }
 
   async function runWaitingRoomMonitor(options) {
-    const endsAt = Date.now() + WAITING_ROOM_MONITOR_MS;
-
     await sendOperationalLog({
       guild: options.guild,
       settings: options.settings,
@@ -6672,9 +6703,27 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       content: `${options.waitingChannel} の途中参加監視を10分間開始します。`,
     });
 
+    const endsAt = Date.now() + WAITING_ROOM_MONITOR_MS;
+
     while (Date.now() < endsAt && !options.state.ended) {
       await processWaitingRoom(options);
       await sleep(WAITING_ROOM_POLL_MS);
+    }
+
+    const shouldExtendMonitoring = await shouldKeepWaitingRoomAlive(options);
+
+    if (shouldExtendMonitoring) {
+      await sendOperationalLog({
+        guild: options.guild,
+        settings: options.settings,
+        fallbackChannel: options.channel,
+        content: "2人以下の子VCが残っているため、途中参加監視を延長します。",
+      });
+
+      while (!options.state.ended && (await shouldKeepWaitingRoomAlive(options))) {
+        await processWaitingRoom(options);
+        await sleep(WAITING_ROOM_POLL_MS);
+      }
     }
 
     if (!options.state.ended) {
@@ -6774,6 +6823,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     }
 
     return bestChannel;
+  }
+
+  async function shouldKeepWaitingRoomAlive(options) {
+    return Boolean(
+      await findUnderfilledChildChannel(options.guild, options.childChannelIds),
+    );
   }
 
   async function moveMemberToChildChannel(
