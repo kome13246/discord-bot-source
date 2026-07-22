@@ -18,6 +18,7 @@ import {
   PermissionsBitField,
   version as discordJsVersion,
 } from "discord.js";
+import { connectToMongoDB } from "./mongodb.js";
 import {
   deleteBumpReminder,
   getBumpReminders,
@@ -26,7 +27,15 @@ import {
 import { buildGroups, describeGroups, shuffle } from "./grouping.js";
 import { getGuildSettings, saveGuildSettings } from "./settings-store.js";
 
-const { DISCORD_TOKEN, DISBOARD_BOT_ID, DISCORD_DEBUG_LOGS, KEEP_ALIVE_PORT, PORT } = process.env;
+const {
+  DISCORD_TOKEN,
+  DISBOARD_BOT_ID,
+  DISCORD_DEBUG_LOGS,
+  KEEP_ALIVE_PORT,
+  PORT,
+  DISCORD_GUILD_ID,
+  PB_LOG_CHANNEL_ID,
+} = process.env;
 
 const DISBOARD_DEFAULT_BOT_ID = "302050872383242240";
 const BUMP_REMINDER_WAIT_MS = 2 * 60 * 60 * 1000;
@@ -136,6 +145,7 @@ const FEEDBACK_FORM_TYPES = {
 };
 
 let callWaitTimer = null;
+let shouldSendMongoSuccessLog = false;
 
 if (!DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is required.");
@@ -173,6 +183,19 @@ client.once(Events.ClientReady, (readyClient) => {
   void restoreOteboRecruitmentTimers().catch((error) => {
     console.error(error);
   });
+  if (shouldSendMongoSuccessLog) {
+    shouldSendMongoSuccessLog = false;
+    void (async () => {
+      const sent = await sendMongoStartupEmbed({ success: true });
+      if (!sent) {
+        console.warn(
+          "MongoDB connected successfully, but startup log channel could not be resolved or used.",
+        );
+      }
+    })().catch((error) => {
+      console.error("Failed to send MongoDB success log embed:", error);
+    });
+  }
   scheduleNextCallWaitTick();
 });
 
@@ -7484,22 +7507,208 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     });
   }
 
-  console.log(`Node.js runtime: ${process.version}`);
-  console.log(`discord.js version: ${discordJsVersion}`);
-  console.log("Attempting to login to Discord...");
+  async function resolveStartupLogChannelId() {
+    if (PB_LOG_CHANNEL_ID?.trim()) {
+      return PB_LOG_CHANNEL_ID.trim();
+    }
 
-  discordReadyWatchdog = setTimeout(() => {
+    if (DISCORD_GUILD_ID) {
+      const settings = await getGuildSettings(DISCORD_GUILD_ID);
+      if (settings?.logChannelId) {
+        return settings.logChannelId;
+      }
+    }
+
     if (!client.isReady()) {
-      console.error(
-        `Discord client did not become ready within 30 seconds. wsStatus=${client.ws.status}`,
-      );
+      return null;
     }
-  }, 30_000);
 
-  client.login(DISCORD_TOKEN).catch((error) => {
-    if (discordReadyWatchdog) {
-      clearTimeout(discordReadyWatchdog);
-      discordReadyWatchdog = null;
+    for (const guild of client.guilds.cache.values()) {
+      const settings = await getGuildSettings(guild.id);
+      if (settings?.logChannelId) {
+        return settings.logChannelId;
+      }
     }
-    console.error("Failed to login to Discord. Check DISCORD_TOKEN and bot application settings.", error);
-  });
+
+    return null;
+  }
+
+  async function resolveTextChannelById(channelId) {
+    if (!channelId) {
+      return null;
+    }
+
+    const textTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+
+    return channel &&
+      textTypes.includes(channel.type) &&
+      typeof channel.send === "function"
+      ? channel
+      : null;
+  }
+
+  function formatMongoError(error) {
+    if (error instanceof Error) {
+      return error.stack || `${error.name}: ${error.message}`;
+    }
+
+    return String(error);
+  }
+
+  function truncateForEmbed(text, maxLength = 1000) {
+    if (text.length <= maxLength) {
+      return text;
+    }
+
+    return `${text.slice(0, maxLength - 3)}...`;
+  }
+
+  function createMongoStartupEmbed({ success, error }) {
+    const embed = {
+      title: success ? "MongoDB接続成功" : "MongoDB接続失敗",
+      description: success
+        ? "MongoDB Atlasへの接続に成功しました。"
+        : "MongoDB Atlasへの接続に失敗しました。Botを終了します。",
+      color: success ? 0x57F287 : 0xED4245,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (error) {
+      const details = truncateForEmbed(formatMongoError(error));
+      embed.fields = [{ name: "エラー詳細", value: `\`\`\`\n${details}\n\`\`\`` }];
+    }
+
+    return embed;
+  }
+
+  async function sendMongoStartupEmbed({ success, error = null }) {
+    const logChannelId = await resolveStartupLogChannelId();
+    if (!logChannelId) {
+      return false;
+    }
+
+    const channel = await resolveTextChannelById(logChannelId);
+    if (!channel) {
+      return false;
+    }
+
+    await channel.send({
+      embeds: [createMongoStartupEmbed({ success, error })],
+      allowedMentions: { parse: [] },
+    });
+    return true;
+  }
+
+  async function waitForClientReady(timeoutMs = 30_000) {
+    if (client.isReady()) {
+      return;
+    }
+
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Discord client did not become ready in time."));
+      }, timeoutMs);
+
+      const handleReady = () => {
+        cleanup();
+        resolve();
+      };
+
+      const handleError = (error) => {
+        cleanup();
+        reject(error);
+      };
+
+      function cleanup() {
+        clearTimeout(timeout);
+        client.off(Events.ClientReady, handleReady);
+        client.off(Events.Error, handleError);
+      }
+
+      client.on(Events.ClientReady, handleReady);
+      client.on(Events.Error, handleError);
+    });
+  }
+
+  async function ensureDiscordReadyForStartupLog() {
+    if (client.isReady()) {
+      return true;
+    }
+
+    try {
+      await client.login(DISCORD_TOKEN);
+      await waitForClientReady();
+      return true;
+    } catch (error) {
+      console.error("Failed to login to Discord for MongoDB startup failure logging.", error);
+      return false;
+    }
+  }
+
+  async function loginDiscordClient() {
+    console.log("Attempting to login to Discord...");
+
+    discordReadyWatchdog = setTimeout(() => {
+      if (!client.isReady()) {
+        console.error(
+          `Discord client did not become ready within 30 seconds. wsStatus=${client.ws.status}`,
+        );
+      }
+    }, 30_000);
+
+    try {
+      await client.login(DISCORD_TOKEN);
+    } catch (error) {
+      if (discordReadyWatchdog) {
+        clearTimeout(discordReadyWatchdog);
+        discordReadyWatchdog = null;
+      }
+      console.error(
+        "Failed to login to Discord. Check DISCORD_TOKEN and bot application settings.",
+        error,
+      );
+      throw error;
+    }
+  }
+
+  async function startBot() {
+    console.log(`Node.js runtime: ${process.version}`);
+    console.log(`discord.js version: ${discordJsVersion}`);
+
+    try {
+      await connectToMongoDB();
+      shouldSendMongoSuccessLog = true;
+    } catch (error) {
+      console.error("Failed to connect to MongoDB Atlas.", error);
+
+      const readyForLog = await ensureDiscordReadyForStartupLog();
+
+      if (readyForLog) {
+        const sent = await sendMongoStartupEmbed({ success: false, error }).catch(
+          (sendError) => {
+            console.error("Failed to send MongoDB failure log embed.", sendError);
+            return false;
+          },
+        );
+
+        if (!sent) {
+          console.error(
+            "MongoDB connection failed, and startup log channel could not be resolved or used.",
+          );
+        }
+      } else {
+        console.error(
+          "MongoDB connection failed before Discord logging became available.",
+        );
+      }
+
+      process.exit(1);
+      return;
+    }
+
+    await loginDiscordClient();
+  }
+
+  await startBot();
