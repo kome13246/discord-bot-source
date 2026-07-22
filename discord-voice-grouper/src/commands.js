@@ -1,4 +1,8 @@
-import { ChannelType, SlashCommandBuilder } from "discord.js";
+import { ChannelType, PermissionFlagsBits, SlashCommandBuilder } from "discord.js";
+
+export const setupProfileCommand = new SlashCommandBuilder()
+  .setName("setup-profile").setDescription("プロフィール登録ボタンを設置します")
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
 export const splitVoiceCommand = new SlashCommandBuilder()
   .setName("splitvc")
@@ -405,6 +409,7 @@ export const setupFormsCommand = new SlashCommandBuilder()
   .setDescription("話題提供・提案要望・相談苦情フォームのボタンを設置します");
 
 export const commands = [
+  setupProfileCommand.toJSON(),
   splitVoiceCommand.toJSON(),
   settingCommand.toJSON(),
   bCommand.toJSON(),

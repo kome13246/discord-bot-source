@@ -26,6 +26,8 @@ import {
 } from "./bump-reminder-store.js";
 import { buildGroups, describeGroups, shuffle } from "./grouping.js";
 import { getGuildSettings, saveGuildSettings } from "./settings-store.js";
+import { UserProfile } from "./models/user-profile.js";
+import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
 
 const {
   DISCORD_TOKEN,
@@ -183,6 +185,9 @@ client.once(Events.ClientReady, (readyClient) => {
   void restoreOteboRecruitmentTimers().catch((error) => {
     console.error(error);
   });
+  void restoreProfiles(client, { sendOperationalLog, getGuildSettings }).catch((error) => {
+    console.error("Profile startup restore failed:", error);
+  });
   if (shouldSendMongoSuccessLog) {
     shouldSendMongoSuccessLog = false;
     void (async () => {
@@ -240,6 +245,7 @@ client.on(Events.MessageCreate, async (message) => {
 
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   try {
+    await handleProfileVoiceState(oldState, newState, { client, sendOperationalLog, getGuildSettings });
     await handleVoiceStateUpdate(oldState, newState);
   } catch (error) {
     console.error(error);
@@ -251,6 +257,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       if (interaction.customId === "bosyu_edit") {
         await handleBosyuButton(interaction);
+        return;
+      }
+
+      if (interaction.customId === "profile_open") {
+        await handleProfileOpen(interaction);
         return;
       }
 
@@ -307,6 +318,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isModalSubmit()) {
+      if (interaction.customId === "profile_modal") {
+        await handleProfileModal(interaction);
+        return;
+      }
       if (interaction.customId.startsWith("bosyu_edit_modal:")) {
         await handleBosyuEditModal(interaction);
         return;
@@ -331,6 +346,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === "splitvc") {
       await handleSplitVoice(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "setup-profile") {
+      await handleSetupProfile(interaction);
       return;
     }
 
@@ -382,6 +402,69 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await replySafely(interaction, "処理中にエラーが発生しました。Renderのログを確認してください。");
   }
 });
+
+async function handleSetupProfile(interaction) {
+  if (!interaction.inGuild() || !interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
+    await replyOrFollowUp(interaction, { content: "管理者のみ実行できます。", flags: MessageFlags.Ephemeral }); return;
+  }
+  const embed = { title: "プロフィール登録・編集", description: "下のボタンからプロフィールを登録・編集できます。", color: 0x5865f2 };
+  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("profile_open").setLabel("プロフィールを登録・編集").setStyle(ButtonStyle.Primary));
+  await interaction.reply({ embeds: [embed], components: [row] });
+}
+
+async function handleProfileOpen(interaction) {
+  if (!interaction.inGuild()) return interaction.reply({ content: "サーバー内で使用してください。", flags: MessageFlags.Ephemeral });
+  let profile;
+  try {
+    profile = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id });
+  } catch (error) {
+    await logProfileFailure(interaction, "profile modal fetch failed", error);
+    await interaction.reply({ content: "プロフィールの取得に失敗しました。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const input = (id, label, style, max, value, required) => new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setMaxLength(max).setRequired(required).setValue(value ?? ""));
+  const modal = new ModalBuilder().setCustomId("profile_modal").setTitle("プロフィール登録・編集").addComponents(
+    input("profile_nickname", "呼び名", TextInputStyle.Short, 20, profile?.nickname, true),
+    input("profile_status", "現状", TextInputStyle.Short, 30, profile?.status, false),
+    input("profile_hobby", "趣味", TextInputStyle.Paragraph, 80, profile?.hobby, false),
+    input("profile_comment", "ひとこと", TextInputStyle.Paragraph, 150, profile?.comment, false),
+  );
+  await interaction.showModal(modal);
+}
+
+async function handleProfileModal(interaction) {
+  const values = {
+    nickname: normalizeProfileValue(interaction.fields.getTextInputValue("profile_nickname"), 20),
+    status: normalizeProfileValue(interaction.fields.getTextInputValue("profile_status"), 30),
+    hobby: normalizeProfileValue(interaction.fields.getTextInputValue("profile_hobby"), 80),
+    comment: normalizeProfileValue(interaction.fields.getTextInputValue("profile_comment"), 150),
+  };
+  if (!values.nickname) return interaction.reply({ content: "呼び名は必須です。", flags: MessageFlags.Ephemeral });
+  let existing;
+  try {
+    existing = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id });
+  } catch (error) {
+    await logProfileFailure(interaction, "profile existing fetch failed", error);
+    await interaction.reply({ content: "プロフィールの取得に失敗しました。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  try {
+    await UserProfile.findOneAndUpdate({ guildId: interaction.guildId, userId: interaction.user.id }, values, { upsert: true, new: true, setDefaultsOnInsert: true });
+    await interaction.reply({ content: existing ? "プロフィールを更新しました。" : "プロフィールを登録しました。", flags: MessageFlags.Ephemeral });
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    if (member?.voice?.channel) await refreshProfileInVoice(member, { guild: interaction.guild, settings: await getGuildSettings(interaction.guildId), sendOperationalLog });
+  } catch (error) {
+    await interaction.reply({ content: "プロフィールの保存に失敗しました。", flags: MessageFlags.Ephemeral }).catch(() => {});
+    await logProfileFailure(interaction, "profile save failed", error);
+  }
+}
+
+async function logProfileFailure(interaction, processName, error) {
+  const settings = await getGuildSettings(interaction.guildId).catch(() => null);
+  const message = `[${processName}] guild=${interaction.guild?.name ?? "?"}(${interaction.guildId ?? "?"}) voice=? (?) user=${interaction.user.username}(${interaction.user.id}) error=${summarizeProfileError(error)} time=${new Date().toISOString()}`;
+  console.error(message);
+  await sendOperationalLog({ guild: interaction.guild, settings, fallbackChannel: interaction.channel, content: message });
+}
 
 async function handleSetting(interaction) {
   if (!interaction.inGuild()) {
@@ -1018,13 +1101,19 @@ async function sendOperationalLog({
       : null);
 
   if (!channel) {
+    if (settings?.logChannelId) {
+      console.error(`Operational log channel could not be resolved for guild ${guild?.id ?? "unknown"}.`);
+    }
     return null;
   }
 
   return channel.send({
     content,
     allowedMentions,
-  }).catch(() => null);
+  }).catch((error) => {
+    console.error(`Operational log send failed for guild ${guild?.id ?? "unknown"}: ${error?.name ?? "unknown error"}`);
+    return null;
+  });
 }
 
 async function handleKokuchi(interaction) {
