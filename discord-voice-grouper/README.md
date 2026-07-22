@@ -103,6 +103,7 @@ discord-voice-grouper/
    ├─ commands.js
    ├─ grouping.js
    ├─ settings-store.js
+   ├─ mongodb.js
    └─ register-commands.js
 ```
 
@@ -113,6 +114,7 @@ discord-voice-grouper/
 - `src/commands.js`: スラッシュコマンドの定義です。
 - `src/grouping.js`: 3人組・4人組に分ける計算ロジックです。
 - `src/settings-store.js`: `/setting` で保存したPB連携、募集、VCリマインダー、話題、ログ、フォーム設定を読み書きします。
+- `src/mongodb.js`: MongoDB Atlasへの接続・切断を管理します。
 - `src/register-commands.js`: Discordへスラッシュコマンドを登録します。
 - `data/settings.json`: `/setting` や話題コマンドで保存したサーバー別設定です。
 - `data/bump-reminders.json`: 予約中のDISBOARD bumpリマインドです。
@@ -220,6 +222,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | --- | --- | --- |
 | `DISCORD_TOKEN` | 必須 | Discord Developer Portalで取得したBot Tokenです。 |
 | `DISCORD_CLIENT_ID` | 必須 | アプリのClient IDです。 |
+| `MONGODB_URI` | 必須 | MongoDB Atlasの接続文字列です。 |
 | `DISBOARD_BOT_ID` | 任意 | DISBOARD BotのIDです。未設定時は公開DISBOARD Bot IDを使います。 |
 | `DISCORD_GUILD_ID` | 任意 | テスト用サーバーのIDです。指定すると、そのサーバーだけにコマンドを登録します。 |
 | `PB_PARTICIPANT_ROLE_ID` | 任意 | Renderなどで固定設定したい場合の参加者ロールIDです。 |
