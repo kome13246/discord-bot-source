@@ -7,6 +7,10 @@ const schema = new mongoose.Schema({
   status: { type: String, default: "" },
   hobby: { type: String, default: "" },
   comment: { type: String, default: "" },
+  publishedChannelId: { type: String, default: null },
+  publishedMessageId: { type: String, default: null },
+  publishedAt: { type: Date, default: null },
+  publishedUpdatedAt: { type: Date, default: null },
 }, { timestamps: true });
 
 schema.index({ guildId: 1, userId: 1 }, { unique: true });

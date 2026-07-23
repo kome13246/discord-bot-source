@@ -32,6 +32,13 @@ import { SplitProcessSession } from "./models/split-process-session.js";
 import mongoose from "mongoose";
 import { UserProfile } from "./models/user-profile.js";
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
+import {
+  canSendPublicProfile,
+  canPublishProfile,
+  profilePublishButton,
+  publishProfile,
+  refreshPublishedProfile,
+} from "./profile-publication-service.js";
 
 const {
   DISCORD_TOKEN,
@@ -112,6 +119,7 @@ const kokuchiPreNoticeTimers = new Map();
 const kokuchiGatheringReminderTimers = new Map();
 const oteboDrafts = new Map();
 const oteboRecruitmentTimers = new Map();
+const profilePublicationLocks = new Set();
 
 const VOICE_MONITOR_MIN_MEMBERS = 2;
 const AUTO_SPLIT_THRESHOLD = 6;
@@ -288,6 +296,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
+      if (interaction.customId.startsWith("profile_publish:")) {
+        await handleProfilePublishButton(interaction);
+        return;
+      }
+
       if (interaction.customId.startsWith("session_cancel:")) {
         await handleSessionButton(interaction);
         return;
@@ -456,37 +469,173 @@ async function handleProfileOpen(interaction) {
 }
 
 async function handleProfileModal(interaction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const values = {
     nickname: normalizeProfileValue(interaction.fields.getTextInputValue("profile_nickname"), 20),
     status: normalizeProfileValue(interaction.fields.getTextInputValue("profile_status"), 30),
     hobby: normalizeProfileValue(interaction.fields.getTextInputValue("profile_hobby"), 80),
     comment: normalizeProfileValue(interaction.fields.getTextInputValue("profile_comment"), 150),
   };
-  if (!values.nickname) return interaction.reply({ content: "呼び名は必須です。", flags: MessageFlags.Ephemeral });
+  if (!values.nickname) {
+    await interaction.editReply({ content: "呼び名は必須です。" });
+    return;
+  }
+
   let existing;
   try {
     existing = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id });
+    await UserProfile.findOneAndUpdate(
+      { guildId: interaction.guildId, userId: interaction.user.id },
+      values,
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
   } catch (error) {
-    await logProfileFailure(interaction, "profile existing fetch failed", error);
-    await interaction.reply({ content: "プロフィールの取得に失敗しました。", flags: MessageFlags.Ephemeral });
+    await interaction.editReply({ content: "プロフィールの保存に失敗しました。" }).catch(() => {});
+    await logProfileFailure(interaction, "profile save failed", error);
     return;
   }
+
+  const settings = await getGuildSettings(interaction.guildId).catch(async (error) => {
+    await logProfileFailure(interaction, "profile settings fetch failed", error, existing);
+    return null;
+  });
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (member?.voice?.channel && settings) {
+    await refreshProfileInVoice(member, { guild: interaction.guild, settings, sendOperationalLog }).catch((error) => {
+      void logProfileFailure(interaction, "profile VC refresh failed", error, existing);
+    });
+  }
+
+  const latestProfile = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id }).catch(async (error) => {
+    await logProfileFailure(interaction, "profile latest fetch failed", error, existing);
+    return null;
+  });
+  if (!latestProfile) {
+    await interaction.editReply({ content: "プロフィールの保存後確認に失敗しました。" });
+    return;
+  }
+  let publication = { status: "unpublished" };
+  if (latestProfile && settings) {
+    try {
+      publication = await refreshPublishedProfile({
+        guild: interaction.guild,
+        member: member ?? { displayName: interaction.user.username, user: interaction.user },
+        profile: latestProfile,
+        settings,
+      });
+    } catch (error) {
+      await logProfileFailure(interaction, "profile public update failed", error, latestProfile);
+      publication = { status: "update-failed" };
+    }
+  }
+
+  const baseMessage = existing ? "プロフィールを更新しました。" : "プロフィールを登録しました。";
+  if (publication.status === "updated") {
+    await interaction.editReply({ content: `${baseMessage}\n自己紹介チャンネルのメッセージも更新しました。` });
+    return;
+  }
+  if (publication.status === "update-failed") {
+    await interaction.editReply({ content: `${baseMessage}\nプロフィールは更新しましたが、自己紹介チャンネルのメッセージ更新に失敗しました。` });
+    return;
+  }
+
+  const availability = settings
+    ? await canPublishProfile({ guild: interaction.guild, settings }).catch(async (error) => {
+      await logProfileFailure(interaction, "profile public channel check failed", error, latestProfile);
+      return { ok: false, reason: "channel-unavailable" };
+    })
+    : { ok: false, reason: "channel-unavailable" };
+  const content = publication.status === "missing"
+    ? `${baseMessage}\n以前送信した自己紹介メッセージが見つかりませんでした。もう一度自己紹介チャンネルに送信しますか？`
+    : availability.ok
+      ? `${baseMessage}\n自己紹介チャンネルに送信しますか？`
+      : availability.reason === "not-configured"
+        ? `${baseMessage}\n自己紹介チャンネルが設定されていないため、現在は公開できません。管理者が /setting profile で設定してください。`
+        : `${baseMessage}\n自己紹介チャンネルを利用できないため、現在は公開できません。`;
+  const button = profilePublishButton(interaction.user.id);
+  const components = availability.ok
+    ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(button.customId).setLabel(button.label).setStyle(ButtonStyle.Primary))]
+    : [];
+  await interaction.editReply({ content, components });
+}
+
+async function logProfileFailure(interaction, processName, error, profile = null) {
+  const settings = await getGuildSettings(interaction.guildId).catch(() => null);
+  const message = `[${processName}] guild=${interaction.guild?.name ?? "?"}(${interaction.guildId ?? "?"}) user=${interaction.user.username}(${interaction.user.id}) publishedChannelId=${profile?.publishedChannelId ?? "?"} publishedMessageId=${profile?.publishedMessageId ?? "?"} error=${summarizeProfileError(error)} time=${new Date().toISOString()}`;
+  console.error(message);
+  await sendOperationalLog({ guild: interaction.guild, settings, fallbackChannel: interaction.channel, content: message });
+}
+
+async function handleProfilePublishButton(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({ content: "サーバー内で使用してください。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const [, targetUserId] = interaction.customId.split(":");
+  if (targetUserId !== interaction.user.id) {
+    await interaction.reply({ content: "このボタンはプロフィールを登録した本人だけが使用できます。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const lockKey = `${interaction.guildId}:${targetUserId}`;
+  if (profilePublicationLocks.has(lockKey)) {
+    await interaction.reply({ content: "自己紹介の送信処理を実行中です。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  profilePublicationLocks.add(lockKey);
+  let profile = null;
   try {
-    await UserProfile.findOneAndUpdate({ guildId: interaction.guildId, userId: interaction.user.id }, values, { upsert: true, new: true, setDefaultsOnInsert: true });
-    await interaction.reply({ content: existing ? "プロフィールを更新しました。" : "プロフィールを登録しました。", flags: MessageFlags.Ephemeral });
-    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-    if (member?.voice?.channel) await refreshProfileInVoice(member, { guild: interaction.guild, settings: await getGuildSettings(interaction.guildId), sendOperationalLog });
+    await interaction.update({ content: "自己紹介を送信しています…", components: [] });
+    profile = await UserProfile.findOne({ guildId: interaction.guildId, userId: targetUserId });
+    if (!profile) {
+      await interaction.editReply({ content: "プロフィールが見つかりません。先にプロフィールを保存してください。" });
+      return;
+    }
+    const member = await interaction.guild.members.fetch(targetUserId).catch(() => null);
+    if (interaction.user.bot || member?.user.bot) {
+      await interaction.editReply({ content: "Botのプロフィールは公開できません。" });
+      return;
+    }
+    const settings = await getGuildSettings(interaction.guildId);
+    const publicMember = member ?? { displayName: interaction.user.username, user: interaction.user };
+    const result = await publishProfile({ guild: interaction.guild, member: publicMember, profile, settings });
+    if (result.status === "published" || result.status === "updated") {
+      await interaction.editReply({ content: "自己紹介チャンネルにプロフィールを送信しました。" });
+      return;
+    }
+    if (result.status === "missing") {
+      const button = profilePublishButton(targetUserId);
+      await interaction.editReply({
+        content: "以前送信した自己紹介メッセージが見つかりませんでした。もう一度送信してください。",
+        components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(button.customId).setLabel(button.label).setStyle(ButtonStyle.Primary))],
+      });
+      return;
+    }
+    const reason = result.status === "not-configured"
+      ? "自己紹介チャンネルが設定されていません。管理者が /setting profile で設定してください。"
+      : result.status === "permission-denied"
+        ? "Botに自己紹介チャンネルの閲覧・送信・Embed権限がありません。"
+        : "自己紹介チャンネルを利用できません。設定とBotの権限を確認してください。";
+    await interaction.editReply({ content: reason });
   } catch (error) {
-    await interaction.reply({ content: "プロフィールの保存に失敗しました。", flags: MessageFlags.Ephemeral }).catch(() => {});
-    await logProfileFailure(interaction, "profile save failed", error);
+    await logProfileFailure(interaction, "profile publish failed", error, profile);
+    const content = error?.code === "PUBLIC_PROFILE_STATE_SAVE_FAILED"
+      ? "自己紹介の送信状態を保存できなかったため、投稿を取り消しました。時間をおいてもう一度お試しください。"
+      : "自己紹介の送信に失敗しました。時間をおいてもう一度お試しください。";
+    await interaction.editReply({ content }).catch(() => {});
+  } finally {
+    profilePublicationLocks.delete(lockKey);
   }
 }
 
-async function logProfileFailure(interaction, processName, error) {
-  const settings = await getGuildSettings(interaction.guildId).catch(() => null);
-  const message = `[${processName}] guild=${interaction.guild?.name ?? "?"}(${interaction.guildId ?? "?"}) voice=? (?) user=${interaction.user.username}(${interaction.user.id}) error=${summarizeProfileError(error)} time=${new Date().toISOString()}`;
-  console.error(message);
-  await sendOperationalLog({ guild: interaction.guild, settings, fallbackChannel: interaction.channel, content: message });
+async function handleProfileIntroductionSetting(interaction) {
+  const channel = interaction.options.getChannel("introduction_channel", true);
+  if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type) || !canSendPublicProfile(channel, interaction.guild)) {
+    await replyOrFollowUp(interaction, { content: "Botが閲覧・メッセージ送信・Embed送信できるテキストチャンネルを指定してください。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const settings = await saveGuildSettingsWithCurrent(interaction.guildId, await getGuildSettings(interaction.guildId), { profileIntroductionChannelId: channel.id });
+  await replyOrFollowUp(interaction, { content: `自己紹介チャンネルを <#${channel.id}> に設定しました。\n\n${formatSettings(settings)}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
 
 async function handleSetting(interaction) {
@@ -515,6 +664,11 @@ async function handleSetting(interaction) {
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
+    return;
+  }
+
+  if (subcommand === "profile") {
+    await handleProfileIntroductionSetting(interaction);
     return;
   }
 
@@ -2095,6 +2249,7 @@ async function handleOteboJoinButton(interaction, recruitmentId) {
     await interaction.reply({ content: "この募集はすでに更新されています。", flags: MessageFlags.Ephemeral });
     return;
   }
+
   const nextSettings = await getGuildSettings(interaction.guildId);
   const nextRecruitment = getOteboRecruitment(nextSettings, recruitmentId) ?? { ...recruitment, memberIds };
 
@@ -7794,7 +7949,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     );
   }
 
-  function formatSettings(settings) {
+  function formatLegacySettings(settings) {
     if (!settings) {
       return "PB連携設定はまだ保存されていません。";
     }
@@ -7849,6 +8004,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `募集ロール途中参加案内: ${settings.callWaitBosyuNoticeEnabled === true ? "有効" : "無効"}`,
       `お手軽募集の即時募集キャンセル猶予: ${getOteboQuickConfirmSeconds(settings)}秒`,
     ].join("\n");
+  }
+
+  function formatSettings(settings) {
+    const text = formatLegacySettings(settings);
+    if (!settings) return text;
+    return `${text}\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}`;
   }
 
   function formatResult(channel, total, groups) {
