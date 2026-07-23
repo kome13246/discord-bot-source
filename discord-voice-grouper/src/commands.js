@@ -300,6 +300,18 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand.setName("show").setDescription("現在のBot設定を表示します"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("profile")
+      .setDescription("自己紹介チャンネルを設定します")
+      .addChannelOption((option) =>
+        option
+          .setName("introduction_channel")
+          .setDescription("自己紹介を公開するテキストチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(true),
+      ),
   );
 
 export const bCommand = new SlashCommandBuilder()
