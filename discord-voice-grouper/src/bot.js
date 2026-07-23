@@ -7755,7 +7755,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         (member) => !member.user.bot,
       ).length;
 
-      if (memberCount <= 3) {
+      if (memberCount <= 2) {
         candidates.push({
           channel,
           memberIds: currentGroupMembers?.get(channel.id)
@@ -7943,8 +7943,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       const cleanupMemberIds = await collectRoleCleanupMemberIds(
         options.guild,
         options.roleId,
-        options.memberIds,
-        options.childChannelIds,
       );
       const cleanupResult = await removeRoleFromMembers(
         options.guild,
@@ -7992,8 +7990,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     const cleanupMemberIds = await collectRoleCleanupMemberIds(
       options.guild,
       options.roleId,
-      options.memberIds,
-      options.childChannelIds,
     );
     const cleanupResult = await removeRoleFromMembers(
       options.guild,
@@ -8065,28 +8061,15 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     return { removed, failed };
   }
 
-  async function collectRoleCleanupMemberIds(
-    guild,
-    roleId,
-    trackedMemberIds,
-    childChannelIds,
-  ) {
-    const memberIds = new Set(trackedMemberIds);
+  async function collectRoleCleanupMemberIds(guild, roleId) {
+    const memberIds = new Set();
+    await guild.members.fetch().catch(() => null);
+    const role =
+      guild.roles.cache.get(roleId) ??
+      (await guild.roles.fetch(roleId).catch(() => null));
 
-    for (const channelId of childChannelIds) {
-      const channel =
-        guild.channels.cache.get(channelId) ??
-        (await guild.channels.fetch(channelId).catch(() => null));
-
-      if (!channel?.isVoiceBased()) {
-        continue;
-      }
-
-      for (const member of channel.members.values()) {
-        if (!member.user.bot && member.roles.cache.has(roleId)) {
-          memberIds.add(member.id);
-        }
-      }
+    for (const member of role?.members.values() ?? []) {
+      memberIds.add(member.id);
     }
 
     return memberIds;
