@@ -52,8 +52,13 @@ export async function updateCallWaitPromptMember({ guildId, messageId, userId, o
   const update = operation === "add"
     ? { $addToSet: { "callWaitPrompt.memberIds": userId } }
     : { $pull: { "callWaitPrompt.memberIds": userId } };
+  const now = new Date();
   return GuildSettings.findOneAndUpdate(
-    { guildId, "callWaitPrompt.messageId": messageId, "callWaitPrompt.targetAt": { $gt: new Date() } },
+    {
+      guildId,
+      "callWaitPrompt.messageId": messageId,
+      ...createFutureTargetAtFilter("callWaitPrompt.targetAt", now),
+    },
     update,
     { new: true, lean: true },
   );
@@ -74,7 +79,7 @@ export async function updateOteboRecruitmentParticipant({ guildId, recruitmentId
     guildId,
     [`${basePath}.messageId`]: messageId,
     [`${basePath}.status`]: "active",
-    [`${basePath}.targetAt`]: { $gt: new Date() },
+    ...createFutureTargetAtFilter(`${basePath}.targetAt`),
   };
   const update = operation === "add"
     ? { $addToSet: { [memberPath]: userId }, ...(pendingConfirmation ? { $set: { [pendingPath]: pendingConfirmation } } : {}) }
@@ -108,12 +113,24 @@ export async function deleteOteboRecruitmentIfOnlyMember({ guildId, recruitmentI
       guildId,
       [`${basePath}.messageId`]: messageId,
       [`${basePath}.status`]: "active",
-      [`${basePath}.targetAt`]: { $gt: new Date() },
+      ...createFutureTargetAtFilter(`${basePath}.targetAt`),
       [`${basePath}.memberIds`]: [userId],
     },
     { $unset: { [basePath]: 1 } },
     { new: true, lean: true },
   );
+}
+
+// Existing settings contain ISO strings, while older deployments may have
+// stored BSON Date values. MongoDB range comparisons are type-sensitive, so
+// accept either representation until all stored settings are normalized.
+function createFutureTargetAtFilter(path, now = new Date()) {
+  return {
+    $or: [
+      { [path]: { $gt: now } },
+      { [path]: { $gt: now.toISOString() } },
+    ],
+  };
 }
 
 function removeUndefined(value) {
