@@ -323,6 +323,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (
         interaction.customId === CALL_WAIT_JOIN_CUSTOM_ID ||
+        interaction.customId === CALL_WAIT_CANCEL_CUSTOM_ID ||
         interaction.customId.startsWith(`${CALL_WAIT_CANCEL_CUSTOM_ID}:`)
       ) {
         await handleCallWaitButton(interaction);
@@ -2852,7 +2853,7 @@ async function handleCallWaitButton(interaction) {
   const settings = await getGuildSettings(interaction.guildId);
   const prompt = settings?.callWaitPrompt;
   const isJoin = interaction.customId === CALL_WAIT_JOIN_CUSTOM_ID;
-  const promptMessageId = isJoin
+  const promptMessageId = isJoin || interaction.customId === CALL_WAIT_CANCEL_CUSTOM_ID
     ? interaction.message?.id
     : interaction.customId.slice(`${CALL_WAIT_CANCEL_CUSTOM_ID}:`.length);
 
@@ -2879,9 +2880,22 @@ async function handleCallWaitButton(interaction) {
 
   const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
   const userId = interaction.user.id;
-  const requestedMemberIds = isJoin
-    ? [...new Set([...memberIds, userId])]
-    : memberIds.filter((memberId) => memberId !== userId);
+
+  if (isJoin && memberIds.includes(userId)) {
+    await interaction.reply({
+      content: "すでに参加予定になっています。キャンセルする場合は、下のキャンセルボタンを押してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!isJoin && !memberIds.includes(userId)) {
+    await interaction.reply({
+      content: "この募集への参加の予定はありません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
   const updatedPrompt = await updateCallWaitPromptMember({
     guildId: interaction.guildId,
@@ -2896,28 +2910,53 @@ async function handleCallWaitButton(interaction) {
     });
     return;
   }
-  const nextMemberIds = updatedPrompt.callWaitPrompt?.memberIds ?? requestedMemberIds;
+  const nextMemberIds = normalizeCallWaitMemberIds(updatedPrompt.callWaitPrompt?.memberIds);
+  const nextTargetAt = new Date(updatedPrompt.callWaitPrompt?.targetAt ?? prompt.targetAt);
+
+  // Keep the public募集 message and its count in sync with the atomically
+  // updated participant list. Fetch settings again so a concurrent click is
+  // reflected whenever possible.
+  const latestSettings = await getGuildSettings(interaction.guildId);
+  const latestPrompt = latestSettings?.callWaitPrompt;
+  const promptForDisplay = latestPrompt?.messageId === prompt.messageId
+    ? latestPrompt
+    : latestPrompt
+      ? null
+      : updatedPrompt.callWaitPrompt;
+  const displayedMemberIds = normalizeCallWaitMemberIds(promptForDisplay?.memberIds ?? nextMemberIds);
+  const displayedTargetAt = new Date(promptForDisplay?.targetAt ?? nextTargetAt);
+  if (
+    promptForDisplay?.messageId === prompt.messageId &&
+    interaction.message &&
+    typeof interaction.message.edit === "function"
+  ) {
+    await interaction.message.edit({
+      content: formatCallWaitPrompt(displayedTargetAt, CALL_WAIT_MODE_BUTTON, displayedMemberIds),
+      components: [createCallWaitJoinRow(displayedTargetAt)],
+    }).catch((error) => {
+      console.error(`Failed to update call wait prompt message: ${error.message}`);
+    });
+  }
 
   await sendCallWaitApplicantLog({
     guild: interaction.guild,
-    settings,
+    settings: latestSettings ?? settings,
     action: isJoin ? "join" : "cancel",
     userId,
-    memberIds: nextMemberIds,
+    memberIds: displayedMemberIds,
   });
 
   if (isJoin) {
     await interaction.reply({
       content: "通話参加希望を受け付けました。取り消す場合は下のボタンを押してください。",
-      components: [createCallWaitCancelRow(prompt.messageId)],
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  await interaction.update({
+  await interaction.reply({
     content: "通話参加希望をキャンセルしました。",
-    components: [],
+    flags: MessageFlags.Ephemeral,
   });
 }
 
@@ -3133,15 +3172,10 @@ function createCallWaitJoinRow(targetAt) {
       .setCustomId(CALL_WAIT_JOIN_CUSTOM_ID)
       .setLabel(`${formatJstHourNumber(targetAt)}時から雑談希望`)
       .setStyle(ButtonStyle.Primary),
-  );
-}
-
-function createCallWaitCancelRow(promptMessageId) {
-  return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`${CALL_WAIT_CANCEL_CUSTOM_ID}:${promptMessageId}`)
-      .setLabel("希望をキャンセル")
-      .setStyle(ButtonStyle.Danger),
+      .setCustomId(CALL_WAIT_CANCEL_CUSTOM_ID)
+      .setLabel("参加をキャンセル")
+      .setStyle(ButtonStyle.Secondary),
   );
 }
 
@@ -3562,15 +3596,16 @@ function getCallWaitActiveVoiceMemberIds(guild, categoryId) {
   return [...memberIds];
 }
 
-function formatCallWaitPrompt(targetAt, mode = CALL_WAIT_MODE_BUTTON) {
+function formatCallWaitPrompt(targetAt, mode = CALL_WAIT_MODE_BUTTON, memberIds = []) {
   const targetHour = formatJstHour(targetAt);
 
   if (mode === CALL_WAIT_MODE_BUTTON) {
     return [
-      "【お手軽募集ボタン】",
-      `${formatJstHourNumber(targetAt)}時から雑談してみたい方は、下のボタンを押してください。`,
-      `${targetHour}時点で複数人が集まっていたら、参加希望者ロールを付与します。`,
-      "VCに2人以上集まったら、メンションでお知らせします！",
+      "【定時募集】",
+      `${formatJstHourNumber(targetAt)}時から雑談したい方は、下のボタンを押してください。`,
+      `${targetHour}時点で複数人が集まっていたらメンションでお知らせします！`,
+      "",
+      `現在の参加予定者数：${normalizeCallWaitMemberIds(memberIds).length}人`,
     ].join("\n");
   }
 
