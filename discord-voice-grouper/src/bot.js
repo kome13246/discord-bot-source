@@ -7755,7 +7755,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         (member) => !member.user.bot,
       ).length;
 
-      if (memberCount <= 2) {
+      if (memberCount <= 3) {
         candidates.push({
           channel,
           memberIds: currentGroupMembers?.get(channel.id)
