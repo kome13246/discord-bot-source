@@ -24,11 +24,26 @@ import {
   getBumpReminders,
   saveBumpReminder,
 } from "./bump-reminder-store.js";
-import { buildGroups, describeGroups, shuffle } from "./grouping.js";
+import {
+  buildGroups,
+  chooseBestGroupForMember,
+  chooseBestMemberSubset,
+  chooseGroupsWithHistory,
+  countRepeatedPairs,
+  createPairKey,
+  describeGroups,
+  getPairKeysFromGroups,
+  shuffle,
+} from "./grouping.js";
 import { deleteOteboRecruitmentIfOnlyMember, getGuildSettings, replaceNestedObject, saveGuildSettings, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
 import { claimAction, failAction, finishAction, getPendingActions, recoverInterruptedActions, scheduleAction } from "./scheduled-action-store.js";
 import { consumeBosyuCooldown, deleteBosyuEditSession, getActiveBosyuEditSessions, getBosyuEditSession, getExpiredBosyuEditSessions, saveBosyuEditSession } from "./bosyu-state-store.js";
 import { SplitProcessSession } from "./models/split-process-session.js";
+import {
+  addMembersToCurrentGroup,
+  getSplitGroupingState,
+  startSplitGrouping,
+} from "./split-grouping-state-store.js";
 import mongoose from "mongoose";
 import { UserProfile } from "./models/user-profile.js";
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
@@ -120,6 +135,7 @@ const kokuchiGatheringReminderTimers = new Map();
 const oteboDrafts = new Map();
 const oteboRecruitmentTimers = new Map();
 const profilePublicationLocks = new Set();
+const splitVoiceGuildLocks = new Set();
 
 const VOICE_MONITOR_MIN_MEMBERS = 2;
 const AUTO_SPLIT_THRESHOLD = 6;
@@ -435,6 +451,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await handleSetting(interaction);
     }
   } catch (error) {
+    if (interaction.commandName === "splitvc") {
+      splitVoiceGuildLocks.delete(interaction.guildId);
+    }
     console.error(error);
     await replySafely(interaction, "処理中にエラーが発生しました。Renderのログを確認してください。");
   }
@@ -1292,6 +1311,15 @@ async function sendOperationalLog({
   }).catch((error) => {
     console.error(`Operational log send failed for guild ${guild?.id ?? "unknown"}: ${error?.name ?? "unknown error"}`);
     return null;
+  });
+}
+
+async function sendSplitGroupingLog({ guild, settings, content }) {
+  return sendOperationalLog({
+    guild,
+    settings,
+    fallbackChannel: null,
+    content,
   });
 }
 
@@ -6494,17 +6522,60 @@ async function handleSplitVoice(interaction) {
     return;
   }
 
+  if (splitVoiceGuildLocks.has(interaction.guildId)) {
+    await interaction.reply({
+      content: "このサーバーでは、すでに /splitvc を処理中です。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  splitVoiceGuildLocks.add(interaction.guildId);
+  const releaseSplitVoiceLock = () => splitVoiceGuildLocks.delete(interaction.guildId);
+
+  const activeSplitSession = await SplitProcessSession.exists({
+    guildId: interaction.guildId,
+    status: "active",
+  });
+  if (activeSplitSession) {
+    releaseSplitVoiceLock();
+    await interaction.reply({
+      content: "このサーバーでは、進行中の /splitvc セッションがあります。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   const includeBots = interaction.options.getBoolean("include_bots") ?? false;
+  const splitSessionId = createSessionId();
   const members = [...sourceChannel.members.values()]
     .filter((member) => includeBots || !member.user.bot)
     .sort((left, right) =>
       left.displayName.localeCompare(right.displayName, "ja"),
     );
 
-  const targetMembers = shuffle(members);
-  const groups = buildGroups(targetMembers);
+  let groupingState = null;
+  let groupingHistoryError = null;
+  try {
+    groupingState = await getSplitGroupingState(interaction.guildId);
+  } catch (error) {
+    groupingHistoryError = error;
+  }
+
+  const previousGroups = groupingState?.current?.groups ?? groupingState?.previous?.groups ?? [];
+  const targetMembers = members;
+  const groupingSelection = groupingHistoryError
+    ? {
+        groups: buildGroups(shuffle(targetMembers)),
+        score: null,
+        candidateCount: 1,
+        evaluatedCandidateCount: 1,
+      }
+    : chooseGroupsWithHistory(targetMembers, previousGroups);
+  const groups = groupingSelection.groups;
 
   if (targetMembers.length === 0) {
+    releaseSplitVoiceLock();
     await interaction.reply({
       content: `${sourceChannel} に対象メンバーがいません。`,
       flags: MessageFlags.Ephemeral,
@@ -6536,6 +6607,7 @@ async function handleSplitVoice(interaction) {
   );
 
   if (config.errors.length > 0) {
+    releaseSplitVoiceLock();
     await interaction.followUp({
       content: `PB連携プロセスは実行できません。\n${config.errors.map((error) => `- ${error}`).join("\n")}`,
       flags: MessageFlags.Ephemeral,
@@ -6546,6 +6618,7 @@ async function handleSplitVoice(interaction) {
   const operationChannel = getSendableChannel(interaction);
 
   if (!operationChannel) {
+    releaseSplitVoiceLock();
     await interaction.followUp({
       content: "結果や待機メッセージを送信できるテキストチャンネルが見つかりません。",
       flags: MessageFlags.Ephemeral,
@@ -6559,6 +6632,23 @@ async function handleSplitVoice(interaction) {
     fallbackChannel: operationChannel,
     content: `${config.tempRole} は、各メンバーをVCへ転送したタイミングで付与します。`,
     allowedMentions: { roles: [] },
+  });
+
+  const previousPairCount = getPairKeysFromGroups(previousGroups).size;
+  await sendSplitGroupingLog({
+    guild: interaction.guild,
+    settings,
+    content: [
+      `[splitvc-history] guild=${interaction.guildId} session=${splitSessionId}`,
+      `source=${groupingState?.current ? "current" : groupingState?.previous ? "previous" : "none"}`,
+      `previousPairCount=${previousPairCount}`,
+      `candidateCount=${groupingSelection.candidateCount}`,
+      `evaluatedCandidateCount=${groupingSelection.evaluatedCandidateCount}`,
+      `selectedRepeatedPairCount=${groupingSelection.score ?? "fallback"}`,
+      groupingHistoryError
+        ? `historyError=${groupingHistoryError.name ?? "Error"}: ${groupingHistoryError.message ?? groupingHistoryError}`
+        : "historyError=none",
+    ].join("\n"),
   });
 
   const transferCanceled = await runCountdown({
@@ -6575,7 +6665,6 @@ async function handleSplitVoice(interaction) {
   const childChannelIds = new Set();
   const participantMemberIds = new Set();
   const processState = { ended: false };
-  const splitSessionId = createSessionId();
   let temporaryWaitingVc = null;
   let temporaryWaitingVcDeleteTimer = null;
   let splitStartMessage = null;
@@ -6600,6 +6689,7 @@ async function handleSplitVoice(interaction) {
       phase: "canceled",
       completedAt: new Date(),
     });
+    releaseSplitVoiceLock();
     await operationChannel.send("転送をキャンセルしました。");
   } else {
     const transferResult = await transferGroups(groups, {
@@ -6610,6 +6700,30 @@ async function handleSplitVoice(interaction) {
     });
     addMany(childChannelIds, transferResult.childChannelIds);
     addMany(participantMemberIds, transferResult.participantMemberIds);
+
+    if (transferResult.groupSummaries.length > 0) {
+      try {
+        await startSplitGrouping({
+          guildId: interaction.guildId,
+          sessionId: splitSessionId,
+          groups: transferResult.groupSummaries.map((summary) => ({
+            channelId: summary.channelId,
+            memberIds: summary.memberIds,
+          })),
+        });
+        await sendSplitGroupingLog({
+          guild: interaction.guild,
+          settings,
+          content: `[splitvc-history] current saved guild=${interaction.guildId} session=${splitSessionId} groups=${transferResult.groupSummaries.length} successfulMembers=${transferResult.groupSummaries.reduce((total, summary) => total + summary.memberIds.length, 0)}`,
+        });
+      } catch (error) {
+        await sendSplitGroupingLog({
+          guild: interaction.guild,
+          settings,
+          content: `[splitvc-history] current save failed guild=${interaction.guildId} session=${splitSessionId} process=initial-transfer error=${error.name ?? "Error"}: ${error.message ?? error}`,
+        });
+      }
+    }
     try {
       const finishNoticeAt = new Date(Date.now() + noticeWaitMs);
       const roleRemoveAt = new Date(finishNoticeAt.getTime() + roleRemoveWaitMs);
@@ -6647,6 +6761,7 @@ async function handleSplitVoice(interaction) {
       }
       throw error;
     }
+    releaseSplitVoiceLock();
 
     await sendOperationalLog({
       guild: interaction.guild,
@@ -6791,6 +6906,11 @@ async function handleSplitVoice(interaction) {
         participantMemberIds,
         state: processState,
         settings,
+        previousPairKeys: getPairKeysFromGroups(previousGroups),
+        groupingSessionId: splitSessionId,
+        currentGroupMembers: new Map(
+          transferResult.groupSummaries.map((summary) => [summary.channelId, new Set(summary.memberIds)]),
+        ),
       }).catch((error) => {
         console.error(error);
       });
@@ -7364,15 +7484,9 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         }
 
         childChannelIds.add(childChannel.id);
-        groupSummaries.push({
-          groupNumber,
-          channelId: childChannel.id,
-          channelName: childChannel.name,
-          memberNames: shuffle(group).map((member) => member.displayName),
-        });
-
         let movedCount = 1;
         const failed = [];
+        const movedMemberIds = [seedMember.id];
 
         for (const member of group.slice(1)) {
           if (!member.voice?.channelId) {
@@ -7396,10 +7510,19 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
             }
 
             movedCount += 1;
+            movedMemberIds.push(member.id);
           } catch {
             failed.push(member.displayName);
           }
         }
+
+        groupSummaries.push({
+          groupNumber,
+          channelId: childChannel.id,
+          channelName: childChannel.name,
+          memberNames: shuffle(group).map((member) => member.displayName),
+          memberIds: movedMemberIds,
+        });
 
         const failedText =
           failed.length > 0 ? ` 転送失敗: ${failed.join("、")}` : "";
@@ -7510,16 +7633,44 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     const underfilledChildChannel = await findUnderfilledChildChannel(
       options.guild,
       options.childChannelIds,
+      waitingMembers[0].id,
+      options.previousPairKeys,
+      options.currentGroupMembers,
     );
 
     if (underfilledChildChannel) {
       const member = waitingMembers[0];
-      const roleFailure = await moveMemberToChildChannel(
-        member,
-        underfilledChildChannel,
-        options.participantRole,
-        options.participantMemberIds,
+      const currentMembers = options.currentGroupMembers.get(underfilledChildChannel.id) ??
+        [...underfilledChildChannel.members.values()]
+          .filter((voiceMember) => !voiceMember.user.bot)
+          .map((voiceMember) => voiceMember.id);
+      const repeatedPairCount = currentMembers.reduce(
+        (count, currentMemberId) =>
+          count + (options.previousPairKeys.has(createPairKey(member.id, currentMemberId)) ? 1 : 0),
+        0,
       );
+      await sendSplitGroupingLog({
+        guild: options.guild,
+        settings: options.settings,
+        content: `[splitvc-history] waiting placement guild=${options.guild.id} session=${options.groupingSessionId} user=${member.id} channel=${underfilledChildChannel.id} process=existing-group repeatedPairCount=${repeatedPairCount} memberCount=${currentMembers.length}`,
+      });
+      let roleFailure = null;
+      try {
+        roleFailure = await moveMemberToChildChannel(
+          member,
+          underfilledChildChannel,
+          options.participantRole,
+          options.participantMemberIds,
+        );
+        await persistWaitingGroupMembers(options, underfilledChildChannel.id, [member.id], "existing-group");
+      } catch (error) {
+        await sendSplitGroupingLog({
+          guild: options.guild,
+          settings: options.settings,
+          content: `[splitvc-history] waiting transfer failed guild=${options.guild.id} session=${options.groupingSessionId} user=${member.id} channel=${underfilledChildChannel.id} process=existing-group error=${error.name ?? "Error"}: ${error.message ?? error}`,
+        });
+        return;
+      }
       const roleFailureText = roleFailure
         ? ` 参加者ロール付与失敗: ${roleFailure}`
         : "";
@@ -7534,7 +7685,17 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     }
 
     if (waitingMembers.length >= 3) {
-      const result = await transferWaitingGroupToNewChild(waitingMembers.slice(0, 3), {
+      const newGroupMembers = chooseBestMemberSubset(
+        waitingMembers,
+        3,
+        options.previousPairKeys,
+      );
+      await sendSplitGroupingLog({
+        guild: options.guild,
+        settings: options.settings,
+        content: `[splitvc-history] waiting placement guild=${options.guild.id} session=${options.groupingSessionId} users=${newGroupMembers.map((member) => member.id).join(",")} process=new-group repeatedPairCount=${countRepeatedPairs([newGroupMembers], options.previousPairKeys)} candidateCount=100`,
+      });
+      const result = await transferWaitingGroupToNewChild(newGroupMembers, {
         parentChannel: options.parentChannel,
         participantRole: options.participantRole,
         sourceChannelId: options.waitingChannel.id,
@@ -7544,6 +7705,13 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
       if (result.childChannelId) {
         options.childChannelIds.add(result.childChannelId);
+        options.currentGroupMembers.set(result.childChannelId, new Set(result.movedMemberIds));
+        await persistWaitingGroupMembers(
+          options,
+          result.childChannelId,
+          result.movedMemberIds,
+          "new-group",
+        );
       }
 
       await sendOperationalLog({
@@ -7563,9 +7731,16 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       );
   }
 
-  async function findUnderfilledChildChannel(guild, childChannelIds) {
+  async function findUnderfilledChildChannel(
+    guild,
+    childChannelIds,
+    memberId = null,
+    previousPairKeys = new Set(),
+    currentGroupMembers = null,
+  ) {
     let bestChannel = null;
     let bestCount = Infinity;
+    const candidates = [];
 
     for (const channelId of childChannelIds) {
       const channel =
@@ -7580,13 +7755,28 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         (member) => !member.user.bot,
       ).length;
 
-      if (memberCount <= 3 && memberCount < bestCount) {
-        bestChannel = channel;
-        bestCount = memberCount;
+      if (memberCount <= 3) {
+        candidates.push({
+          channel,
+          memberIds: currentGroupMembers?.get(channel.id)
+            ? [...currentGroupMembers.get(channel.id)]
+            : [...channel.members.values()]
+                .filter((member) => !member.user.bot)
+                .map((member) => member.id),
+        });
+        if (memberCount < bestCount) {
+          bestChannel = channel;
+          bestCount = memberCount;
+        }
       }
     }
 
-    return bestChannel;
+    if (!memberId || candidates.length === 0) {
+      return bestChannel;
+    }
+
+    const selected = chooseBestGroupForMember(memberId, candidates, previousPairKeys);
+    return selected ? selected.channel : bestChannel;
   }
 
   async function shouldKeepWaitingRoomAlive(options) {
@@ -7638,6 +7828,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       }
 
       let movedCount = 1;
+      const movedMemberIds = [seedMember.id];
       const failed = [];
 
       for (const member of members.slice(1)) {
@@ -7657,6 +7848,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           }
 
           movedCount += 1;
+          movedMemberIds.push(member.id);
         } catch {
           failed.push(member.displayName);
         }
@@ -7674,6 +7866,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
       return {
         childChannelId: childChannel.id,
+        movedMemberIds,
         lines,
       };
     } catch (error) {
@@ -7827,6 +8020,29 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       phase: "completed",
       completedAt: new Date(),
     });
+  }
+
+  async function persistWaitingGroupMembers(options, channelId, memberIds, processName) {
+    const groupMembers = options.currentGroupMembers.get(channelId) ?? new Set();
+    for (const memberId of memberIds) {
+      groupMembers.add(memberId);
+    }
+    options.currentGroupMembers.set(channelId, groupMembers);
+
+    try {
+      await addMembersToCurrentGroup({
+        guildId: options.guild.id,
+        sessionId: options.groupingSessionId,
+        channelId,
+        memberIds,
+      });
+    } catch (error) {
+      await sendSplitGroupingLog({
+        guild: options.guild,
+        settings: options.settings,
+        content: `[splitvc-history] current update failed guild=${options.guild.id} session=${options.groupingSessionId} users=${memberIds.join(",")} channel=${channelId} process=${processName} error=${error.name ?? "Error"}: ${error.message ?? error}`,
+      });
+    }
   }
 
   async function removeRoleFromMembers(guild, roleId, memberIds) {

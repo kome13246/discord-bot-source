@@ -19,6 +19,148 @@ export function getGroupSizes(total) {
   );
 }
 
+export const GROUPING_CANDIDATE_COUNT = 500;
+
+export function createPairKey(userId1, userId2) {
+  return [String(userId1), String(userId2)].sort().join(":");
+}
+
+export function getPairKeysFromGroups(groups = []) {
+  const pairKeys = new Set();
+
+  for (const group of groups) {
+    const sourceMembers = Array.isArray(group) ? group : group?.memberIds ?? [];
+    const memberIds = [...new Set(
+      sourceMembers
+        .map((member) => typeof member === "string" ? member : member?.id)
+        .filter(Boolean)
+        .map(String),
+    )];
+
+    for (let left = 0; left < memberIds.length; left += 1) {
+      for (let right = left + 1; right < memberIds.length; right += 1) {
+        pairKeys.add(createPairKey(memberIds[left], memberIds[right]));
+      }
+    }
+  }
+
+  return pairKeys;
+}
+
+export function countRepeatedPairs(groups, previousPairKeys) {
+  const previous = previousPairKeys instanceof Set
+    ? previousPairKeys
+    : new Set(previousPairKeys ?? []);
+  let repeatedPairCount = 0;
+
+  for (const pairKey of getPairKeysFromGroups(groups)) {
+    if (previous.has(pairKey)) {
+      repeatedPairCount += 1;
+    }
+  }
+
+  return repeatedPairCount;
+}
+
+export function chooseGroupsWithHistory(
+  members,
+  previousGroups = [],
+  { candidateCount = GROUPING_CANDIDATE_COUNT } = {},
+) {
+  const previousPairKeys = getPairKeysFromGroups(previousGroups);
+
+  if (members.length === 0) {
+    return { groups: [], score: 0, candidateCount: 0, evaluatedCandidateCount: 0 };
+  }
+
+  const evaluated = new Map();
+  const attempts = Math.max(1, Number.isInteger(candidateCount) ? candidateCount : GROUPING_CANDIDATE_COUNT);
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const candidate = buildGroups(shuffle(members));
+    const key = candidate
+      .map((group) => group.map((member) => member.id).sort().join(","))
+      .sort()
+      .join("|");
+
+    if (!evaluated.has(key)) {
+      evaluated.set(key, {
+        groups: candidate,
+        score: countRepeatedPairs(candidate, previousPairKeys),
+      });
+    }
+  }
+
+  const candidates = [...evaluated.values()];
+  const bestScore = Math.min(...candidates.map((candidate) => candidate.score));
+  const bestCandidates = candidates.filter((candidate) => candidate.score === bestScore);
+  const selected = bestCandidates[Math.floor(Math.random() * bestCandidates.length)];
+
+  return {
+    groups: selected.groups,
+    score: selected.score,
+    candidateCount: attempts,
+    evaluatedCandidateCount: candidates.length,
+  };
+}
+
+export function chooseBestGroupForMember(memberId, groups, previousPairKeys) {
+  const previous = previousPairKeys instanceof Set
+    ? previousPairKeys
+    : new Set(previousPairKeys ?? []);
+  const candidates = groups.map((group, index) => {
+    const memberIds = group.memberIds ?? group.members ?? [];
+    const repeatedPairCount = memberIds.reduce(
+      (count, existingMemberId) => count + (previous.has(createPairKey(memberId, existingMemberId)) ? 1 : 0),
+      0,
+    );
+    return {
+      ...group,
+      index,
+      repeatedPairCount,
+      memberCount: memberIds.length,
+    };
+  });
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const bestScore = Math.min(...candidates.map((candidate) => candidate.repeatedPairCount));
+  const bestCount = Math.min(
+    ...candidates
+      .filter((candidate) => candidate.repeatedPairCount === bestScore)
+      .map((candidate) => candidate.memberCount),
+  );
+  const tied = candidates.filter(
+    (candidate) => candidate.repeatedPairCount === bestScore && candidate.memberCount === bestCount,
+  );
+
+  return tied[Math.floor(Math.random() * tied.length)];
+}
+
+export function chooseBestMemberSubset(members, size, previousPairKeys, candidateCount = 100) {
+  if (members.length <= size) {
+    return [...members];
+  }
+
+  const candidates = new Map();
+  for (let attempt = 0; attempt < candidateCount; attempt += 1) {
+    const candidate = shuffle(members).slice(0, size);
+    const key = candidate.map((member) => member.id).sort().join(",");
+    if (!candidates.has(key)) {
+      candidates.set(key, {
+        members: candidate,
+        score: countRepeatedPairs([candidate], previousPairKeys),
+      });
+    }
+  }
+
+  const bestScore = Math.min(...[...candidates.values()].map((candidate) => candidate.score));
+  const best = [...candidates.values()].filter((candidate) => candidate.score === bestScore);
+  return best[Math.floor(Math.random() * best.length)].members;
+}
+
 export function shuffle(items) {
   const copied = [...items];
 
