@@ -25,7 +25,11 @@ import {
   saveBumpReminder,
 } from "./bump-reminder-store.js";
 import { buildGroups, describeGroups, shuffle } from "./grouping.js";
-import { getGuildSettings, saveGuildSettings } from "./settings-store.js";
+import { deleteOteboRecruitmentIfOnlyMember, getGuildSettings, replaceNestedObject, saveGuildSettings, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
+import { claimAction, failAction, finishAction, getPendingActions, recoverInterruptedActions, scheduleAction } from "./scheduled-action-store.js";
+import { consumeBosyuCooldown, deleteBosyuEditSession, getActiveBosyuEditSessions, getBosyuEditSession, getExpiredBosyuEditSessions, saveBosyuEditSession } from "./bosyu-state-store.js";
+import { SplitProcessSession } from "./models/split-process-session.js";
+import mongoose from "mongoose";
 import { UserProfile } from "./models/user-profile.js";
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
 
@@ -188,6 +192,18 @@ client.once(Events.ClientReady, (readyClient) => {
   void restoreProfiles(client, { sendOperationalLog, getGuildSettings }).catch((error) => {
     console.error("Profile startup restore failed:", error);
   });
+  void restoreScheduledActions().catch((error) => {
+    console.error("Scheduled action startup restore failed:", error);
+  });
+  void restoreBosyuEditSessions().catch((error) => {
+    console.error("Bosyu edit session startup restore failed:", error);
+  });
+  void restoreSplitProcessSessions().catch((error) => {
+    console.error("Split process startup restore failed:", error);
+  });
+  void restoreVoiceMonitorSessions().catch((error) => {
+    console.error("Voice monitor startup restore failed:", error);
+  });
   if (shouldSendMongoSuccessLog) {
     shouldSendMongoSuccessLog = false;
     void (async () => {
@@ -239,7 +255,14 @@ client.on(Events.MessageCreate, async (message) => {
     await handleDisboardBumpMessage(message);
     await handleTopicRequestMessage(message);
   } catch (error) {
-    console.error(error);
+    console.error("Interaction processing failed", {
+      processName: interaction.commandName ?? interaction.customId ?? interaction.type,
+      guildId: interaction.guildId ?? null,
+      channelId: interaction.channelId ?? null,
+      userId: interaction.user?.id ?? null,
+      customId: interaction.customId ?? null,
+      error: error?.stack ?? error,
+    });
   }
 });
 
@@ -752,11 +775,12 @@ async function handleCallWaitSetting(interaction) {
   }
 
   if (callWaitEnabled === false) {
-    const followupTimer = callWaitFollowupTimers.get(interaction.guildId);
-
-    if (followupTimer) {
-      clearTimeout(followupTimer);
-      callWaitFollowupTimers.delete(interaction.guildId);
+    const actionPrefix = `callwait-followup:${interaction.guildId}:`;
+    for (const [actionKey, followupTimer] of callWaitFollowupTimers.entries()) {
+      if (actionKey.startsWith(actionPrefix)) {
+        clearTimeout(followupTimer);
+        callWaitFollowupTimers.delete(actionKey);
+      }
     }
 
     settings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
@@ -2060,15 +2084,19 @@ async function handleOteboJoinButton(interaction, recruitmentId) {
   }
 
   const memberIds = addUniqueMemberId(recruitment.memberIds, interaction.user.id);
-  const nextRecruitment = {
-    ...recruitment,
-    memberIds,
-  };
-  const nextSettings = await saveOteboRecruitmentState(
-    interaction.guildId,
-    settings,
-    nextRecruitment,
-  );
+  const updated = await updateOteboRecruitmentParticipant({
+    guildId: interaction.guildId,
+    recruitmentId,
+    messageId: interaction.message.id,
+    userId: interaction.user.id,
+    operation: "add",
+  });
+  if (!updated) {
+    await interaction.reply({ content: "この募集はすでに更新されています。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const nextSettings = await getGuildSettings(interaction.guildId);
+  const nextRecruitment = getOteboRecruitment(nextSettings, recruitmentId) ?? { ...recruitment, memberIds };
 
   await sendOteboApplicantLog({
     guild: interaction.guild,
@@ -2093,16 +2121,20 @@ async function handleOteboImmediateJoin(interaction, settings, recruitment) {
     [interaction.user.id]: confirmExpiresAt.toISOString(),
   };
   const memberIds = addUniqueMemberId(recruitment.memberIds, interaction.user.id);
-  const nextRecruitment = {
-    ...recruitment,
-    memberIds,
-    pendingConfirmations,
-  };
-  const nextSettings = await saveOteboRecruitmentState(
-    interaction.guildId,
-    settings,
-    nextRecruitment,
-  );
+  const updated = await updateOteboRecruitmentParticipant({
+    guildId: interaction.guildId,
+    recruitmentId: recruitment.id,
+    messageId: recruitment.messageId,
+    userId: interaction.user.id,
+    operation: "add",
+    pendingConfirmation: confirmExpiresAt.toISOString(),
+  });
+  if (!updated) {
+    await interaction.reply({ content: "この募集はすでに更新されています。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const nextSettings = await getGuildSettings(interaction.guildId);
+  const nextRecruitment = getOteboRecruitment(nextSettings, recruitment.id) ?? { ...recruitment, memberIds, pendingConfirmations };
 
   scheduleOteboImmediateConfirmation(
     interaction.guild,
@@ -2297,34 +2329,40 @@ async function cancelOteboParticipation({
   );
 
   if (memberIds.length === 0) {
-    await deleteOteboRecruitmentMessage(interaction.guild, recruitment);
-    const nextSettings = await deleteOteboRecruitmentState(
-      interaction.guildId,
-      settings,
-      recruitment.id,
-    );
-    clearOteboRecruitmentTimers(interaction.guildId, recruitment.id);
-    await sendOteboApplicantLog({
-      guild: interaction.guild,
-      settings: nextSettings,
-      action: "cancel",
+    const deleted = await deleteOteboRecruitmentIfOnlyMember({
+      guildId: interaction.guildId,
+      recruitmentId: recruitment.id,
+      messageId: recruitment.messageId,
       userId,
-      memberIds: [],
     });
+    if (deleted) {
+      await deleteOteboRecruitmentMessage(interaction.guild, recruitment);
+      clearOteboRecruitmentTimers(interaction.guildId, recruitment.id);
+      await sendOteboApplicantLog({
+        guild: interaction.guild,
+        settings: await getGuildSettings(interaction.guildId),
+        action: "cancel",
+        userId,
+        memberIds: [],
+      });
+      await respondOteboCancel(interaction, response);
+      return;
+    }
+  }
+
+  const updated = await updateOteboRecruitmentParticipant({
+    guildId: interaction.guildId,
+    recruitmentId: recruitment.id,
+    messageId: recruitment.messageId,
+    userId,
+    operation: "remove",
+  });
+  if (!updated) {
     await respondOteboCancel(interaction, response);
     return;
   }
-
-  const nextRecruitment = {
-    ...recruitment,
-    memberIds,
-    pendingConfirmations,
-  };
-  const nextSettings = await saveOteboRecruitmentState(
-    interaction.guildId,
-    settings,
-    nextRecruitment,
-  );
+  const nextSettings = await getGuildSettings(interaction.guildId);
+  const nextRecruitment = getOteboRecruitment(nextSettings, recruitment.id) ?? { ...recruitment, memberIds, pendingConfirmations };
 
   await editOteboRecruitmentMessage(interaction.guild, nextSettings, nextRecruitment);
   await sendOteboApplicantLog({
@@ -2406,7 +2444,7 @@ async function processCallWaitForGuild(guild, settings) {
       });
 
       if (queued) {
-        scheduleCallWaitFollowupCheck(guild.id);
+        await scheduleCallWaitFollowupCheck(guild);
         return;
       }
     } else if (promptResult.mode === CALL_WAIT_MODE_BUTTON) {
@@ -2686,16 +2724,24 @@ async function handleCallWaitButton(interaction) {
 
   const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
   const userId = interaction.user.id;
-  const nextMemberIds = isJoin
+  const requestedMemberIds = isJoin
     ? [...new Set([...memberIds, userId])]
     : memberIds.filter((memberId) => memberId !== userId);
 
-  await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
-    callWaitPrompt: {
-      ...prompt,
-      memberIds: nextMemberIds,
-    },
+  const updatedPrompt = await updateCallWaitPromptMember({
+    guildId: interaction.guildId,
+    messageId: prompt.messageId,
+    userId,
+    operation: isJoin ? "add" : "remove",
   });
+  if (!updatedPrompt) {
+    await interaction.reply({
+      content: "この募集はすでに更新されています。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const nextMemberIds = updatedPrompt.callWaitPrompt?.memberIds ?? requestedMemberIds;
 
   await sendCallWaitApplicantLog({
     guild: interaction.guild,
@@ -2821,11 +2867,18 @@ async function grantCallWaitRoleAndQueueNotice({ guild, settings, memberIds }) {
   });
 
   if (newlyAddedMemberIds.length > 0) {
-    scheduleCallWaitRoleRemoval({
-      guild,
-      roleId: settings.callWaitRoleId,
-      memberIds: newlyAddedMemberIds,
-    });
+    try {
+      await scheduleCallWaitRoleRemoval({
+        guild,
+        roleId: settings.callWaitRoleId,
+        memberIds: newlyAddedMemberIds,
+      });
+    } catch (error) {
+      // Do not leave temporary roles behind when their persistent removal
+      // schedule could not be written.
+      await removeCallWaitRoleFromMembers(guild, settings.callWaitRoleId, newlyAddedMemberIds).catch(() => {});
+      throw error;
+    }
   }
 
   await maybeSendPendingCallWaitStartNotice(guild, nextSettings);
@@ -2957,33 +3010,282 @@ function getCallWaitNoticeChannelId(settings) {
   return settings?.callWaitNoticeChannelId ?? settings?.callWaitChannelId ?? null;
 }
 
-function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds }) {
-  const key = `${guild.id}:${roleId}:${Date.now()}`;
-  const timer = setTimeout(() => {
-    callWaitRoleRemovalTimers.delete(key);
-    void removeCallWaitRoleFromMembers(guild, roleId, memberIds).catch((error) => {
-      console.error(`Failed to remove call wait role: ${error.message}`, error);
-    });
-  }, CALL_WAIT_ROLE_REMOVE_MS);
-
-  callWaitRoleRemovalTimers.set(key, timer);
+async function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds }) {
+  const normalizedIds = normalizeCallWaitMemberIds(memberIds);
+  const actionKey = `callwait-role-remove:${guild.id}:${createSessionId()}`;
+  await schedulePersistentRoleRemoval({
+    actionKey,
+    type: "callwait_role_remove",
+    guild,
+    roleId,
+    memberIds: normalizedIds,
+    delayMs: CALL_WAIT_ROLE_REMOVE_MS,
+    timers: callWaitRoleRemovalTimers,
+  });
 }
 
-function scheduleCallWaitFollowupCheck(guildId) {
-  const existingTimer = callWaitFollowupTimers.get(guildId);
+async function schedulePersistentRoleRemoval({ actionKey, type, guild, roleId, memberIds, delayMs, timers, payload }) {
+  const executeAt = new Date(Date.now() + delayMs);
+  await scheduleAction({ actionKey, guildId: guild.id, type, executeAt, roleId, memberIds, payload: payload ?? {} });
+  const previous = timers.get(actionKey);
+  if (previous) clearTimeout(previous);
+  const timer = setTimeout(() => {
+    timers.delete(actionKey);
+    void executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds, type, payload }).catch((error) => {
+      console.error(`Failed to execute ${type}: ${error.message}`);
+    });
+  }, Math.max(0, executeAt.getTime() - Date.now()));
+  timers.set(actionKey, timer);
+}
+
+async function scheduleWaitingVcCleanup({ actionKey, guild, channelId, delayMs, sessionId }) {
+  const executeAt = new Date(Date.now() + delayMs);
+  await scheduleAction({ actionKey, guildId: guild.id, type: "split_waiting_vc_cleanup", executeAt, payload: { channelId, sessionId } });
+  const timer = setTimeout(() => {
+    void executeWaitingVcCleanup({ actionKey, guild, channelId, sessionId }).catch((error) => {
+      console.error(`Failed to clean up waiting VC: ${error.message}`);
+    });
+  }, Math.max(0, executeAt.getTime() - Date.now()));
+  const previous = callWaitRoleRemovalTimers.get(actionKey);
+  if (previous) clearTimeout(previous);
+  callWaitRoleRemovalTimers.set(actionKey, timer);
+}
+
+async function executeWaitingVcCleanup({ actionKey, guild, channelId, sessionId }) {
+  const claimed = await claimAction(actionKey);
+  if (!claimed) return;
+  try {
+    const channel = await guild.channels.fetch(channelId).catch((error) => {
+      if (error?.code === 10003) return null;
+      throw error;
+    });
+    if (channel) await channel.delete().catch((error) => {
+      if (error?.code !== 10003) throw error;
+    });
+    if (sessionId) await SplitProcessSession.updateOne({ sessionId }, { $set: { waitingVcCleanupCompleted: true } });
+    await finishAction(actionKey);
+  } catch (error) {
+    await failAction(actionKey, error.message).catch(() => {});
+    throw error;
+  }
+}
+
+async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds, payload }) {
+  const claimed = await claimAction(actionKey);
+  if (!claimed) return;
+  try {
+    await removeCallWaitRoleFromMembers(guild, roleId, memberIds);
+    await finishAction(actionKey);
+    if (payload?.sessionId) {
+      await SplitProcessSession.updateOne(
+        { sessionId: payload.sessionId },
+        { $set: { roleRemovalCompleted: true, phase: "cleaning_up" } },
+      );
+    }
+  } catch (error) {
+    await failAction(actionKey, error.message).catch(() => {});
+    throw error;
+  }
+}
+
+async function executeSplitFinishNotice({ actionKey, guild, payload }) {
+  const claimed = await claimAction(actionKey);
+  if (!claimed) return;
+  try {
+    const session = await SplitProcessSession.findOne({ sessionId: payload?.sessionId }).lean();
+    if (!session?.finishNoticeSent) {
+      const channel = await guild.channels.fetch(payload?.channelId ?? session?.operationChannelId).catch(() => null);
+      if (channel?.send) {
+        await channel.send({
+          content: `<@&${session.participantRoleId}> ${payload?.finishMessage ?? session.finishMessage ?? ""}`,
+          allowedMentions: { roles: session.participantRoleId ? [session.participantRoleId] : [] },
+        });
+      }
+      await SplitProcessSession.updateOne({ sessionId: payload?.sessionId }, { $set: { finishNoticeSent: true, phase: "role_remove_pending" } });
+    }
+    await finishAction(actionKey);
+  } catch (error) {
+    await failAction(actionKey, error.message).catch(() => {});
+    throw error;
+  }
+}
+
+async function restoreScheduledActions() {
+  const recovery = await recoverInterruptedActions();
+  const actions = await getPendingActions();
+  let restored = 0;
+  for (const action of actions) {
+    const guild = client.guilds.cache.get(action.guildId) ?? await client.guilds.fetch(action.guildId).catch(() => null);
+    if (!guild) {
+      await failAction(action.actionKey, "Guild not found").catch(() => {});
+      continue;
+    }
+    if (action.type === "split_waiting_vc_cleanup") {
+      const timer = setTimeout(() => {
+        void executeWaitingVcCleanup({ actionKey: action.actionKey, guild, channelId: action.payload?.channelId, sessionId: action.payload?.sessionId }).catch((error) => {
+          console.error(`Failed to restore waiting VC cleanup ${action.actionKey}: ${error.message}`);
+        });
+      }, Math.max(0, new Date(action.executeAt).getTime() - Date.now()));
+      callWaitRoleRemovalTimers.set(action.actionKey, timer);
+      restored += 1;
+      continue;
+    }
+    if (action.type === "split_finish_notice") {
+      const timer = setTimeout(() => {
+        void executeSplitFinishNotice({ actionKey: action.actionKey, guild, payload: action.payload }).catch((error) => {
+          console.error(`Failed to restore split finish notice ${action.actionKey}: ${error.message}`);
+        });
+      }, Math.max(0, new Date(action.executeAt).getTime() - Date.now()));
+      callWaitRoleRemovalTimers.set(action.actionKey, timer);
+      restored += 1;
+      continue;
+    }
+    if (action.type === "callwait_followup") {
+      const timer = setTimeout(() => {
+        void executeCallWaitFollowup({ actionKey: action.actionKey, guild }).catch((error) => {
+          console.error(`Failed to restore call-wait follow-up ${action.actionKey}: ${error.message}`);
+        });
+      }, Math.max(0, new Date(action.executeAt).getTime() - Date.now()));
+      callWaitFollowupTimers.set(action.actionKey, timer);
+      restored += 1;
+      continue;
+    }
+    const timers = action.type === "otebo_role_remove" ? oteboRecruitmentTimers : callWaitRoleRemovalTimers;
+    const timer = setTimeout(() => {
+      timers.delete(action.actionKey);
+      void executeScheduledRoleRemoval({ actionKey: action.actionKey, guild, roleId: action.roleId, memberIds: action.memberIds, payload: action.payload }).catch((error) => {
+        console.error(`Failed to restore scheduled action ${action.actionKey}: ${error.message}`);
+      });
+    }, Math.max(0, new Date(action.executeAt).getTime() - Date.now()));
+    timers.set(action.actionKey, timer);
+    restored += 1;
+  }
+  console.log(`Startup scheduled actions restored: ${restored}; interrupted actions recovered: ${recovery.modifiedCount}`);
+}
+
+async function restoreBosyuEditSessions() {
+  const expiredSessions = await getExpiredBosyuEditSessions();
+  for (const session of expiredSessions) {
+    await invalidateBosyuEditMessage(session).catch((error) => {
+      console.error(`Failed to invalidate expired /bosyu edit ${session.messageId}: ${error.message}`);
+    });
+    await deleteBosyuEditSession(session.messageId).catch(() => {});
+  }
+  const sessions = await getActiveBosyuEditSessions();
+  let restored = 0;
+  for (const session of sessions) {
+    bosyuEditSessions.set(session.messageId, {
+      ownerId: session.ownerId,
+      expiresAt: new Date(session.expiresAt).getTime(),
+      bosyuMentionRoleId: session.bosyuMentionRoleId,
+      anonymous: session.anonymous,
+      voiceChannelId: session.voiceChannelId,
+    });
+    restored += 1;
+    scheduleBosyuEditExpiry(session.messageId, session.channelId, new Date(session.expiresAt).getTime());
+  }
+  console.log(`Startup bosyu edit sessions restored: ${restored}`);
+}
+
+async function invalidateBosyuEditMessage(session) {
+  const channel = await client.channels.fetch(session.channelId).catch(() => null);
+  const message = channel?.messages?.fetch ? await channel.messages.fetch(session.messageId).catch(() => null) : null;
+  await message?.edit({ components: [] }).catch(() => {});
+}
+
+function scheduleBosyuEditExpiry(messageId, channelId, expiresAt) {
+  setTimeout(async () => {
+    bosyuEditSessions.delete(messageId);
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    const message = channel?.messages?.fetch ? await channel.messages.fetch(messageId).catch(() => null) : null;
+    await message?.edit({ components: [] }).catch(() => {});
+    await deleteBosyuEditSession(messageId).catch((error) => {
+      console.error(`Failed to delete expired /bosyu edit session ${messageId}: ${error.message}`);
+    });
+  }, Math.max(0, expiresAt - Date.now()));
+}
+
+async function persistSplitProcessSession(sessionId, patch) {
+  if (!sessionId) return null;
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error("MongoDB is unavailable; split process state was not persisted.");
+  }
+  return SplitProcessSession.findOneAndUpdate(
+    { sessionId },
+    { $set: patch, $setOnInsert: { sessionId, guildId: patch.guildId } },
+    { upsert: true, new: true, setDefaultsOnInsert: true, lean: true },
+  );
+}
+
+async function restoreSplitProcessSessions() {
+  if (mongoose.connection.readyState !== 1) return;
+  const sessions = await SplitProcessSession.find({ status: { $in: ["active", "finish_notice_pending", "role_remove_pending", "cleaning_up"] } }).lean();
+  let restored = 0;
+  for (const session of sessions) {
+    const guild = client.guilds.cache.get(session.guildId) ?? await client.guilds.fetch(session.guildId).catch(() => null);
+    if (!guild) continue;
+    if (session.phase === "transfer_waiting" && !(session.childChannelIds?.length)) {
+      await SplitProcessSession.updateOne(
+        { sessionId: session.sessionId, status: "active" },
+        { $set: { status: "canceled", phase: "canceled", lastError: "Bot restarted before transfer completed" } },
+      );
+      continue;
+    }
+    const roleRemoveAt = session.roleRemoveAt ? new Date(session.roleRemoveAt).getTime() : Date.now();
+    const roleId = session.participantRoleId;
+    const memberIds = session.participantMemberIds ?? [];
+    if (roleId && memberIds.length) {
+      await schedulePersistentRoleRemoval({
+        actionKey: `split-role-remove:${session.sessionId}`,
+        type: "split_role_remove",
+        guild,
+        roleId,
+        memberIds,
+        delayMs: Math.max(0, roleRemoveAt - Date.now()),
+        timers: callWaitRoleRemovalTimers,
+        payload: { sessionId: session.sessionId },
+      }).catch((error) => console.error(`Failed to restore split role removal: ${error.message}`));
+    }
+    restored += 1;
+  }
+  console.log(`Startup split sessions restored: ${restored}`);
+}
+
+async function scheduleCallWaitFollowupCheck(guild) {
+  const actionKey = `callwait-followup:${guild.id}:${createSessionId()}`;
+  const existingTimer = callWaitFollowupTimers.get(actionKey);
 
   if (existingTimer) {
     clearTimeout(existingTimer);
   }
 
+  const executeAt = new Date(Date.now() + CALL_WAIT_FOLLOWUP_CHECK_MS);
+  await scheduleAction({
+    actionKey,
+    guildId: guild.id,
+    type: "callwait_followup",
+    executeAt,
+  });
   const timer = setTimeout(() => {
-    callWaitFollowupTimers.delete(guildId);
-    void runCallWaitFollowupCheck(guildId).catch((error) => {
+    callWaitFollowupTimers.delete(actionKey);
+    void executeCallWaitFollowup({ actionKey, guild }).catch((error) => {
       console.error(`Failed to run call wait follow-up check: ${error.message}`, error);
     });
-  }, CALL_WAIT_FOLLOWUP_CHECK_MS);
+  }, Math.max(0, executeAt.getTime() - Date.now()));
 
-  callWaitFollowupTimers.set(guildId, timer);
+  callWaitFollowupTimers.set(actionKey, timer);
+}
+
+async function executeCallWaitFollowup({ actionKey, guild }) {
+  const claimed = await claimAction(actionKey);
+  if (!claimed) return;
+  try {
+    await runCallWaitFollowupCheck(guild.id);
+    await finishAction(actionKey);
+  } catch (error) {
+    await failAction(actionKey, error.message).catch(() => {});
+    throw error;
+  }
 }
 
 async function runCallWaitFollowupCheck(guildId) {
@@ -3063,6 +3365,7 @@ async function sendCallWaitSkippedNotice({ guild, settings, channel, now }) {
 }
 
 async function removeCallWaitRoleFromMembers(guild, roleId, memberIds) {
+  const errors = [];
   for (const memberId of memberIds) {
     const member = await guild.members.fetch(memberId).catch(() => null);
 
@@ -3075,8 +3378,10 @@ async function removeCallWaitRoleFromMembers(guild, roleId, memberIds) {
       "通話待機システムの30分経過による自動解除",
     ).catch((error) => {
       console.error(`Failed to remove call wait role from ${member.id}: ${error.message}`);
+      errors.push(error);
     });
   }
+  if (errors.length) throw new AggregateError(errors, "Failed to remove one or more call-wait roles.");
 }
 
 function getCallWaitActiveVoiceMemberIds(guild, categoryId) {
@@ -3648,23 +3953,16 @@ function findActiveOteboRecruitmentByOwner(settings, ownerId) {
 }
 
 async function saveOteboRecruitmentState(guildId, currentSettings, recruitment) {
-  const recruitments = {
-    ...getOteboRecruitments(currentSettings),
-    [recruitment.id]: recruitment,
-  };
-
-  return saveGuildSettingsWithCurrent(guildId, currentSettings, {
-    oteboRecruitments: recruitments,
-  });
+  return replaceNestedObject({
+    guildId,
+    path: `oteboRecruitments.${recruitment.id}`,
+    value: recruitment,
+  }).then(() => getGuildSettings(guildId));
 }
 
 async function deleteOteboRecruitmentState(guildId, currentSettings, recruitmentId) {
-  const recruitments = { ...getOteboRecruitments(currentSettings) };
-  delete recruitments[recruitmentId];
-
-  return saveGuildSettingsWithCurrent(guildId, currentSettings, {
-    oteboRecruitments: recruitments,
-  });
+  await unsetNestedObject({ guildId, path: `oteboRecruitments.${recruitmentId}` });
+  return getGuildSettings(guildId);
 }
 
 function addUniqueMemberId(memberIds, memberId) {
@@ -4051,11 +4349,22 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
     });
   }
 
-  scheduleOteboRoleRemoval({
-    guild,
-    roleId: settings.callWaitRoleId,
-    memberIds: roleMemberIds,
-  });
+  try {
+    await scheduleOteboRoleRemoval({
+      guild,
+      roleId: settings.callWaitRoleId,
+      memberIds: roleMemberIds,
+      recruitmentId: recruitment.id,
+    });
+  } catch (error) {
+    await removeTemporaryRoleFromMembers({
+      guild,
+      roleId: settings.callWaitRoleId,
+      memberIds: roleMemberIds,
+      reason: "Persistent role removal schedule failed",
+    }).catch(() => {});
+    throw error;
+  }
   await deleteOteboRecruitmentMessage(guild, recruitment);
   const recruitments = { ...getOteboRecruitments(settings) };
   delete recruitments[recruitment.id];
@@ -4122,7 +4431,19 @@ async function addTemporaryRoleToMembers({ guild, roleId, memberIds, reason }) {
   return eligibleMemberIds;
 }
 
-function scheduleOteboRoleRemoval({ guild, roleId, memberIds }) {
+async function scheduleOteboRoleRemoval({ guild, roleId, memberIds, recruitmentId }) {
+  const normalizedIds = normalizeCallWaitMemberIds(memberIds);
+  const actionKey = `otebo-role-remove:${guild.id}:${recruitmentId ?? createSessionId()}:${createSessionId()}`;
+  await schedulePersistentRoleRemoval({
+    actionKey,
+    type: "otebo_role_remove",
+    guild,
+    roleId,
+    memberIds: normalizedIds,
+    delayMs: OTEBO_ROLE_REMOVE_MS,
+    timers: oteboRecruitmentTimers,
+  });
+  return;
   const key = getOteboRoleTimerKey(guild.id, roleId, Date.now());
   const timer = setTimeout(() => {
     oteboRecruitmentTimers.delete(key);
@@ -4140,6 +4461,7 @@ function scheduleOteboRoleRemoval({ guild, roleId, memberIds }) {
 }
 
 async function removeTemporaryRoleFromMembers({ guild, roleId, memberIds, reason }) {
+  const errors = [];
   for (const memberId of normalizeCallWaitMemberIds(memberIds)) {
     const member = await guild.members.fetch(memberId).catch(() => null);
 
@@ -4149,8 +4471,10 @@ async function removeTemporaryRoleFromMembers({ guild, roleId, memberIds, reason
 
     await member.roles.remove(roleId, reason).catch((error) => {
       console.error(`Failed to remove temporary role from ${member.id}: ${error.message}`);
+      errors.push(error);
     });
   }
+  if (errors.length) throw new AggregateError(errors, "Failed to remove one or more temporary roles.");
 }
 
 async function processOteboVoiceStatusSessions(guild, settings) {
@@ -4748,13 +5072,9 @@ function createWadaiTopicId(category) {
 }
 
 async function saveGuildSettingsWithCurrent(guildId, currentSettings, patch) {
-  const base =
-    currentSettings && typeof currentSettings === "object" ? currentSettings : {};
-
-  return saveGuildSettings(guildId, {
-    ...base,
-    ...patch,
-  });
+  // The store performs an atomic $set. Do not merge a stale snapshot here:
+  // concurrent /setting operations must not overwrite each other.
+  return saveGuildSettings(guildId, patch);
 }
 
 async function handleSetupForms(interaction) {
@@ -5132,7 +5452,11 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
     return;
   }
 
-  const existingMessageId = autoSplitSuggestionMessages.get(channelId);
+  const persistedSuggestion = settings?.autoSplitSuggestions?.[channelId];
+  const existingMessageId = autoSplitSuggestionMessages.get(channelId) ?? persistedSuggestion?.messageId;
+  if (existingMessageId && !autoSplitSuggestionMessages.has(channelId)) {
+    autoSplitSuggestionMessages.set(channelId, existingMessageId);
+  }
   const isTargetCategory = await isPbChildVoiceChannel(
     guild,
     settings,
@@ -5148,6 +5472,7 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
         existingMessageId,
       );
       autoSplitSuggestionMessages.delete(channelId);
+      await clearAutoSplitSuggestion(guild.id, channelId);
     }
 
     return;
@@ -5183,6 +5508,7 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
     });
 
     autoSplitSuggestionMessages.set(channelId, suggestionMessage.id);
+    await persistAutoSplitSuggestion(guild.id, channelId, suggestionMessage);
     return;
   }
 
@@ -5194,6 +5520,7 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
       existingMessageId,
     );
     autoSplitSuggestionMessages.delete(channelId);
+    await clearAutoSplitSuggestion(guild.id, channelId);
   }
 }
 
@@ -5323,7 +5650,7 @@ async function isMemberInActiveVoiceMonitorContext(
   return false;
 }
 
-async function updateVoiceMonitorSession(guild, settings, channelId) {
+async function updateVoiceMonitorSession(guild, settings, channelId, options = {}) {
   const voiceChannel = await guild.channels.fetch(channelId).catch(() => null);
 
   if (!voiceChannel?.isVoiceBased()) {
@@ -5359,7 +5686,7 @@ async function updateVoiceMonitorSession(guild, settings, channelId) {
       };
 
       voiceMonitorSessions.set(sessionKey, session);
-      await startVoiceMonitorSession(session, voiceChannel, members, settings);
+      await startVoiceMonitorSession(session, voiceChannel, members, settings, options);
       return;
     }
 
@@ -5420,9 +5747,54 @@ async function stopVoiceMonitorSessionIfStillUnderfilled(
   await stopVoiceMonitorSession(session, guild, voiceChannel, settings);
 }
 
-async function startVoiceMonitorSession(session, voiceChannel, members, settings) {
+async function startVoiceMonitorSession(session, voiceChannel, members, settings, options = {}) {
   await ensureSessionMembersHaveRole(session, voiceChannel, members);
-  await sendVoiceMonitorStartNotice(voiceChannel, settings);
+  if (!options.suppressStartNotice) {
+    await sendVoiceMonitorStartNotice(voiceChannel, settings);
+  }
+}
+
+async function persistAutoSplitSuggestion(guildId, channelId, message) {
+  await replaceNestedObject({
+    guildId,
+    path: `autoSplitSuggestions.${channelId}`,
+    value: {
+      messageId: message.id,
+      reminderChannelId: message.channelId,
+      createdAt: new Date().toISOString(),
+    },
+  });
+}
+
+async function clearAutoSplitSuggestion(guildId, channelId) {
+  await unsetNestedObject({ guildId, path: `autoSplitSuggestions.${channelId}` });
+}
+
+async function restoreVoiceMonitorSessions() {
+  let rebuilt = 0;
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const settings = await getGuildSettings(guild.id).catch(() => null);
+      if (!settings) continue;
+      for (const [channelId, suggestion] of Object.entries(settings.autoSplitSuggestions ?? {})) {
+        if (suggestion?.messageId) autoSplitSuggestionMessages.set(channelId, suggestion.messageId);
+      }
+      const candidates = [...guild.channels.cache.values()].filter((channel) => channel.isVoiceBased());
+      for (const channel of candidates) {
+        try {
+          if (getNonBotVoiceMembers(channel).length < VOICE_MONITOR_MIN_MEMBERS) continue;
+          if (!(await isVoiceChannelMonitored(guild, settings, channel.id))) continue;
+          await updateVoiceMonitorSession(guild, settings, channel.id, { suppressStartNotice: true });
+          rebuilt += 1;
+        } catch (error) {
+          console.error(`Voice monitor restore failed guild=${guild.id} channel=${channel.id}: ${error.message}`);
+        }
+      }
+    } catch (error) {
+      console.error(`Voice monitor guild restore failed guild=${guild.id}: ${error.message}`);
+    }
+  }
+  console.log(`Startup voice monitor sessions rebuilt: ${rebuilt}`);
 }
 
 async function sendVoiceMonitorStartNotice(voiceChannel, settings) {
@@ -5692,6 +6064,7 @@ ${transferResult.childChannel ? `<#${transferResult.childChannel.id}>` : "PB子V
   });
 
   autoSplitSuggestionMessages.delete(channelId);
+  await clearAutoSplitSuggestion(interaction.guildId, channelId);
 }
 
 function splitIntoTwoRandomGroups(members) {
@@ -6012,11 +6385,31 @@ async function handleSplitVoice(interaction) {
   const childChannelIds = new Set();
   const participantMemberIds = new Set();
   const processState = { ended: false };
+  const splitSessionId = createSessionId();
   let temporaryWaitingVc = null;
   let temporaryWaitingVcDeleteTimer = null;
   let splitStartMessage = null;
 
+  await persistSplitProcessSession(splitSessionId, {
+    guildId: interaction.guildId,
+    ownerId: interaction.user.id,
+    sourceChannelId: sourceChannel.id,
+    operationChannelId: operationChannel.id,
+    parentChannelId: config.parentChannel.id,
+    childCategoryId: config.childCategoryId,
+    participantRoleId: config.tempRole.id,
+    phase: "transfer_waiting",
+    status: "active",
+    transferAt: new Date(Date.now() + transferWaitMs),
+    finishMessage: settings?.finishMessage || DEFAULT_FINISH_MESSAGE,
+  });
+
   if (transferCanceled) {
+    await persistSplitProcessSession(splitSessionId, {
+      status: "canceled",
+      phase: "canceled",
+      completedAt: new Date(),
+    });
     await operationChannel.send("転送をキャンセルしました。");
   } else {
     const transferResult = await transferGroups(groups, {
@@ -6027,6 +6420,43 @@ async function handleSplitVoice(interaction) {
     });
     addMany(childChannelIds, transferResult.childChannelIds);
     addMany(participantMemberIds, transferResult.participantMemberIds);
+    try {
+      const finishNoticeAt = new Date(Date.now() + noticeWaitMs);
+      const roleRemoveAt = new Date(finishNoticeAt.getTime() + roleRemoveWaitMs);
+      await persistSplitProcessSession(splitSessionId, {
+        phase: "active",
+        status: "active",
+        participantMemberIds: [...participantMemberIds],
+        childChannelIds: [...childChannelIds],
+        finishNoticeAt,
+        roleRemoveAt,
+      });
+      await scheduleAction({
+        actionKey: `split-finish-notice:${splitSessionId}`,
+        guildId: interaction.guildId,
+        type: "split_finish_notice",
+        executeAt: finishNoticeAt,
+        roleId: config.tempRole.id,
+        memberIds: [...participantMemberIds],
+        payload: { sessionId: splitSessionId, channelId: operationChannel.id, finishMessage: settings?.finishMessage || DEFAULT_FINISH_MESSAGE },
+      });
+      await scheduleAction({
+        actionKey: `split-role-remove:${splitSessionId}`,
+        guildId: interaction.guildId,
+        type: "split_role_remove",
+        executeAt: roleRemoveAt,
+        roleId: config.tempRole.id,
+        memberIds: [...participantMemberIds],
+        payload: { sessionId: splitSessionId },
+      });
+    } catch (error) {
+      await removeRoleFromMembers(interaction.guild, config.tempRole.id, [...participantMemberIds]).catch(() => {});
+      for (const channelId of childChannelIds) {
+        const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+        await channel?.delete().catch(() => {});
+      }
+      throw error;
+    }
 
     await sendOperationalLog({
       guild: interaction.guild,
@@ -6095,6 +6525,21 @@ async function handleSplitVoice(interaction) {
         guild: interaction.guild,
         settings,
         waitingChannel: temporaryWaitingVc,
+      });
+      await persistSplitProcessSession(splitSessionId, {
+        waitingChannelId: temporaryWaitingVc.id,
+        splitStartMessageChannelId: splitStartMessage?.channel?.id ?? operationChannel.id,
+        splitStartMessageId: splitStartMessage?.id,
+        waitingMonitorEndsAt: new Date(Date.now() + WAITING_ROOM_MONITOR_MS),
+        finishNoticeAt: new Date(Date.now() + noticeWaitMs),
+        phase: "active",
+      });
+      await scheduleWaitingVcCleanup({
+        actionKey: `split-waiting-vc-cleanup:${splitSessionId}`,
+        guild: interaction.guild,
+        channelId: temporaryWaitingVc.id,
+        delayMs: noticeWaitMs + roleRemoveWaitMs,
+        sessionId: splitSessionId,
       });
 
       temporaryWaitingVcDeleteTimer = setTimeout(async () => {
@@ -6173,6 +6618,7 @@ async function handleSplitVoice(interaction) {
       roleRemoveWaitMs,
       childChannelIds,
       state: processState,
+      sessionId: splitSessionId,
       temporaryWaitingVc,
       temporaryWaitingVcDeleteTimer,
       splitStartMessage,
@@ -6208,11 +6654,16 @@ async function handleBosyu(interaction) {
   }
 
   const rateLimitKey = `${interaction.guildId}:${interaction.user.id}`;
-  const lastUsedAt = lastBosyuTimestamps.get(rateLimitKey) ?? 0;
   const now = Date.now();
+  const cooldown = await consumeBosyuCooldown({
+    guildId: interaction.guildId,
+    userId: interaction.user.id,
+    now: new Date(now),
+    durationMs: BOSYU_COOLDOWN_MS,
+  });
 
-  if (now - lastUsedAt < BOSYU_COOLDOWN_MS) {
-    const remainingMs = BOSYU_COOLDOWN_MS - (now - lastUsedAt);
+  if (!cooldown.allowed) {
+    const remainingMs = Math.max(0, new Date(cooldown.availableAt).getTime() - now);
     const remainingMinutes = Math.floor(remainingMs / 60000);
     const remainingSeconds = Math.floor((remainingMs % 60000) / 1000);
 
@@ -6271,6 +6722,17 @@ async function handleBosyu(interaction) {
     anonymous,
     voiceChannelId: currentVoiceChannel?.isVoiceBased() ? currentVoiceChannel.id : null,
   });
+  await saveBosyuEditSession({
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    messageId: message.id,
+    ownerId: interaction.user.id,
+    expiresAt: new Date(expiresAt),
+    bosyuMentionRoleId,
+    anonymous,
+    voiceChannelId: currentVoiceChannel?.isVoiceBased() ? currentVoiceChannel.id : null,
+  });
+  scheduleBosyuEditExpiry(message.id, interaction.channelId, expiresAt);
 
   setTimeout(async () => {
     bosyuEditSessions.delete(message.id);
@@ -6302,7 +6764,7 @@ async function handleBosyuButton(interaction) {
     return;
   }
 
-  const session = bosyuEditSessions.get(interaction.message.id);
+  const session = bosyuEditSessions.get(interaction.message.id) ?? await getBosyuEditSession(interaction.message.id);
 
   if (!session || Date.now() > session.expiresAt) {
     await replyOrFollowUp(interaction, {
@@ -6341,7 +6803,7 @@ async function handleBosyuEditModal(interaction) {
   }
 
   const messageId = interaction.customId.slice("bosyu_edit_modal:".length);
-  const session = bosyuEditSessions.get(messageId);
+  const session = bosyuEditSessions.get(messageId) ?? await getBosyuEditSession(messageId);
 
   if (!session || Date.now() > session.expiresAt) {
     await replyOrFollowUp(interaction, {
@@ -7045,7 +7507,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         `終了通知まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
     });
 
+    const finishActionKey = `split-finish-notice:${options.sessionId}`;
+    const roleActionKey = `split-role-remove:${options.sessionId}`;
     if (notificationCanceled) {
+      const skippedFinish = await claimAction(finishActionKey);
+      if (skippedFinish) await finishAction(finishActionKey, "completed", "Notification canceled");
       const cancelText =
         notificationCanceled === "auto"
           ? "PBの子VCがすべて削除されたため、終了通知を自動キャンセルしました。参加者ロールを解除します。"
@@ -7090,6 +7556,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           });
         }
       }
+      const canceledRoleClaim = await claimAction(roleActionKey);
       const cleanupMemberIds = await collectRoleCleanupMemberIds(
         options.guild,
         options.roleId,
@@ -7099,6 +7566,14 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         options.roleId,
         cleanupMemberIds,
       );
+      if (cleanupResult.failed > 0) {
+        if (canceledRoleClaim) {
+          await failAction(roleActionKey, `Failed to remove role from ${cleanupResult.failed} member(s)`).catch(() => {});
+        }
+        throw new Error(`Failed to remove role from ${cleanupResult.failed} member(s)`);
+      }
+      if (canceledRoleClaim) await finishAction(roleActionKey);
+      await persistSplitProcessSession(options.sessionId, { roleRemovalCompleted: true, waitingVcCleanupCompleted: true });
 
       await sendOperationalLog({
         guild: options.guild,
@@ -7108,15 +7583,26 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       });
       await sendSplitClosingThanks(options.guild, options.settings);
       options.state.ended = true;
+      await persistSplitProcessSession(options.sessionId, {
+        status: "completed",
+        phase: "completed",
+        completedAt: new Date(),
+      });
       return;
     }
 
+    const finishClaim = await claimAction(finishActionKey);
+    if (!finishClaim) return;
     await options.channel.send({
       content: `<@&${options.roleId}> ${options.finishMessage}`,
       allowedMentions: { roles: [options.roleId] },
     });
+    await finishAction(finishActionKey);
 
     await sleep(options.roleRemoveWaitMs);
+
+    const roleClaim = await claimAction(roleActionKey);
+    if (!roleClaim) return;
 
     const cleanupMemberIds = await collectRoleCleanupMemberIds(
       options.guild,
@@ -7127,6 +7613,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       options.roleId,
       cleanupMemberIds,
     );
+    if (cleanupResult.failed > 0) {
+      await failAction(roleActionKey, `Failed to remove role from ${cleanupResult.failed} member(s)`).catch(() => {});
+      throw new Error(`Failed to remove role from ${cleanupResult.failed} member(s)`);
+    }
+    await finishAction(roleActionKey);
+    await persistSplitProcessSession(options.sessionId, { roleRemovalCompleted: true, waitingVcCleanupCompleted: !options.temporaryWaitingVc });
 
     await sendOperationalLog({
       guild: options.guild,
@@ -7136,6 +7628,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     });
     await sendSplitClosingThanks(options.guild, options.settings);
     options.state.ended = true;
+    await persistSplitProcessSession(options.sessionId, {
+      status: "completed",
+      phase: "completed",
+      completedAt: new Date(),
+    });
   }
 
   async function removeRoleFromMembers(guild, roleId, memberIds) {

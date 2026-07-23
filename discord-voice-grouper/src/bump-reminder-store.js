@@ -1,47 +1,56 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import mongoose from "mongoose";
+import { BumpReminder } from "./models/bump-reminder.js";
+import { MigrationState } from "./models/migration-state.js";
 
 const remindersPath = resolve(process.cwd(), "data", "bump-reminders.json");
-
 let cache;
 
 export async function getBumpReminders() {
-  return Object.values(await readReminders());
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error("MongoDB is unavailable; bump reminders cannot be read.");
+  }
+  const migration = await MigrationState.findOne({ key: "bump-reminders-v1" }).lean();
+  if (!migration) {
+    const legacy = await readReminders();
+    await Promise.all(Object.values(legacy).map((reminder) => saveBumpReminder(reminder)));
+    await MigrationState.updateOne(
+      { key: "bump-reminders-v1" },
+      { $setOnInsert: { key: "bump-reminders-v1", completedAt: new Date() } },
+      { upsert: true, setDefaultsOnInsert: true },
+    );
+  }
+  const documents = await BumpReminder.find({}).lean();
+  return documents.map(toReminder);
 }
 
 export async function saveBumpReminder(reminder) {
-  const reminders = await readReminders();
-  reminders[reminder.id] = reminder;
-  await writeReminders(reminders);
+  if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is unavailable; bump reminders cannot be saved.");
+  await BumpReminder.findOneAndUpdate(
+    { reminderId: reminder.id },
+    { $set: { ...reminder, reminderId: reminder.id } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
 }
 
 export async function deleteBumpReminder(reminderId) {
-  const reminders = await readReminders();
-  delete reminders[reminderId];
-  await writeReminders(reminders);
+  if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is unavailable; bump reminders cannot be deleted.");
+  await BumpReminder.deleteOne({ reminderId });
+}
+
+function toReminder(document) {
+  const { _id, __v, reminderId, createdAt, updatedAt, ...reminder } = document;
+  return { ...reminder, id: reminder.id ?? reminderId };
 }
 
 async function readReminders() {
-  if (cache) {
-    return cache;
-  }
-
+  if (cache) return cache;
   try {
-    const raw = await readFile(remindersPath, "utf8");
-    cache = JSON.parse(raw);
+    cache = JSON.parse(await readFile(remindersPath, "utf8"));
   } catch (error) {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-
+    if (error.code !== "ENOENT") throw error;
     cache = {};
   }
-
   return cache;
-}
-
-async function writeReminders(reminders) {
-  await mkdir(dirname(remindersPath), { recursive: true });
-  await writeFile(remindersPath, `${JSON.stringify(reminders, null, 2)}\n`);
-  cache = reminders;
 }
