@@ -54,6 +54,7 @@ import {
   publishProfile,
   refreshPublishedProfile,
 } from "./profile-publication-service.js";
+import { createVoiceChannelControlService } from "./voice-channel-control-service.js";
 
 const {
   DISCORD_TOKEN,
@@ -189,6 +190,7 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
+const voiceChannelControlService = createVoiceChannelControlService({ getGuildSettings, sendOperationalLog, setVoiceChannelStatus });
 
 let discordReadyWatchdog = null;
 
@@ -228,6 +230,7 @@ client.once(Events.ClientReady, (readyClient) => {
   void restoreVoiceMonitorSessions().catch((error) => {
     console.error("Voice monitor startup restore failed:", error);
   });
+  void voiceChannelControlService.restore(client).catch((error) => console.error("VC control restore failed:", error));
   if (shouldSendMongoSuccessLog) {
     shouldSendMongoSuccessLog = false;
     void (async () => {
@@ -299,9 +302,25 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   }
 });
 
+client.on(Events.ChannelCreate, async (channel) => {
+  if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.ensurePanel(channel).catch((error) => console.error("VC control panel create failed:", error));
+});
+client.on(Events.ChannelDelete, async (channel) => {
+  if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.cleanup(channel).catch(() => {});
+});
+client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
+  if (newChannel.type !== ChannelType.GuildVoice) return;
+  const settings = await getGuildSettings(newChannel.guild.id).catch(() => null);
+  const wasTarget = oldChannel.parentId === settings?.vcControlCategoryId;
+  const isTarget = newChannel.parentId === settings?.vcControlCategoryId;
+  if (isTarget && !wasTarget) await voiceChannelControlService.ensurePanel(newChannel).catch(() => {});
+  if (!isTarget && wasTarget) await voiceChannelControlService.cleanup(newChannel).catch(() => {});
+});
+
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith("vc_control:")) { await voiceChannelControlService.handle(interaction); return; }
       if (interaction.customId === "bosyu_edit") {
         await handleBosyuButton(interaction);
         return;
@@ -362,6 +381,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith("vc_control:")) { await voiceChannelControlService.handle(interaction); return; }
       if (interaction.customId.startsWith(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:`)) {
         await handleOteboDraftSelect(interaction);
         return;
@@ -371,6 +391,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith("vc_control:")) { await voiceChannelControlService.handle(interaction); return; }
       if (interaction.customId === "profile_modal") {
         await handleProfileModal(interaction);
         return;
@@ -684,6 +705,24 @@ async function handleSetting(interaction) {
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
+    return;
+  }
+
+  if (subcommand === "vc_control") {
+    const category = interaction.options.getChannel("category", false);
+    const notifyRole = interaction.options.getRole("notify_role", false);
+    if (!category && !notifyRole) {
+      await replyOrFollowUp(interaction, { content: "category または notify_role を指定してください。", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const settings = await saveGuildSettingsWithCurrent(interaction.guildId, await getGuildSettings(interaction.guildId), {
+      ...(category ? { vcControlCategoryId: category.id } : {}),
+      ...(notifyRole ? { vcControlNotifyRoleId: notifyRole.id } : {}),
+    });
+    await replyOrFollowUp(interaction, { content: `VCコントロール設定を保存しました。\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+    if (category) {
+      for (const channel of interaction.guild.channels.cache.values()) if (channel.type === ChannelType.GuildVoice && channel.parentId === category.id) await voiceChannelControlService.ensurePanel(channel).catch(() => {});
+    }
     return;
   }
 
@@ -7430,10 +7469,10 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     return { failed };
   }
 
-  async function addRoleForTransfer(member, role, participantMemberIds) {
-    if (member.roles.cache.has(role.id)) {
-      participantMemberIds.add(member.id);
-      return null;
+    async function addRoleForTransfer(member, role, participantMemberIds) {
+      if (member.roles.cache.has(role.id)) {
+        participantMemberIds.add(member.id);
+        return null;
     }
 
     try {
@@ -8260,7 +8299,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   function formatSettings(settings) {
     const text = formatLegacySettings(settings);
     if (!settings) return text;
-    return `${text}\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}`;
+    return `${text}\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}\nVCコントロール対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\nVCタイマー通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}`;
   }
 
   function formatResult(channel, total, groups) {
