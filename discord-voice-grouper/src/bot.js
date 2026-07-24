@@ -56,6 +56,14 @@ import {
   refreshPublishedProfile,
 } from "./profile-publication-service.js";
 import { createVoiceChannelControlService } from "./voice-channel-control-service.js";
+import {
+  countUniqueParticipantIds,
+  editEveryoneConnectPermission,
+  formatSplitClosingThanks,
+  getJstScheduledTime,
+  isKokuchiCallWaitPause,
+  resolveKokuchiGatheringVoiceChannelId,
+} from "./kokuchi-utils.js";
 
 const {
   DISCORD_TOKEN,
@@ -1241,7 +1249,7 @@ async function sendSplitStartAnnouncement({ guild, settings, waitingChannel }) {
   }).catch(() => null);
 }
 
-async function sendSplitClosingThanks(guild, settings) {
+async function sendSplitClosingThanks(guild, settings, participantMemberIds = []) {
   const channelId = getKokuchiAnnouncementChannelId(settings);
 
   if (!channelId) {
@@ -1258,7 +1266,7 @@ async function sendSplitClosingThanks(guild, settings) {
   }
 
   return sendChannel.send({
-    content: formatSplitClosingThanks(settings),
+    content: formatSplitClosingThanksMessage(settings, participantMemberIds),
     allowedMentions: { parse: [] },
   }).catch((error) => {
     console.error(`Failed to send split closing thanks: ${error.message}`);
@@ -1266,16 +1274,16 @@ async function sendSplitClosingThanks(guild, settings) {
   });
 }
 
-function formatSplitClosingThanks(settings) {
+function formatSplitClosingThanksMessage(settings, participantMemberIds) {
   const feedbackChannelId =
     settings?.splitFeedbackChannelId ?? DEFAULT_SPLIT_FEEDBACK_CHANNEL_ID;
   const nextWeekday = settings?.lastKokuchiWeekday === "火" ? "土曜日" : "火曜日";
 
-  return [
-    "本日はご参加いただきありがとうございました！！",
-    `今回やってみての意見や苦情等があれば <#${feedbackChannelId}> からお願いします！`,
-    `次回(${nextWeekday})も時間の都合が合えばぜひご参加ください！`,
-  ].join("\n");
+  return formatSplitClosingThanks({
+    feedbackChannelId,
+    nextWeekday,
+    participantCount: countUniqueParticipantIds(participantMemberIds),
+  });
 }
 
 function getKokuchiAnnouncementChannelId(settings) {
@@ -1383,7 +1391,7 @@ async function handleKokuchi(interaction) {
   const weekday = interaction.options.getString("weekday", true);
   const overviewChannel = interaction.options.getChannel("overview_channel", false);
   const targetChannel = interaction.options.getChannel("channel", false);
-  const sendTopic = interaction.options.getBoolean("send_topic", false) ?? true;
+  const sendTopic = interaction.options.getBoolean("send_topic", false) ?? false;
   const settings = await getGuildSettings(interaction.guildId);
   const sendChannel =
     targetChannel && typeof targetChannel.send === "function"
@@ -1455,6 +1463,10 @@ async function handleKokuchi(interaction) {
     kokuchiPreNoticeChannelId: sendChannel.id,
     kokuchiPreNoticeState: "pending",
     gatheringVcUnlockAt: gatheringVcUnlockAt.toISOString(),
+    gatheringVcUnlockChannelId: resolveKokuchiGatheringVoiceChannelId(
+      settings,
+      nextSettings,
+    ),
     gatheringVcUnlockState: "pending",
     kokuchiGatheringReminderAt: kokuchiGatheringReminderAt.toISOString(),
     kokuchiGatheringReminderChannelId: sendChannel.id,
@@ -1589,7 +1601,7 @@ async function sendKokuchiPreNotice(guildId) {
 async function scheduleGatheringVcUnlock(guild, settings) {
   clearGatheringVcUnlockTimer(guild.id);
 
-  if (!settings?.gatheringVoiceChannelId) {
+  if (!getGatheringVcUnlockChannelId(settings)) {
     return;
   }
 
@@ -1764,7 +1776,7 @@ async function applyGatheringVcUnlock(guildId) {
   const settings = await getGuildSettings(guild.id);
 
   if (
-    !settings?.gatheringVoiceChannelId ||
+    !getGatheringVcUnlockChannelId(settings) ||
     settings.gatheringVcUnlockState !== "pending"
   ) {
     return;
@@ -1809,32 +1821,42 @@ async function setGatheringVcConnectPermission({
   canConnect,
   reason,
 }) {
-  if (!settings?.gatheringVoiceChannelId) {
+  const channelId = getGatheringVcUnlockChannelId(settings);
+
+  if (!channelId) {
     return false;
   }
 
   const channel = await guild.channels
-    .fetch(settings.gatheringVoiceChannelId)
+    .fetch(channelId)
     .catch(() => null);
 
   if (!channel?.isVoiceBased() || typeof channel.permissionOverwrites?.edit !== "function") {
     return false;
   }
 
-  const updatedChannel = await channel.permissionOverwrites
-    .edit(
-      guild.roles.everyone,
-      { Connect: canConnect },
-      { reason },
-    )
+  const changed = await editEveryoneConnectPermission({
+    channel,
+    guildId: guild.id,
+    canConnect,
+    reason,
+  })
     .catch((error) => {
       console.error(
         `Failed to ${canConnect ? "open" : "close"} gathering VC ${channel.id}: ${error.message}`,
       );
-      return null;
+      return false;
     });
 
-  return Boolean(updatedChannel);
+  return changed;
+}
+
+function getGatheringVcUnlockChannelId(settings) {
+  return (
+    settings?.gatheringVcUnlockChannelId ??
+    settings?.gatheringVoiceChannelId ??
+    null
+  );
 }
 
 function getKokuchiPreNoticeAt(date) {
@@ -1851,16 +1873,11 @@ function getKokuchiPreNoticeAt(date) {
 }
 
 function getGatheringVcUnlockAt(date) {
-  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
-  return new Date(Date.UTC(
-    jstDate.getUTCFullYear(),
-    jstDate.getUTCMonth(),
-    jstDate.getUTCDate(),
-    GATHERING_VC_OPEN_HOUR_JST - 9,
+  return getJstScheduledTime(
+    date,
+    GATHERING_VC_OPEN_HOUR_JST,
     GATHERING_VC_OPEN_MINUTE_JST,
-    0,
-    0,
-  ));
+  );
 }
 
 function getKokuchiGatheringReminderAt(date) {
@@ -2690,6 +2707,11 @@ async function processCallWaitForGuild(guild, settings) {
     return;
   }
 
+  // /kokuchi 当日は、21時・22時向けの定時募集を出さない。
+  if (isKokuchiCallWaitPause(settings, now)) {
+    return;
+  }
+
   if (activeVoiceMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
     if (settings.callWaitPrompt) {
       await deleteCallWaitPrompt(guild, settings.callWaitPrompt);
@@ -3331,14 +3353,37 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
   const claimed = await claimAction(actionKey);
   if (!claimed) return;
   try {
-    await removeCallWaitRoleFromMembers(guild, roleId, memberIds);
-    await finishAction(actionKey);
+    const session = payload?.sessionId
+      ? await SplitProcessSession.findOne({ sessionId: payload.sessionId }).lean()
+      : null;
+    const targetMemberIds = session?.participantMemberIds ?? memberIds;
+
+    await removeCallWaitRoleFromMembers(guild, roleId, targetMemberIds);
+
     if (payload?.sessionId) {
+      const settings = await getGuildSettings(guild.id);
+
+      if (session) {
+        await sendSplitClosingThanks(
+          guild,
+          settings,
+          session.participantMemberIds,
+        );
+      }
+
       await SplitProcessSession.updateOne(
         { sessionId: payload.sessionId },
-        { $set: { roleRemovalCompleted: true, phase: "cleaning_up" } },
+        {
+          $set: {
+            roleRemovalCompleted: true,
+            phase: "completed",
+            status: "completed",
+            completedAt: new Date(),
+          },
+        },
       );
     }
+    await finishAction(actionKey);
   } catch (error) {
     await failAction(actionKey, error.message).catch(() => {});
     throw error;
@@ -3561,6 +3606,11 @@ async function runCallWaitFollowupCheck(guildId) {
   }
 
   if (await maybeSendPendingCallWaitStartNotice(guild, settings)) {
+    return;
+  }
+
+  // 希望者確認の30分後に行う再確認からも、停止時間中は募集を作らない。
+  if (isKokuchiCallWaitPause(settings, new Date())) {
     return;
   }
 
@@ -8074,7 +8124,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         fallbackChannel: options.channel,
         content: `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
       });
-      await sendSplitClosingThanks(options.guild, options.settings);
+      await sendSplitClosingThanks(
+        options.guild,
+        options.settings,
+        options.participantMemberIds,
+      );
       options.state.ended = true;
       await persistSplitProcessSession(options.sessionId, {
         status: "completed",
@@ -8119,7 +8173,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       fallbackChannel: options.channel,
       content: `参加者ロールを解除しました。解除成功: ${cleanupResult.removed}人、解除失敗: ${cleanupResult.failed}人。`,
     });
-    await sendSplitClosingThanks(options.guild, options.settings);
+    await sendSplitClosingThanks(
+      options.guild,
+      options.settings,
+      options.participantMemberIds,
+    );
     options.state.ended = true;
     await persistSplitProcessSession(options.sessionId, {
       status: "completed",
@@ -8142,6 +8200,10 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         channelId,
         memberIds,
       });
+      await persistSplitParticipantMemberIds(
+        options.sessionId,
+        options.participantMemberIds,
+      );
     } catch (error) {
       await sendSplitGroupingLog({
         guild: options.guild,
@@ -8371,6 +8433,17 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     const text = formatLegacySettings(settings);
     if (!settings) return text;
     return `${text}\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}\nVCコントロール対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\nVCタイマー通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}`;
+  }
+
+  async function persistSplitParticipantMemberIds(sessionId, participantMemberIds) {
+    if (!sessionId || participantMemberIds.size === 0) {
+      return;
+    }
+
+    await SplitProcessSession.updateOne(
+      { sessionId },
+      { $addToSet: { participantMemberIds: { $each: [...participantMemberIds] } } },
+    );
   }
 
   function formatResult(channel, total, groups) {

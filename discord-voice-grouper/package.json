@@ -10,7 +10,8 @@
   "scripts": {
     "register": "node src/register-commands.js",
     "start": "node src/bot.js",
-    "dev": "node --watch src/bot.js"
+    "dev": "node --watch src/bot.js",
+    "test": "node --test"
   },
   "dependencies": {
     "discord.js": "^14.22.1",

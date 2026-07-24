@@ -10,6 +10,7 @@ export async function getGuildSettings(guildId) {
   if (mongoose.connection.readyState !== 1) {
     throw new Error("MongoDB is unavailable; guild settings cannot be read.");
   }
+  const environmentSettings = getEnvironmentSettings(guildId);
   let document = await GuildSettings.findOne({ guildId }).lean();
   if (!document) {
     const legacy = (await readLegacySettings())[guildId];
@@ -20,11 +21,28 @@ export async function getGuildSettings(guildId) {
         { upsert: true, new: true, setDefaultsOnInsert: true, lean: true },
       );
     } else {
-      return getEnvironmentSettings(guildId);
+      return environmentSettings;
     }
   }
   const { _id, __v, guildId: ignoredGuildId, createdAt, updatedAt, ...settings } = document;
-  return { ...settings, guildId, createdAt, updatedAt };
+  // A /kokuchi run persists only its schedule fields. Preserve configured
+  // environment defaults after that first MongoDB document is created.
+  return mergeGuildSettingsWithEnvironmentDefaults(environmentSettings, {
+    ...settings,
+    guildId,
+    createdAt,
+    updatedAt,
+  });
+}
+
+export function mergeGuildSettingsWithEnvironmentDefaults(
+  environmentSettings,
+  storedSettings,
+) {
+  return {
+    ...environmentSettings,
+    ...storedSettings,
+  };
 }
 
 /** Atomically updates only the supplied fields. `undefined` is ignored. */
