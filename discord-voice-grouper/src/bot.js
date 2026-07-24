@@ -46,6 +46,7 @@ import {
 } from "./split-grouping-state-store.js";
 import mongoose from "mongoose";
 import { UserProfile } from "./models/user-profile.js";
+import { VoiceParticipantRoleGrant } from "./models/voice-participant-role-grant.js";
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
 import {
   canSendPublicProfile,
@@ -6047,11 +6048,38 @@ async function restoreVoiceMonitorSessions() {
           console.error(`Voice monitor restore failed guild=${guild.id} channel=${channel.id}: ${error.message}`);
         }
       }
+      await reconcilePersistedVoiceParticipantRoleGrants(guild, settings);
     } catch (error) {
       console.error(`Voice monitor guild restore failed guild=${guild.id}: ${error.message}`);
     }
   }
   console.log(`Startup voice monitor sessions rebuilt: ${rebuilt}`);
+}
+
+async function reconcilePersistedVoiceParticipantRoleGrants(guild, settings) {
+  const grants = await VoiceParticipantRoleGrant.find({ guildId: guild.id }).lean();
+
+  for (const grant of grants) {
+    const member = await guild.members.fetch(grant.memberId).catch(() => null);
+
+    if (!member || !member.roles.cache.has(grant.roleId)) {
+      await VoiceParticipantRoleGrant.deleteOne({ _id: grant._id });
+      continue;
+    }
+
+    const hasActiveVoiceMonitorSession = await isMemberInActiveVoiceMonitorContext(
+      guild,
+      settings,
+      grant.memberId,
+    );
+    const shouldKeepGrant =
+      grant.roleId === settings?.voiceParticipantRoleId &&
+      hasActiveVoiceMonitorSession;
+
+    if (!shouldKeepGrant) {
+      await removeVoiceParticipantRole(member, grant.roleId);
+    }
+  }
 }
 
 async function sendVoiceMonitorStartNotice(voiceChannel, settings) {
@@ -6148,8 +6176,20 @@ async function ensureSessionMembersHaveRole(session, voiceChannel, members) {
     if (!member.roles.cache.has(role.id)) {
       try {
         await member.roles.add(role, "VC参加者ロールを付与");
-      } catch {
-        // ignore individual failures
+        try {
+          await VoiceParticipantRoleGrant.updateOne(
+            { guildId: voiceChannel.guild.id, memberId: member.id, roleId: role.id },
+            { $setOnInsert: { guildId: voiceChannel.guild.id, memberId: member.id, roleId: role.id } },
+            { upsert: true },
+          );
+        } catch (error) {
+          // A grant without a durable ownership record cannot be reconciled
+          // after a restart, so roll it back instead of leaving it untracked.
+          await member.roles.remove(role, "VC参加者ロール記録の保存失敗に伴うロール解除").catch(() => {});
+          console.error(`Failed to persist voice participant role grant for ${member.id}: ${error.message}`);
+        }
+      } catch (error) {
+        console.error(`Failed to add voice participant role to ${member.id}: ${error.message}`);
       }
     }
   }
@@ -6486,15 +6526,46 @@ async function handleTopicFormModal(interaction) {
 }
 
 async function removeVoiceParticipantRole(member, roleId) {
+  const grant = await VoiceParticipantRoleGrant.exists({
+    guildId: member.guild.id,
+    memberId: member.id,
+    roleId,
+  }).catch((error) => {
+    console.error(`Failed to look up voice participant role grant for ${member.id}: ${error.message}`);
+    return null;
+  });
+
+  // Only revoke a role that this bot recorded as its own grant.  The same
+  // role may also be assigned manually or by another feature.
+  if (!grant) {
+    return;
+  }
+
   if (!member.roles.cache.has(roleId)) {
+    await VoiceParticipantRoleGrant.deleteOne({
+      guildId: member.guild.id,
+      memberId: member.id,
+      roleId,
+    }).catch((error) => {
+      console.error(`Failed to clear voice participant role grant for ${member.id}: ${error.message}`);
+    });
     return;
   }
 
   try {
     await member.roles.remove(roleId, "VC離脱に伴う参加者ロール解除");
-  } catch {
-    // ignore removal failures
+  } catch (error) {
+    console.error(`Failed to remove voice participant role from ${member.id}: ${error.message}`);
+    return;
   }
+
+  await VoiceParticipantRoleGrant.deleteOne({
+    guildId: member.guild.id,
+    memberId: member.id,
+    roleId,
+  }).catch((error) => {
+    console.error(`Failed to clear voice participant role grant for ${member.id}: ${error.message}`);
+  });
 }
 
 function scheduleBumpReminder(reminder) {
