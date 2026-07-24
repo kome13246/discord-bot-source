@@ -51,6 +51,9 @@ async function removeActive({ guild, settings, record, sendOperationalLog, membe
   if (!record) return;
   try {
     const channel = await guild.channels.fetch(record.channelId).catch(async (error) => {
+      if (error?.code === 10003 || error?.code === "10003") {
+        return null;
+      }
       await logError({ guild, settings, sendOperationalLog, processName: "profile channel fetch failed", voiceChannel, member, error });
       return null;
     });
