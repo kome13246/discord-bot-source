@@ -707,7 +707,7 @@ npm start</code></pre></div>
                   <tr><td><code>PB_WAITING_VC_NAME</code></td><td>自動作成する待機VC名です。</td></tr>
                   <tr><td><code>PB_POST_SPLIT_WADAI_CHANNEL_ID</code></td><td>/splitvc後の話題・発話順送信先です。</td></tr>
                   <tr><td><code>PB_SPLIT_START_CHANNEL_ID</code></td><td>旧互換用です。現在は告知・スタート案内送信先として <code>PB_WADAI_CHANNEL_ID</code> と統一して扱います。</td></tr>
-                  <tr><td><code>PB_GATHERING_VOICE_CHANNEL_ID</code></td><td>/kokuchi当日20:40に開放する集合VCです。</td></tr>
+                  <tr><td><code>PB_GATHERING_VOICE_CHANNEL_ID</code></td><td>/kokuchi当日20:40（JST）に開放する集合VCです。環境変数で設定した場合も、スケジュール保存後と再起動後に使用されます。</td></tr>
                   <tr><td><code>PB_SPLIT_FEEDBACK_CHANNEL_ID</code></td><td>終了後のお礼メッセージで案内する意見・苦情チャンネルです。</td></tr>
                 </tbody>
               </table>
@@ -842,7 +842,7 @@ npm start</code></pre></div>
 
         <section id="kokuchi" data-search-section>
           <h2>話題・告知</h2>
-          <p><code>/kokuchi</code> は会話練習会の告知を送信し、話題リストから最初の話題をランダムに選びます。全話題が一巡するまでは重複しません。</p>
+          <p><code>/kokuchi</code> は会話練習会の告知を送信します。<code>send_topic</code> の既定値は <code>false</code> で、<code>send_topic:true</code> を指定した回だけ話題リストから最初の話題をランダムに選びます。全話題が一巡するまでは重複しません。</p>
           <div class="codeblock"><button class="copy">コピー</button><pre><code>/kokuchi weekday:火曜日 overview_channel:#概要 channel:#告知 send_topic:true</code></pre></div>
           <h3>話題管理</h3>
           <ul>
@@ -851,7 +851,7 @@ npm start</code></pre></div>
             <li><code>/delwadai target:2</code> で削除します。</li>
           </ul>
           <div class="notice">
-            <p><code>/kokuchi</code> で選ばれた話題は、次の <code>/splitvc</code> 後の最初の話題にも使われます。<code>send_topic:false</code> を選んだ場合は、その回の告知にも次回 <code>/splitvc</code> 後にも最初の話題を送りません。20:30には「30分前です！ぜひご参加ください！」を告知送信先へ送り、20:40には集合VCのeveryone接続権限を許可します。</p>
+            <p><code>/kokuchi</code> で選ばれた話題は、次の <code>/splitvc</code> 後の最初の話題にも使われます。<code>send_topic:false</code> を選んだ場合は、その回の告知にも次回 <code>/splitvc</code> 後にも最初の話題を送りません。終了時には途中参加者を含むユニークな参加人数をお礼メッセージへ表示します。20:30には「30分前です！ぜひご参加ください！」を告知送信先へ送り、20:40には集合VCのeveryone接続権限を許可します。</p>
           </div>
         </section>
 
@@ -895,7 +895,7 @@ npm start</code></pre></div>
 
         <section id="callwait" data-search-section>
           <h2>通話待機システム</h2>
-          <p>毎時ちょうどに、1時間後の雑談希望者を募集します。リアクション式またはボタン式を選べます。</p>
+          <p>毎時ちょうどに、1時間後の雑談希望者を募集します。リアクション式またはボタン式を選べます。<code>/kokuchi</code> 実行日のJST 20:00〜21:59は、定時募集と希望者確認30分後の再確認による新規募集を停止します。</p>
           <div class="codeblock"><button class="copy">コピー</button><pre><code>/setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:#募集 call_wait_notice_channel:#集合通知 otebo_preview_channel:#事前掲載 call_wait_voice_category:雑談VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true
 /sendcallwait</code></pre></div>
           <details open>
