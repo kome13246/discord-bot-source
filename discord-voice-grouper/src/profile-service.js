@@ -66,7 +66,11 @@ async function removeActive({ guild, settings, record, sendOperationalLog, membe
       });
       if (message) await message.delete();
     }
-  } catch (error) { await logError({ guild, settings, sendOperationalLog, processName: "profile delete failed", voiceChannel, member, error }); }
+  } catch (error) {
+    if (error?.code !== 10003 && error?.code !== "10003") {
+      await logError({ guild, settings, sendOperationalLog, processName: "profile delete failed", voiceChannel, member, error });
+    }
+  }
   await ActiveProfile.deleteOne({ _id: record._id }).catch(async (error) => logError({ guild, settings, sendOperationalLog, processName: "profile metadata delete failed", voiceChannel, member, error }));
 }
 
