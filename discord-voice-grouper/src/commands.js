@@ -303,6 +303,13 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName("vc_control")
+      .setDescription("VCコントロールパネルを設定します")
+      .addChannelOption((option) => option.setName("category").setDescription("対象カテゴリ").addChannelTypes(ChannelType.GuildCategory).setRequired(false))
+      .addRoleOption((option) => option.setName("notify_role").setDescription("タイマー終了通知ロール").setRequired(false)),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName("profile")
       .setDescription("自己紹介チャンネルを設定します")
       .addChannelOption((option) =>
