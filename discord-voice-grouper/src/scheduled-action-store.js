@@ -6,7 +6,7 @@ export async function scheduleAction(action) {
   return ScheduledAction.findOneAndUpdate(
     { actionKey: action.actionKey },
     { $setOnInsert: { ...action, status: "pending", attempts: 0 } },
-    { upsert: true, new: true, setDefaultsOnInsert: true, lean: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, lean: true },
   );
 }
 
@@ -15,7 +15,7 @@ export async function reschedulePendingAction(actionKey, executeAt) {
   return ScheduledAction.findOneAndUpdate(
     { actionKey, status: "pending" },
     { $set: { executeAt } },
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 }
 
@@ -23,7 +23,7 @@ export async function claimAction(actionKey) {
   return ScheduledAction.findOneAndUpdate(
     { actionKey, status: "pending" },
     { $set: { status: "running", startedAt: new Date() }, $inc: { attempts: 1 } },
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 }
 
@@ -34,7 +34,7 @@ export async function finishAction(actionKey, status = "completed", lastError) {
   return ScheduledAction.findOneAndUpdate(
     { actionKey, status: "running" },
     { $set: fields },
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 }
 
@@ -42,7 +42,7 @@ export async function failAction(actionKey, lastError) {
   return ScheduledAction.findOneAndUpdate(
     { actionKey, status: { $in: ["pending", "running"] } },
     { $set: { status: "failed", lastError } },
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 }
 

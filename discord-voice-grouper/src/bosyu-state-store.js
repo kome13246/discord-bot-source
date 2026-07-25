@@ -10,7 +10,7 @@ export async function consumeBosyuCooldown({ guildId, userId, now = new Date(), 
     const renewed = await BosyuCooldown.findOneAndUpdate(
       { ...key, availableAt: { $lte: now } },
       { $set: { availableAt } },
-      { new: true, lean: true },
+      { returnDocument: "after", lean: true },
     );
     if (renewed) return { allowed: true, availableAt };
 
@@ -33,7 +33,7 @@ export async function saveBosyuEditSession(session) {
   return BosyuEditSession.findOneAndUpdate(
     { messageId: session.messageId },
     { $set: session },
-    { upsert: true, new: true, setDefaultsOnInsert: true, lean: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, lean: true },
   );
 }
 

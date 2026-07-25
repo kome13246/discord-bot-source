@@ -40,7 +40,7 @@ export async function startSplitGrouping({ guildId, sessionId, groups }) {
         },
       },
     ],
-    { upsert: true, new: true, lean: true },
+    { upsert: true, returnDocument: "after", lean: true },
   );
 }
 
@@ -130,7 +130,7 @@ export async function addMembersToCurrentGroup({ guildId, sessionId, channelId, 
         },
       },
     ],
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 
   if (!state) {
