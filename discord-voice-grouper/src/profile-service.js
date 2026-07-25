@@ -87,6 +87,7 @@ export async function handleProfileVoiceState(oldState, newState, { client, send
     const oldRecord = await ActiveProfile.findOne({ guildId: guild.id, userId: member.id }).catch(async (error) => { await logError({ guild, settings, sendOperationalLog, processName: "profile metadata fetch failed", voiceChannel: oldState.channel, member, error }); return null; });
     if (oldRecord) await removeActive({ guild, settings, record: oldRecord, sendOperationalLog, member, voiceChannel: oldState.channel });
     if (!newState.channelId || newState.channel?.type === ChannelType.GuildStageVoice) return;
+    if (isProfileExcludedVoiceChannel(newState.channel, settings)) return;
     const profile = await UserProfile.findOne({ guildId: guild.id, userId: member.id }).catch(async (error) => { await logError({ guild, settings, sendOperationalLog, processName: "profile fetch failed", voiceChannel: newState.channel, member, error }); return null; });
     if (!profile) return;
     await sendProfileToVoice(newState.channel, member, profile, { guild, settings, sendOperationalLog });
@@ -140,6 +141,7 @@ export async function restoreProfiles(client, { sendOperationalLog, getGuildSett
     });
     for (const channel of guild.channels.cache.values()) {
       if (!channel.isVoiceBased?.() || channel.type === ChannelType.GuildStageVoice) continue;
+      if (isProfileExcludedVoiceChannel(channel, settings)) continue;
       for (const member of channel.members.values()) {
         if (member.user.bot) continue;
         const profile = await UserProfile.findOne({ guildId: guild.id, userId: member.id }).catch(async (error) => {
@@ -161,10 +163,19 @@ export async function refreshProfileInVoice(member, context) {
       return null;
     });
     if (record) await removeActive({ ...context, record, member, voiceChannel: channel });
+    if (isProfileExcludedVoiceChannel(channel, context.settings)) return;
     const profile = await UserProfile.findOne({ guildId: member.guild.id, userId: member.id }).catch(async (error) => {
       await logError({ ...context, processName: "profile refresh fetch failed", voiceChannel: channel, member, error });
       return null;
     });
     if (profile) await sendProfileToVoice(channel, member, profile, context);
   });
+}
+
+function isProfileExcludedVoiceChannel(channel, settings) {
+  if (!channel?.id) return false;
+  return [
+    settings?.gatheringVoiceChannelId,
+    settings?.gatheringVcUnlockChannelId,
+  ].includes(channel.id);
 }
