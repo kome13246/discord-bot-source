@@ -7610,6 +7610,50 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     }
   }
 
+  async function moveMemberWithParticipantRole(
+    member,
+    targetChannel,
+    reason,
+    participantRole,
+    participantMemberIds,
+  ) {
+    const alreadyHasRole = member.roles.cache.has(participantRole.id);
+    let roleFailure = null;
+
+    if (!alreadyHasRole) {
+      try {
+        await member.roles.add(
+          participantRole,
+          "Participant role for voice grouping session",
+        );
+      } catch {
+        roleFailure = member.displayName;
+      }
+    }
+
+    try {
+      await member.voice.setChannel(targetChannel, reason);
+    } catch (error) {
+      if (!alreadyHasRole && !roleFailure) {
+        await member.roles.remove(
+          participantRole,
+          "Revert participant role because voice transfer failed",
+        ).catch((rollbackError) => {
+          console.error(
+            `Failed to revert participant role for ${member.id}: ${rollbackError.message}`,
+          );
+        });
+      }
+      throw error;
+    }
+
+    if (!roleFailure) {
+      participantMemberIds.add(member.id);
+    }
+
+    return roleFailure;
+  }
+
   async function transferGroups(groups, config) {
     const lines = [];
     const childChannelIds = new Set();
@@ -7626,13 +7670,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       }
 
       try {
-        await seedMember.voice.setChannel(
+        const roleFailures = [];
+        const seedRoleFailure = await moveMemberWithParticipantRole(
+          seedMember,
           config.parentChannel,
           "Move one group member to PB parent channel",
-        );
-        const roleFailures = [];
-        const seedRoleFailure = await addRoleForTransfer(
-          seedMember,
           config.participantRole,
           participantMemberIds,
         );
@@ -7660,12 +7702,10 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           }
 
           try {
-            await member.voice.setChannel(
+            const roleFailure = await moveMemberWithParticipantRole(
+              member,
               childChannel,
               "Move remaining group members to PB child channel",
-            );
-            const roleFailure = await addRoleForTransfer(
-              member,
               config.participantRole,
               participantMemberIds,
             );
@@ -7956,11 +7996,13 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     participantRole,
     participantMemberIds,
   ) {
-    await member.voice.setChannel(
+    return moveMemberWithParticipantRole(
+      member,
       childChannel,
       "Move waiting participant to PB child channel",
+      participantRole,
+      participantMemberIds,
     );
-    return addRoleForTransfer(member, participantRole, participantMemberIds);
   }
 
   async function transferWaitingGroupToNewChild(members, config) {
@@ -7968,13 +8010,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     const seedMember = members[0];
 
     try {
-      await seedMember.voice.setChannel(
+      const roleFailures = [];
+      const seedRoleFailure = await moveMemberWithParticipantRole(
+        seedMember,
         config.parentChannel,
         "Move waiting group seed to PB parent channel",
-      );
-      const roleFailures = [];
-      const seedRoleFailure = await addRoleForTransfer(
-        seedMember,
         config.participantRole,
         config.participantMemberIds,
       );
@@ -7998,12 +8038,10 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
       for (const member of members.slice(1)) {
         try {
-          await member.voice.setChannel(
+          const roleFailure = await moveMemberWithParticipantRole(
+            member,
             childChannel,
             "Move waiting group members to PB child channel",
-          );
-          const roleFailure = await addRoleForTransfer(
-            member,
             config.participantRole,
             config.participantMemberIds,
           );
