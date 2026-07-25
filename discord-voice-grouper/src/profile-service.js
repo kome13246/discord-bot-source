@@ -104,7 +104,7 @@ export async function sendProfileToVoice(voiceChannel, member, profile, context)
   try {
     const message = await voiceChannel.send({ embeds: [buildProfileEmbed(profile, member)], allowedMentions: { parse: [] } });
     try {
-      await ActiveProfile.findOneAndUpdate({ guildId: voiceChannel.guild.id, userId: member.id }, { channelId: voiceChannel.id, messageId: message.id }, { upsert: true, new: true });
+      await ActiveProfile.findOneAndUpdate({ guildId: voiceChannel.guild.id, userId: member.id }, { channelId: voiceChannel.id, messageId: message.id }, { upsert: true, returnDocument: "after" });
     } catch (error) {
       await message.delete().catch(() => null);
       await logError({ ...context, processName: "profile metadata save failed", voiceChannel, member, error });

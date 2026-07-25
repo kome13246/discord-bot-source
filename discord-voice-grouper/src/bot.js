@@ -537,7 +537,7 @@ async function handleProfileModal(interaction) {
     await UserProfile.findOneAndUpdate(
       { guildId: interaction.guildId, userId: interaction.user.id },
       values,
-      { upsert: true, new: true, setDefaultsOnInsert: true },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   } catch (error) {
     await interaction.editReply({ content: "プロフィールの保存に失敗しました。" }).catch(() => {});
@@ -3512,10 +3512,15 @@ async function persistSplitProcessSession(sessionId, patch) {
   if (mongoose.connection.readyState !== 1) {
     throw new Error("MongoDB is unavailable; split process state was not persisted.");
   }
+  const { guildId, ...setFields } = patch;
+  const insertFields = {
+    sessionId,
+    ...(guildId ? { guildId } : {}),
+  };
   return SplitProcessSession.findOneAndUpdate(
     { sessionId },
-    { $set: patch, $setOnInsert: { sessionId, guildId: patch.guildId } },
-    { upsert: true, new: true, setDefaultsOnInsert: true, lean: true },
+    { $set: setFields, $setOnInsert: insertFields },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, lean: true },
   );
 }
 

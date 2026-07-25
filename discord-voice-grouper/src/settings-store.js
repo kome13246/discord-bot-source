@@ -18,7 +18,7 @@ export async function getGuildSettings(guildId) {
       document = await GuildSettings.findOneAndUpdate(
         { guildId },
         { $setOnInsert: { ...removeUndefined(legacy), guildId } },
-        { upsert: true, new: true, setDefaultsOnInsert: true, lean: true },
+        { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, lean: true },
       );
     } else {
       return environmentSettings;
@@ -55,7 +55,7 @@ export async function patchGuildSettings(guildId, patch) {
   const saved = await GuildSettings.findOneAndUpdate(
     { guildId },
     { $set: cleanPatch, $setOnInsert: { ...removeUndefined(legacy), guildId } },
-    { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true, lean: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, runValidators: true, lean: true },
   );
   const { _id, __v, guildId: ignoredGuildId, ...settings } = saved;
   return { ...settings, guildId };
@@ -78,14 +78,14 @@ export async function updateCallWaitPromptMember({ guildId, messageId, userId, o
       ...createFutureTargetAtFilter("callWaitPrompt.targetAt", now),
     },
     update,
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 }
 
 export async function updateNestedArrayItem({ guildId, path, item, operation, filter = {} }) {
   if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is unavailable; participant state cannot be updated.");
   const operator = operation === "add" ? "$addToSet" : "$pull";
-  return GuildSettings.findOneAndUpdate({ guildId, ...filter }, { [operator]: { [path]: item } }, { new: true, lean: true });
+  return GuildSettings.findOneAndUpdate({ guildId, ...filter }, { [operator]: { [path]: item } }, { returnDocument: "after", lean: true });
 }
 
 export async function updateOteboRecruitmentParticipant({ guildId, recruitmentId, messageId, userId, operation, pendingConfirmation }) {
@@ -102,7 +102,7 @@ export async function updateOteboRecruitmentParticipant({ guildId, recruitmentId
   const update = operation === "add"
     ? { $addToSet: { [memberPath]: userId }, ...(pendingConfirmation ? { $set: { [pendingPath]: pendingConfirmation } } : {}) }
     : { $pull: { [memberPath]: userId }, $unset: { [pendingPath]: 1 } };
-  return GuildSettings.findOneAndUpdate(filter, update, { new: true, lean: true });
+  return GuildSettings.findOneAndUpdate(filter, update, { returnDocument: "after", lean: true });
 }
 
 export async function replaceNestedObject({ guildId, path, value }) {
@@ -110,7 +110,7 @@ export async function replaceNestedObject({ guildId, path, value }) {
   return GuildSettings.findOneAndUpdate(
     { guildId },
     { $set: { [path]: value }, $setOnInsert: { guildId } },
-    { upsert: true, new: true, lean: true },
+    { upsert: true, returnDocument: "after", lean: true },
   );
 }
 
@@ -119,7 +119,7 @@ export async function unsetNestedObject({ guildId, path }) {
   return GuildSettings.findOneAndUpdate(
     { guildId },
     { $unset: { [path]: 1 } },
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 }
 
@@ -135,7 +135,7 @@ export async function deleteOteboRecruitmentIfOnlyMember({ guildId, recruitmentI
       [`${basePath}.memberIds`]: [userId],
     },
     { $unset: { [basePath]: 1 } },
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 }
 

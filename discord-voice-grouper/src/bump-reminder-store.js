@@ -30,7 +30,7 @@ export async function saveBumpReminder(reminder) {
   await BumpReminder.findOneAndUpdate(
     { reminderId: reminder.id },
     { $set: { ...reminder, reminderId: reminder.id } },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 }
 
