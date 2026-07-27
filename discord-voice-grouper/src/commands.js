@@ -223,6 +223,13 @@ export const settingCommand = new SlashCommandBuilder()
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
+      .addChannelOption((option) =>
+        option
+          .setName("review_send_channel")
+          .setDescription("会話練習会の感想を運営へ送るチャンネル")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false),
+      )
       .addRoleOption((option) =>
         option
           .setName("moderator_role")
@@ -320,6 +327,20 @@ export const settingCommand = new SlashCommandBuilder()
           .setRequired(true),
       ),
   );
+
+export const showReviewCommand = new SlashCommandBuilder()
+  .setName("show")
+  .setDescription("会話練習会の感想集計を表示します")
+  .addSubcommand((subcommand) => subcommand
+    .setName("review")
+    .setDescription("感想を集計します")
+    .addStringOption((option) => option.setName("question").setDescription("集計する質問").setRequired(true).addChoices(
+      { name: "1：どれくらい喋れた？", value: "1" },
+      { name: "2：時間はどう感じた？", value: "2" },
+      { name: "3：会話の練習になった？", value: "3" },
+      { name: "all：すべて", value: "all" },
+    ))
+    .addIntegerOption((option) => option.setName("recent").setDescription("直近の開催回数").setMinValue(1).setRequired(false)));
 
 export const bCommand = new SlashCommandBuilder()
   .setName("b")
@@ -431,6 +452,7 @@ export const commands = [
   setupProfileCommand.toJSON(),
   splitVoiceCommand.toJSON(),
   settingCommand.toJSON(),
+  showReviewCommand.toJSON(),
   bCommand.toJSON(),
   addWadaiCommand.toJSON(),
   showWadaiCommand.toJSON(),
