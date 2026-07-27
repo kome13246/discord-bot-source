@@ -41,3 +41,8 @@ test("全質問集計と終了通知は感想可否を安全に分岐する", as
   assert.match(source, /question !== "all" && !fields\[question\]/);
   assert.match(source, /const finishContent = canReview/);
 });
+
+test("感想フォームは下書きが null でも未選択状態を表示できる", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  assert.match(source, /function splitReviewRows\(sessionId, draft = \{\}\) \{\s*draft \?\?= \{\};/);
+});

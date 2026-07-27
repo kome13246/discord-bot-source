@@ -3741,6 +3741,7 @@ async function sendSplitFinishNotice({ guild, session, channelId }) {
 }
 
 function splitReviewRows(sessionId, draft = {}) {
+  draft ??= {};
   const select = (field, placeholder, options, value) => new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
     .setCustomId(`${SPLIT_REVIEW_SELECT}:${sessionId}:${field}`).setPlaceholder(placeholder)
     .addOptions(options.map((option) => ({ ...option, default: option.value === value }))));
@@ -7189,6 +7190,8 @@ async function handleSplitVoice(interaction) {
       childCategoryId: config.childCategoryId,
       participantRole: config.tempRole,
       sourceChannelId: sourceChannel.id,
+      guild: interaction.guild,
+      settings,
     });
     addMany(childChannelIds, transferResult.childChannelIds);
     addMany(participantMemberIds, transferResult.participantMemberIds);
@@ -7268,12 +7271,6 @@ async function handleSplitVoice(interaction) {
         content: "集合VCのeveryone接続権限を不可にしました。",
       });
     }
-
-    await sendSplitRandomTopicPanels({
-      guild: interaction.guild,
-      settings,
-      childChannelIds: transferResult.childChannelIds,
-    });
 
     if (config.waitingVcCategoryId) {
 
@@ -8005,6 +8002,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         }
 
         childChannelIds.add(childChannel.id);
+        await sendSplitRandomTopicPanels({
+          guild: config.guild,
+          settings: config.settings,
+          childChannelIds: [childChannel.id],
+        });
         let movedCount = 1;
         const failed = [];
         const movedMemberIds = [seedMember.id];
@@ -8220,6 +8222,8 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         sourceChannelId: options.waitingChannel.id,
         childCategoryId: options.childCategoryId,
         participantMemberIds: options.participantMemberIds,
+        guild: options.guild,
+        settings: options.settings,
       });
 
       if (result.childChannelId) {
@@ -8231,11 +8235,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           result.movedMemberIds,
           "new-group",
         );
-        await sendSplitRandomTopicPanels({
-          guild: options.guild,
-          settings: options.settings,
-          childChannelIds: [result.childChannelId],
-        });
       }
 
       await sendOperationalLog({
@@ -8350,6 +8349,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           lines: ["PBの子VCを検出できませんでした。"],
         };
       }
+
+      await sendSplitRandomTopicPanels({
+        guild: config.guild,
+        settings: config.settings,
+        childChannelIds: [childChannel.id],
+      });
 
       let movedCount = 1;
       const movedMemberIds = [seedMember.id];
