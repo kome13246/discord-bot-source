@@ -187,7 +187,7 @@ function getEnvironmentSettings(guildId) {
     voiceReminderChannelId: value("PB_VOICE_REMINDER_CHANNEL_ID"), voiceTopicChannelId: value("PB_VOICE_TOPIC_CHANNEL_ID"),
     voiceReminderParentChannelId: value("PB_VOICE_REMINDER_PARENT_CHANNEL_ID"), voiceReminderChildCategoryId: value("PB_VOICE_REMINDER_CHILD_CATEGORY_ID"),
     voiceReminderEnabled: bool("PB_VOICE_REMINDER_ENABLED"), wadaiChannelId: value("PB_WADAI_CHANNEL_ID"),
-    postSplitWadaiChannelId: value("PB_POST_SPLIT_WADAI_CHANNEL_ID"), splitStartChannelId: value("PB_SPLIT_START_CHANNEL_ID"),
+    splitStartChannelId: value("PB_SPLIT_START_CHANNEL_ID"),
     gatheringVoiceChannelId: value("PB_GATHERING_VOICE_CHANNEL_ID"), splitFeedbackChannelId: value("PB_SPLIT_FEEDBACK_CHANNEL_ID"),
     logChannelId: value("PB_LOG_CHANNEL_ID"), formChannelId: value("PB_FORM_CHANNEL_ID"), formSendChannelId: value("PB_FORM_SEND_CHANNEL_ID"),
     formModeratorRoleId: value("PB_FORM_MODERATOR_ROLE_ID"), finishMessage: value("PB_FINISH_MESSAGE"),

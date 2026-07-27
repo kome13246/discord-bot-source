@@ -88,6 +88,7 @@ const SPLIT_REVIEW_OPEN = "split_review_open";
 const SPLIT_REVIEW_SELECT = "split_review_select";
 const SPLIT_REVIEW_SUBMIT = "split_review_submit";
 const SPLIT_REVIEW_MODAL = "split_review_comment";
+const SPLIT_RANDOM_TOPIC = "split_random_topic";
 const TALK_AMOUNT_LABELS = {
   much: "かなり話せた",
   moderate: "そこそこだった",
@@ -167,6 +168,8 @@ const oteboDrafts = new Map();
 const oteboRecruitmentTimers = new Map();
 const profilePublicationLocks = new Set();
 const splitVoiceGuildLocks = new Set();
+const lastTopicIdByChildChannel = new Map();
+const randomTopicCooldownByChannel = new Map();
 
 const VOICE_MONITOR_MIN_MEMBERS = 2;
 const AUTO_SPLIT_THRESHOLD = 6;
@@ -349,6 +352,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith(`${SPLIT_REVIEW_OPEN}:`) || interaction.customId.startsWith(`${SPLIT_REVIEW_SUBMIT}:`)) { await handleSplitReviewButton(interaction); return; }
+      if (interaction.customId.startsWith(`${SPLIT_RANDOM_TOPIC}:`)) { await handleSplitRandomTopicButton(interaction); return; }
       if (interaction.customId.startsWith("vc_control:")) { await voiceChannelControlService.handle(interaction); return; }
       if (interaction.customId === "bosyu_edit") {
         await handleBosyuButton(interaction);
@@ -885,7 +889,6 @@ async function handleSetting(interaction) {
   const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const wadaiChannel = interaction.options.getChannel("wadaich", false);
-  const postSplitWadaiChannel = interaction.options.getChannel("post_split_wadai_channel", false);
   const splitStartChannel = interaction.options.getChannel("split_start_channel", false);
   const gatheringVoiceChannel = interaction.options.getChannel("gathering_voice_channel", false);
   const splitFeedbackChannel = interaction.options.getChannel("split_feedback_channel", false);
@@ -944,10 +947,6 @@ async function handleSetting(interaction) {
   if (wadaiChannel) {
     patch.wadaiChannelId = wadaiChannel.id;
     patch.splitStartChannelId = wadaiChannel.id;
-  }
-
-  if (postSplitWadaiChannel) {
-    patch.postSplitWadaiChannelId = postSplitWadaiChannel.id;
   }
 
   if (splitStartChannel) {
@@ -1312,18 +1311,10 @@ async function handleDelWadai(interaction) {
   }
 
   const [deleted] = categoryTopics.splice(deleteIndex, 1);
-  const recentHistory = getWadaiRecentHistory(settings);
-  recentHistory[parsed.category] = recentHistory[parsed.category].filter(
-    (topicId) => topicId !== deleted.id,
-  );
-
   await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
     wadaiTopics: topics,
     wadaiTopicsVersion: 2,
-    wadaiCurrentTopic:
-      settings?.wadaiCurrentTopic?.id === deleted.id ? null : settings?.wadaiCurrentTopic,
     wadaiDaily: null,
-    wadaiRecentHistory: recentHistory,
   });
 
   await replyOrFollowUp(interaction, {
@@ -1333,41 +1324,98 @@ async function handleDelWadai(interaction) {
   });
 }
 
-async function sendPostSplitWadaiTopic({
-  fallbackChannel,
-  groupSummaries,
-  guild,
-  participantRoleId,
-  settings,
-}) {
-  const currentSettings = (await getGuildSettings(guild.id)) ?? settings;
+async function sendSplitRandomTopicPanels({ guild, settings, childChannelIds }) {
+  for (const childChannelId of childChannelIds) {
+    try {
+      const childChannel = await guild.channels.fetch(childChannelId);
+      if (!childChannel || typeof childChannel.send !== "function") {
+        throw new Error("Child voice channel cannot send text messages.");
+      }
 
-  if (currentSettings?.kokuchiTopicEnabled === false) {
+      await childChannel.send({
+        content: "下のボタンを押したらランダムに話題が出ます！\n話題に詰まった時などに使ってみてください！",
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`${SPLIT_RANDOM_TOPIC}:${childChannel.id}`)
+              .setLabel("ランダムな話題を送信")
+              .setStyle(ButtonStyle.Primary),
+          ),
+        ],
+        allowedMentions: { parse: [] },
+      });
+    } catch (error) {
+      console.error(`Failed to send split random topic panel for ${childChannelId}:`, error);
+      await sendOperationalLog({
+        guild,
+        settings,
+        fallbackChannel: null,
+        content: `子VC話題ボタンの送信に失敗しました。 childChannelId=${childChannelId} error=${error?.message ?? error}`,
+      }).catch((logError) => console.error("Failed to log split random topic panel error:", logError));
+    }
+  }
+}
+
+async function handleSplitRandomTopicButton(interaction) {
+  const [, childChannelId] = interaction.customId.split(":");
+  const memberVoiceChannelId = interaction.member?.voice?.channelId;
+
+  if (!childChannelId || memberVoiceChannelId !== childChannelId) {
+    await interaction.reply({
+      content: "このボタンは対象のVCに参加している間だけ使用できます。",
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
-  const { settings: nextSettings, topic } = await getOrChooseCurrentWadaiTopic(
-    guild.id,
-    currentSettings,
-  );
-
-  const configuredChannel = nextSettings?.postSplitWadaiChannelId
-    ? await resolveConfiguredTextChannel(guild, nextSettings.postSplitWadaiChannelId)
-    : null;
-  const sendChannel =
-    configuredChannel ??
-    (fallbackChannel && typeof fallbackChannel.send === "function"
-      ? fallbackChannel
-      : null);
-
-  if (!sendChannel) {
+  const cooldownUntil = randomTopicCooldownByChannel.get(childChannelId) ?? 0;
+  if (cooldownUntil > Date.now()) {
+    await interaction.reply({
+      content: "少し待ってからもう一度お試しください。",
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
-  await sendChannel.send({
-    content: formatPostSplitWadaiMessage(participantRoleId, topic, groupSummaries),
-    allowedMentions: { roles: [participantRoleId] },
+  const settings = await getGuildSettings(interaction.guildId).catch((error) => {
+    console.error("Failed to load settings for split random topic:", error);
+    return null;
   });
+  const topicList = getWadaiTopics(settings)["1"] ?? [];
+  if (topicList.length === 0) {
+    await interaction.reply({
+      content: "現在、使用できる話題が登録されていません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const previousTopicId = lastTopicIdByChildChannel.get(childChannelId);
+  const candidates = topicList.length > 1
+    ? topicList.filter((topic) => topic.id !== previousTopicId)
+    : topicList;
+  const topic = candidates[Math.floor(Math.random() * candidates.length)];
+
+  randomTopicCooldownByChannel.set(childChannelId, Date.now() + 10_000);
+  await interaction.deferUpdate();
+  try {
+    const childChannel = await interaction.guild.channels.fetch(childChannelId);
+    if (!childChannel || typeof childChannel.send !== "function") {
+      throw new Error("Target child voice channel is unavailable.");
+    }
+    await childChannel.send({
+      content: `話題：${topic.text}`,
+      allowedMentions: { parse: [] },
+    });
+    lastTopicIdByChildChannel.set(childChannelId, topic.id);
+  } catch (error) {
+    randomTopicCooldownByChannel.delete(childChannelId);
+    console.error(`Failed to send split random topic for ${childChannelId}:`, error);
+    await interaction.followUp({
+      content: "話題の送信に失敗しました。時間をおいてもう一度お試しください。",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
 }
 
 async function sendSplitStartAnnouncement({ guild, settings, waitingChannel }) {
@@ -1528,7 +1576,6 @@ async function handleKokuchi(interaction) {
   const weekday = interaction.options.getString("weekday", true);
   const overviewChannel = interaction.options.getChannel("overview_channel", false);
   const targetChannel = interaction.options.getChannel("channel", false);
-  const sendTopic = interaction.options.getBoolean("send_topic", false) ?? false;
   const settings = await getGuildSettings(interaction.guildId);
   const sendChannel =
     targetChannel && typeof targetChannel.send === "function"
@@ -1561,67 +1608,40 @@ async function handleKokuchi(interaction) {
     return;
   }
 
-  let nextSettings = settings;
-  let topic = null;
-
-  if (sendTopic) {
-    const result = await chooseAndStoreKokuchiWadaiTopic(
-      interaction.guildId,
-      settings,
-    );
-    nextSettings = result.settings;
-    topic = result.topic;
-  }
   const postedAt = new Date();
   const kokuchiPreNoticeAt = getKokuchiPreNoticeAt(postedAt);
   const gatheringVcUnlockAt = getGatheringVcUnlockAt(postedAt);
   const kokuchiGatheringReminderAt = getKokuchiGatheringReminderAt(postedAt);
-  const selectedTopic = sendTopic
-    ? topic ?? {
-    id: "missing",
-    text: "未登録です。/addwadai で追加してください。",
-      }
-    : null;
-  const message = await sendChannel.send({
+  await sendChannel.send({
     content: formatKokuchiMessage({
       weekday,
       overviewChannelId: resolvedOverviewChannel.id,
-      topic: selectedTopic,
     }),
     allowedMentions: { parse: [] },
   });
 
-  const savedSettings = await saveGuildSettingsWithCurrent(interaction.guildId, nextSettings, {
+  const savedSettings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
     lastKokuchiWeekday: weekday,
     lastKokuchiPostedAt: postedAt.toISOString(),
-    kokuchiTopicEnabled: sendTopic,
-    ...(sendTopic ? {} : { wadaiCurrentTopic: null }),
     kokuchiPreNoticeAt: kokuchiPreNoticeAt.toISOString(),
     kokuchiPreNoticeChannelId: sendChannel.id,
     kokuchiPreNoticeState: "pending",
     gatheringVcUnlockAt: gatheringVcUnlockAt.toISOString(),
     gatheringVcUnlockChannelId: resolveKokuchiGatheringVoiceChannelId(
       settings,
-      nextSettings,
+      settings,
     ),
     gatheringVcUnlockState: "pending",
     kokuchiGatheringReminderAt: kokuchiGatheringReminderAt.toISOString(),
     kokuchiGatheringReminderChannelId: sendChannel.id,
     kokuchiGatheringReminderState: "pending",
-    wadaiKokuchiMessage: {
-      channelId: sendChannel.id,
-      messageId: message.id,
-      postedAt: postedAt.toISOString(),
-    },
   });
   await scheduleKokuchiPreNotice(interaction.guild, savedSettings);
   await scheduleGatheringVcUnlock(interaction.guild, savedSettings);
   await scheduleKokuchiGatheringReminder(interaction.guild, savedSettings);
 
   await replyOrFollowUp(interaction, {
-    content: sendTopic
-      ? `告知を ${sendChannel} に投稿しました。\n今回の最初の話題: ${selectedTopic.text}`
-      : `告知を ${sendChannel} に投稿しました。\n今回は最初の話題を送信しません。`,
+    content: `告知を ${sendChannel} に投稿しました。`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
@@ -5517,17 +5537,13 @@ function getOteboVoiceStatusTimerKey(guildId, sessionId) {
   return `${guildId}:voice-status:${sessionId}`;
 }
 
-function formatKokuchiMessage({ weekday, overviewChannelId, topic }) {
+function formatKokuchiMessage({ weekday, overviewChannelId }) {
   const weekdayLabel = weekday === "土" ? "土曜日" : "火曜日";
   const lines = [
     `本日は${weekdayLabel}！`,
     "21:00から会話練習会です！",
     `（概要は <#${overviewChannelId}> から）`,
   ];
-
-  if (topic?.text) {
-    lines.push("", `今回の最初の話題は「${topic.text}」です！`);
-  }
 
   lines.push(
     "",
@@ -5536,90 +5552,6 @@ function formatKokuchiMessage({ weekday, overviewChannelId, topic }) {
   );
 
   return lines.join("\n");
-}
-
-async function chooseAndStoreKokuchiWadaiTopic(guildId, settings) {
-  const topics = getWadaiTopics(settings);
-  const recentHistory = getWadaiRecentHistory(settings);
-  const topic = chooseSingleWadaiTopic(topics, recentHistory);
-  const nextSettings = await saveGuildSettingsWithCurrent(guildId, settings, {
-    wadaiTopics: topics,
-    wadaiTopicsVersion: 2,
-    wadaiDaily: null,
-    wadaiRecentHistory: recentHistory,
-    wadaiCurrentTopic: topic
-      ? {
-          id: topic.id,
-          text: topic.text,
-          selectedAt: new Date().toISOString(),
-        }
-      : null,
-  });
-
-  return {
-    settings: nextSettings,
-    topic,
-  };
-}
-
-async function getOrChooseCurrentWadaiTopic(guildId, settings) {
-  const currentTopic = normalizeWadaiTopic(settings?.wadaiCurrentTopic, "1", 0);
-
-  if (currentTopic) {
-    return {
-      settings,
-      topic: currentTopic,
-    };
-  }
-
-  return chooseAndStoreKokuchiWadaiTopic(guildId, settings);
-}
-
-function chooseSingleWadaiTopic(topics, recentHistory) {
-  const category = "1";
-  const categoryTopics = topics[category] ?? [];
-  const validTopicIds = new Set(categoryTopics.map((topic) => topic.id));
-  const history = (recentHistory[category] ?? []).filter((topicId) =>
-    validTopicIds.has(topicId),
-  );
-
-  if (categoryTopics.length === 0) {
-    recentHistory[category] = [];
-    return null;
-  }
-
-  const candidates = categoryTopics.filter((topic) => !history.includes(topic.id));
-  const pool = candidates.length > 0 ? candidates : categoryTopics;
-  const selected = pool[Math.floor(Math.random() * pool.length)];
-  recentHistory[category] =
-    candidates.length > 0 ? [...history, selected.id] : [selected.id];
-
-  return selected;
-}
-
-function formatPostSplitWadaiMessage(participantRoleId, topic, groupSummaries) {
-  const lines = [
-    `<@&${participantRoleId}>`,
-    "今日の最初の話題：",
-    `「${topic?.text ?? "未登録です。/addwadai で追加してください。"}」`,
-    "",
-    "話す量は一言くらいで大丈夫です！",
-    "まずは以下の順番で、一人ずつ軽く話してみてください。",
-    "言葉がまとまらなかったら、順番を後ろに回しても大丈夫です。",
-    "",
-  ];
-
-  for (const group of groupSummaries ?? []) {
-    lines.push(`【${group.channelName}】`);
-    group.memberNames.forEach((memberName, index) => {
-      lines.push(`${index + 1}. ${memberName}`);
-    });
-    lines.push("");
-  }
-
-  lines.push("ひとことずつ話した後は自由に会話してください！");
-
-  return lines.join("\n").trim();
 }
 
 function formatSplitStartAnnouncement(waitingChannel) {
@@ -5717,22 +5649,6 @@ function normalizeWadaiTopic(topic, category, index) {
     id,
     text: trimmedText,
   };
-}
-
-function getWadaiRecentHistory(settings) {
-  const savedHistory =
-    settings?.wadaiRecentHistory && typeof settings.wadaiRecentHistory === "object"
-      ? settings.wadaiRecentHistory
-      : {};
-  const history = {};
-
-  for (const category of Object.keys(WADAI_CATEGORIES)) {
-    history[category] = Array.isArray(savedHistory[category])
-      ? savedHistory[category].filter((topicId) => typeof topicId === "string")
-      : [];
-  }
-
-  return history;
 }
 
 function formatWadaiList(topics) {
@@ -5927,7 +5843,7 @@ async function handleFeedbackFormModal(interaction) {
   const content = interaction.fields
     .getTextInputValue("feedback_form_content")
     .trim();
-  const senderName = interaction.member?.displayName ?? interaction.user.tag;
+  const senderMention = `<@${interaction.user.id}>`;
   const moderatorMention =
     type === "complaint" && settings.formModeratorRoleId
       ? `<@&${settings.formModeratorRoleId}>`
@@ -5936,13 +5852,15 @@ async function handleFeedbackFormModal(interaction) {
   await sendChannel.send({
     content: [
       moderatorMention,
-      `送信者:${senderName}`,
+      `送信者:${senderMention}`,
       `分類:${label}`,
       `内容:${content}`,
     ].filter(Boolean).join("\n"),
-    allowedMentions: moderatorMention
-      ? { roles: [settings.formModeratorRoleId] }
-      : { parse: [] },
+    allowedMentions: {
+      parse: [],
+      users: [],
+      roles: moderatorMention ? [settings.formModeratorRoleId] : [],
+    },
   });
 
   await interaction.reply({
@@ -5955,7 +5873,7 @@ function createFeedbackFormMessages() {
   return [
     {
       type: "topic",
-      content: "会話練習会の最初の話題にちょうどいい話題があればぜひ！",
+      content: "会話練習会の話題ボタンに使えるような話題があればぜひ送ってください！",
     },
     {
       type: "suggestion",
@@ -7351,17 +7269,11 @@ async function handleSplitVoice(interaction) {
       });
     }
 
-    try {
-      await sendPostSplitWadaiTopic({
-        fallbackChannel: operationChannel,
-        groupSummaries: transferResult.groupSummaries,
-        guild: interaction.guild,
-        participantRoleId: config.tempRole.id,
-        settings,
-      });
-    } catch (error) {
-      console.error(`Failed to send post-split wadai choices: ${error.message}`, error);
-    }
+    await sendSplitRandomTopicPanels({
+      guild: interaction.guild,
+      settings,
+      childChannelIds: transferResult.childChannelIds,
+    });
 
     if (config.waitingVcCategoryId) {
 
@@ -8319,6 +8231,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           result.movedMemberIds,
           "new-group",
         );
+        await sendSplitRandomTopicPanels({
+          guild: options.guild,
+          settings: options.settings,
+          childChannelIds: [result.childChannelId],
+        });
       }
 
       await sendOperationalLog({
@@ -8785,9 +8702,6 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "",
       "【おすすめ話題・案内】",
       `/kokuchi告知・スタート案内送信先: ${getKokuchiAnnouncementChannelId(settings) ? `<#${getKokuchiAnnouncementChannelId(settings)}>` : "未設定"}`,
-      `/splitvc後の最初の話題送信先: ${settings.postSplitWadaiChannelId ? `<#${settings.postSplitWadaiChannelId}>` : "実行チャンネル"}`,
-      `/kokuchi話題送信: ${settings.kokuchiTopicEnabled === false ? "送信しない" : "送信する"}`,
-      `最後に選ばれた話題: ${settings.wadaiCurrentTopic?.text ?? "未設定"}`,
       `集合VC: ${settings.gatheringVoiceChannelId ? `<#${settings.gatheringVoiceChannelId}>` : "未設定"}`,
       `終了後意見・苦情チャンネル: ${settings.splitFeedbackChannelId ? `<#${settings.splitFeedbackChannelId}>` : `<#${DEFAULT_SPLIT_FEEDBACK_CHANNEL_ID}>`}`,
       "",
