@@ -38,12 +38,16 @@ test("/kokuchi は話題を抽選・保存せず、告知文に話題を含め�
   assert.doesNotMatch(source, /function sendPostSplitWadaiTopic/);
 });
 
-test("途中参加で新しい子VCを作った後だけ話題パネルを設置する", async () => {
+test("子VCの話題パネルは追加メンバーの転送前に設置する", async () => {
   const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
 
   assert.match(
     source,
-    /persistWaitingGroupMembers\([\s\S]*?result\.childChannelId[\s\S]*?"new-group",[\s\S]*?\);[\s\S]*?sendSplitRandomTopicPanels\([\s\S]*?childChannelIds: \[result\.childChannelId\]/,
+    /childChannelIds\.add\(childChannel\.id\);[\s\S]*?sendSplitRandomTopicPanels\([\s\S]*?childChannelIds: \[childChannel\.id\][\s\S]*?for \(const member of group\.slice\(1\)\)/,
+  );
+  assert.match(
+    source,
+    /transferWaitingGroupToNewChild[\s\S]*?sendSplitRandomTopicPanels\([\s\S]*?childChannelIds: \[childChannel\.id\][\s\S]*?for \(const member of members\.slice\(1\)\)/,
   );
   assert.doesNotMatch(
     source.slice(source.indexOf('"existing-group"'), source.indexOf("if (waitingMembers.length >= 3)")),
