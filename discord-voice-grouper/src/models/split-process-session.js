@@ -11,14 +11,29 @@ const schema = new mongoose.Schema(
     childCategoryId: String,
     participantRoleId: String,
     participantMemberIds: { type: [String], default: [] },
+    participantRoleGrantedMemberIds: { type: [String], default: [] },
     childChannelIds: { type: [String], default: [] },
     waitingChannelId: String,
+    waitingMonitorStatus: {
+      type: String,
+      enum: ["inactive", "active", "extended", "closing", "closed", "failed"],
+      default: "inactive",
+    },
+    waitingMonitorStartedAt: Date,
     splitStartMessageChannelId: String,
     splitStartMessageId: String,
     phase: String,
     status: { type: String, default: "active" },
     transferAt: Date,
+    plannedMemberIds: { type: [String], default: [] },
     waitingMonitorEndsAt: Date,
+    waitingMonitorExtendedAt: Date,
+    waitingMonitorHeartbeatAt: Date,
+    waitingMonitorLeaseOwner: String,
+    waitingMonitorLeaseUntil: Date,
+    waitingMonitorLeaseRetryAt: Date,
+    waitingMonitorClosedAt: Date,
+    waitingMonitorFailureCount: { type: Number, default: 0 },
     finishNoticeAt: Date,
     reviewDeadlineAt: Date,
     roleRemoveAt: Date,
@@ -26,7 +41,7 @@ const schema = new mongoose.Schema(
     finishNoticeMessageId: String,
     reviewButtonShown: { type: Boolean, default: false },
     reviewEligibleMemberIds: { type: [String], default: [] },
-    groupSnapshots: { type: [{ groupNumber: Number, memberIds: [String] }], default: [] },
+    groupSnapshots: { type: [{ groupNumber: Number, channelId: String, memberIds: [String] }], default: [] },
     conversationStartedAt: Date,
     reviewAggregationEligible: { type: Boolean, default: false },
     isTestSession: { type: Boolean, default: false },
@@ -41,4 +56,5 @@ const schema = new mongoose.Schema(
 );
 
 schema.index({ guildId: 1, status: 1 });
+schema.index({ guildId: 1, waitingChannelId: 1, waitingMonitorStatus: 1 });
 export const SplitProcessSession = mongoose.models.SplitProcessSession ?? mongoose.model("SplitProcessSession", schema);

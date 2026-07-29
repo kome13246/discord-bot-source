@@ -89,6 +89,12 @@ export const settingCommand = new SlashCommandBuilder()
           .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
           .setRequired(false),
       )
+      .addRoleOption((option) =>
+        option
+          .setName("kokuchi_gathering_reminder_role")
+          .setDescription("/kokuchi当日20:55の集合通知でメンションするロール")
+          .setRequired(false),
+      )
       .addChannelOption((option) =>
         option
           .setName("split_feedback_channel")
@@ -407,6 +413,14 @@ export const kokuchiCommand = new SlashCommandBuilder()
         { name: "土曜日", value: "土" },
       )
       .setRequired(true),
+  )
+  .addIntegerOption((option) =>
+    option
+      .setName("set")
+      .setDescription("告知を自動送信する時刻")
+      .setMinValue(0)
+      .setMaxValue(24)
+      .setRequired(false),
   )
   .addChannelOption((option) =>
     option

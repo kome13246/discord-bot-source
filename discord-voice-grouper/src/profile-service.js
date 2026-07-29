@@ -36,7 +36,9 @@ export function buildProfileEmbed(profile, member) {
 function enqueue(guildId, userId, task) {
   const key = keyOf(guildId, userId);
   const previous = queues.get(key) ?? Promise.resolve();
-  const next = previous.catch(() => {}).then(task).finally(() => { if (queues.get(key) === next) queues.delete(key); });
+  const next = previous.catch((error) => {
+    console.error(`Previous profile task failed for ${key}; continuing the queue: ${error?.message ?? error}`, error);
+  }).then(task).finally(() => { if (queues.get(key) === next) queues.delete(key); });
   queues.set(key, next);
   return next;
 }
@@ -44,7 +46,11 @@ function enqueue(guildId, userId, task) {
 async function logError({ guild, settings, sendOperationalLog, processName, voiceChannel, member, error }) {
   const message = `[${processName}] guild=${guild?.name ?? "?"}(${guild?.id ?? "?"}) voice=${voiceChannel?.name ?? "?"}(${voiceChannel?.id ?? "?"}) user=${member?.user?.username ?? "?"}(${member?.id ?? "?"}) error=${summarizeProfileError(error)} time=${new Date().toISOString()}`;
   console.error(message);
-  try { await sendOperationalLog({ guild, settings, fallbackChannel: voiceChannel, content: message }); } catch {}
+  try {
+    await sendOperationalLog({ guild, settings, fallbackChannel: voiceChannel, content: message });
+  } catch (logError) {
+    console.error(`[${processName}] operational logging failed: ${summarizeProfileError(logError)}`);
+  }
 }
 
 async function removeActive({ guild, settings, record, sendOperationalLog, member, voiceChannel }) {

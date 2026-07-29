@@ -6,7 +6,9 @@ const schema = new mongoose.Schema({
   userId: { type: String, required: true }, participantRoleId: String, groupNumber: Number,
   groupMemberIds: { type: [String], default: [] }, talkAmount: String, durationFeeling: String,
   practiceEffect: String, comment: String, submittedAt: { type: Date, default: Date.now },
-  deliveryStatus: { type: String, default: "pending" }, reviewChannelId: String, reviewMessageId: String,
+  deliveryStatus: { type: String, enum: ["pending", "processing", "delivered", "failed"], default: "pending" },
+  deliveryRetryCount: { type: Number, default: 0 }, deliveryLastTriedAt: Date, deliveryLastError: String,
+  reviewChannelId: String, reviewMessageId: String,
 }, { timestamps: true });
 schema.index({ guildId: 1, splitSessionId: 1, userId: 1 }, { unique: true });
 export const SplitReview = mongoose.models.SplitReview ?? mongoose.model("SplitReview", schema);
