@@ -1,5 +1,32 @@
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
+export function getPermissionOverwriteState(overwrite, permission) {
+  if (!overwrite) return null;
+  if (overwrite.allow?.has?.(permission)) return true;
+  if (overwrite.deny?.has?.(permission)) return false;
+  return null;
+}
+
+export function createEveryonePermissionSnapshot({ channelId, guildId, overwrite, permissions }) {
+  return {
+    channelId,
+    guildId,
+    viewChannel: getPermissionOverwriteState(overwrite, permissions.ViewChannel),
+    connect: getPermissionOverwriteState(overwrite, permissions.Connect),
+  };
+}
+
+export function getRestorePermissionPatch({ snapshot, overwrite, permissions }) {
+  const patch = {};
+  if (getPermissionOverwriteState(overwrite, permissions.ViewChannel) === true) {
+    patch.ViewChannel = snapshot.viewChannel;
+  }
+  if (getPermissionOverwriteState(overwrite, permissions.Connect) === true) {
+    patch.Connect = snapshot.connect;
+  }
+  return patch;
+}
+
 export function getJstScheduledTime(date, hour, minute) {
   const timestamp = date instanceof Date ? date.getTime() : Number.NaN;
 
@@ -27,7 +54,7 @@ export async function editEveryoneConnectPermission({
 }) {
   const updatedChannel = await channel.permissionOverwrites.edit(
     guildId,
-    { Connect: canConnect },
+    { ViewChannel: canConnect, Connect: canConnect },
     { reason },
   );
 

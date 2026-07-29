@@ -112,6 +112,41 @@ export async function getPendingActions() {
   return ScheduledAction.find({ status: "pending" }).lean();
 }
 
+/** Cancels only pending/failed actions belonging to one kokuchi event. */
+export async function cancelKokuchiScheduledActions({ guildId, kokuchiEventId }) {
+  if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is required to cancel persistent actions.");
+  const actions = await ScheduledAction.find({ guildId, "payload.kokuchiEventId": kokuchiEventId }).lean();
+  const result = { canceled: 0, alreadyCompleted: 0, alreadyCanceled: 0, failed: 0, errors: [] };
+
+  for (const action of actions) {
+    if (action.status === "canceled") {
+      result.alreadyCanceled += 1;
+      continue;
+    }
+    if (!["pending", "failed"].includes(action.status)) {
+      result.alreadyCompleted += 1;
+      continue;
+    }
+    const canceled = await ScheduledAction.findOneAndUpdate(
+      { _id: action._id, status: { $in: ["pending", "failed"] } },
+      { $set: { status: "canceled", completedAt: new Date() } },
+      { returnDocument: "before", lean: true },
+    );
+    if (canceled) {
+      result.canceled += 1;
+      continue;
+    }
+    const current = await ScheduledAction.findById(action._id).lean();
+    if (current?.status === "canceled") result.alreadyCanceled += 1;
+    else if (current && !["pending", "failed"].includes(current.status)) result.alreadyCompleted += 1;
+    else {
+      result.failed += 1;
+      result.errors.push(`ScheduledAction ${action.actionKey} could not be canceled.`);
+    }
+  }
+  return result;
+}
+
 /**
  * The previous bot process is no longer alive when this runs during startup.
  * Return actions claimed by that process to the queue so they are not lost.

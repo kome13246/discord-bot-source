@@ -35,8 +35,8 @@ import {
   getPairKeysFromGroups,
   shuffle,
 } from "./grouping.js";
-import { claimCallWaitPendingNotice, deleteOteboRecruitmentIfOnlyMember, failCallWaitPendingNotice, getGuildSettings, recoverInterruptedCallWaitPendingNotices, recoverInterruptedCallWaitPrompts, recoverInterruptedKokuchiGatheringReminders, replaceNestedObject, saveGuildSettings, transitionCallWaitPrompt, transitionKokuchiGatheringReminder, transitionKokuchiTimedAction, transitionOteboRecruitment, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
-import { claimAction, failAction, finishAction, getPendingActions, recoverInterruptedActions, retryAction, scheduleAction, scheduleSingleGuildAction } from "./scheduled-action-store.js";
+import { cancelKokuchiTimedActions, claimCallWaitPendingNotice, deleteOteboRecruitmentIfOnlyMember, failCallWaitPendingNotice, getGuildSettings, recoverInterruptedCallWaitPendingNotices, recoverInterruptedCallWaitPrompts, recoverInterruptedKokuchiGatheringReminders, replaceNestedObject, saveGuildSettings, transitionCallWaitPrompt, transitionKokuchiGatheringReminder, transitionKokuchiTimedAction, transitionOteboRecruitment, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
+import { cancelKokuchiScheduledActions, claimAction, failAction, finishAction, getPendingActions, recoverInterruptedActions, retryAction, scheduleAction, scheduleSingleGuildAction } from "./scheduled-action-store.js";
 import { consumeBosyuCooldown, deleteBosyuEditSession, getActiveBosyuEditSessions, getBosyuEditSession, getExpiredBosyuEditSessions, saveBosyuEditSession } from "./bosyu-state-store.js";
 import { SplitProcessSession } from "./models/split-process-session.js";
 import { SplitReview } from "./models/split-review.js";
@@ -67,14 +67,23 @@ import {
 } from "./profile-publication-service.js";
 import { createVoiceChannelControlService } from "./voice-channel-control-service.js";
 import {
+  createEveryonePermissionSnapshot,
   countUniqueParticipantIds,
   editEveryoneConnectPermission,
   formatSplitClosingThanks,
-  getJstScheduledTime,
+  getRestorePermissionPatch,
   isKokuchiCallWaitPause,
   resolveKokuchiGatheringVoiceChannelId,
 } from "./kokuchi-utils.js";
-import { formatJstReservationTime, getInterestCooldownSeconds, getKokuchiEventDate, getKokuchiReminderStatusOnCancel, getNextJstHalfHour, getNextKokuchiReservationAt } from "./kokuchi-reservation-utils.js";
+import { formatJstReservationTime, getInterestCooldownSeconds, getKokuchiEventDate, getKokuchiReminderStatusOnCancel, getNextKokuchiEventAt, getNextKokuchiReservationAt } from "./kokuchi-reservation-utils.js";
+import {
+  CALL_WAIT_INTERVAL_MINUTES,
+  createCallWaitSlotKey,
+  getMsUntilNextJstCallWaitSlot,
+  getNextJstCallWaitSlot,
+  isJstCallWaitSlotDue,
+  normalizeCallWaitIntervalMinutes,
+} from "./call-wait-schedule-utils.js";
 import { toCurrentGroupMemberIds } from "./split-waiting-utils.js";
 
 const {
@@ -121,12 +130,10 @@ const PB_CHILD_WAIT_MS = 20 * 1000;
 const DEFAULT_FINISH_MESSAGE =
   "30分が経過しました！各々のちょうどいいタイミングで解散してください";
 const MESSAGE_LIMIT = 1900;
-const CALL_WAIT_REACTION = "🤚";
 const CALL_WAIT_MIN_MEMBERS = 2;
 const CALL_WAIT_ROLE_REMOVE_MS = 30 * 60 * 1000;
 const CALL_WAIT_FOLLOWUP_CHECK_MS = 30 * 60 * 1000;
 const CALL_WAIT_FOLLOWUP_RETRY_MS = 5 * 60 * 1000;
-const CALL_WAIT_MODE_REACTION = "reaction";
 const CALL_WAIT_MODE_BUTTON = "button";
 const CALL_WAIT_JOIN_CUSTOM_ID = "call_wait_join";
 const CALL_WAIT_CANCEL_CUSTOM_ID = "call_wait_cancel";
@@ -154,12 +161,6 @@ const OTEBO_ROLE_REMOVE_MS = 20 * 60 * 1000;
 const OTEBO_VOICE_STATUS_DEADLINE_MS = 20 * 60 * 1000;
 const OTEBO_VOICE_STATUS_EXTRA_MS = 15 * 60 * 1000;
 const OTEBO_SCHEDULED_NOTICE_LEAD_MS = 30 * 60 * 1000;
-const GATHERING_VC_OPEN_HOUR_JST = 20;
-const GATHERING_VC_OPEN_MINUTE_JST = 40;
-const KOKUCHI_PRE_NOTICE_HOUR_JST = 20;
-const KOKUCHI_PRE_NOTICE_MINUTE_JST = 30;
-const KOKUCHI_GATHERING_REMINDER_HOUR_JST = 20;
-const KOKUCHI_GATHERING_REMINDER_MINUTE_JST = 55;
 const DEFAULT_SPLIT_FEEDBACK_CHANNEL_ID = "1513457664041160765";
 
 const activeSessions = new Map();
@@ -234,6 +235,7 @@ let shouldSendMongoSuccessLog = false;
 let startupRestoreCompleted = false;
 let startupRestoreFailed = false;
 let shuttingDown = false;
+let processingScheduledCallWaitTick = false;
 
 function getKokuchiReservationCleanupAt(now = new Date()) {
   return new Date(now.getTime() + KOKUCHI_RESERVATION_RETENTION_MS);
@@ -250,12 +252,12 @@ if (!DISCORD_TOKEN) {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     // Required for the documented normal-message features such as topic
     // requests and DISBOARD bump detection.  It must also be enabled in the
     // Discord Developer Portal for this application.
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
@@ -281,6 +283,7 @@ client.once(Events.ClientReady, async (readyClient) => {
     recoverInterruptedKokuchiGatheringReminders(),
     restoreBumpReminders(),
     restoreGatheringVcUnlockSchedules(),
+    restorePendingGatheringVcPermissions(),
     restoreKokuchiReservations(),
     restoreOteboRecruitmentTimers(),
     restoreFailedSplitReviewDeliveries(),
@@ -311,8 +314,8 @@ client.once(Events.ClientReady, async (readyClient) => {
       console.error("Failed to send MongoDB success log embed:", error);
     });
   }
-  // Do not wait until the next :00/:30 tick after a restart.  This closes
-  // overdue recruitments and starts an already-due one immediately.
+  // Do not wait until the next interval tick after a restart. This closes
+  // overdue recruitments and calculates the next configured JST slot.
   await processCallWaitForAllGuilds().catch((error) => {
     console.error("Initial call-wait processing failed:", error);
   });
@@ -548,6 +551,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === "kokuchi") {
       await handleKokuchi(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "remove") {
+      await handleRemoveRole(interaction);
       return;
     }
 
@@ -917,8 +925,7 @@ async function handleSetting(interaction) {
 
   if (subcommand === "show") {
     const settings = await getGuildSettings(interaction.guildId);
-    await replyOrFollowUp(interaction, {
-      content: formatSettings(settings),
+    await replyInChunks(interaction, formatSettings(settings), {
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
@@ -959,23 +966,23 @@ async function handleSetting(interaction) {
     return;
   }
 
-  if (subcommand === "shugo") {
+  if (subcommand === "zatudan") {
     await handleShugoSetting(interaction);
+    return;
+  }
+
+  if (subcommand === "kokuchi") {
+    await handleKokuchiSetting(interaction);
     return;
   }
 
   const tempRole = interaction.options.getRole("participant_role", false);
   const parentChannel = interaction.options.getChannel("parent_channel", false);
   const childCategory = interaction.options.getChannel("child_category", false);
-  const kokuchiOverviewChannel = interaction.options.getChannel("kokuchi_overview_channel", false);
   const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
   const waitingVcName = interaction.options.getString("waiting_vc_name", false);
   const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
-  const wadaiChannel = interaction.options.getChannel("wadaich", false);
-  const splitStartChannel = interaction.options.getChannel("split_start_channel", false);
-  const gatheringVoiceChannel = interaction.options.getChannel("gathering_voice_channel", false);
-  const kokuchiGatheringReminderRole = interaction.options.getRole("kokuchi_gathering_reminder_role", false);
   const splitFeedbackChannel = interaction.options.getChannel("split_feedback_channel", false);
   const logChannel = interaction.options.getChannel("log_channel", false);
   const formChannel = interaction.options.getChannel("form_channel", false);
@@ -1009,10 +1016,6 @@ async function handleSetting(interaction) {
     patch.childCategoryId = childCategory.id;
   }
 
-  if (kokuchiOverviewChannel) {
-    patch.kokuchiOverviewChannelId = kokuchiOverviewChannel.id;
-  }
-
   if (waitingVcCategory) {
     patch.waitingVcCategoryId = waitingVcCategory.id;
   }
@@ -1027,24 +1030,6 @@ async function handleSetting(interaction) {
 
   if (bosyuMentionRole) {
     patch.bosyuMentionRoleId = bosyuMentionRole.id;
-  }
-
-  if (wadaiChannel) {
-    patch.wadaiChannelId = wadaiChannel.id;
-    patch.splitStartChannelId = wadaiChannel.id;
-  }
-
-  if (splitStartChannel) {
-    patch.wadaiChannelId = splitStartChannel.id;
-    patch.splitStartChannelId = splitStartChannel.id;
-  }
-
-  if (gatheringVoiceChannel) {
-    patch.gatheringVoiceChannelId = gatheringVoiceChannel.id;
-  }
-
-  if (kokuchiGatheringReminderRole) {
-    patch.kokuchiGatheringReminderRoleIds = [kokuchiGatheringReminderRole.id];
   }
 
   if (splitFeedbackChannel) {
@@ -1107,11 +1092,174 @@ async function handleSetting(interaction) {
     patch,
   );
 
-  if (gatheringVoiceChannel) {
-    await scheduleGatheringVcUnlock(interaction.guild, settings);
-  }
   await replyOrFollowUp(interaction, {
     content: `設定を保存しました。\n\n${formatSettings(settings)}`,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleRemoveRole(interaction) {
+  if (!interaction.inGuild() || interaction.options.getSubcommand() !== "role") return;
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) {
+    await interaction.editReply("この操作にはロールの管理権限が必要です。");
+    return;
+  }
+
+  const guild = interaction.guild;
+  const settings = await getGuildSettings(guild.id);
+  const roleIds = [...new Set([settings?.tempRoleId, settings?.voiceParticipantRoleId].filter(Boolean))];
+  if (roleIds.length === 0) {
+    await interaction.editReply("解除対象の参加者ロールが設定されていません。");
+    return;
+  }
+
+  const botMember = guild.members.me ?? await guild.members.fetchMe().catch(() => null);
+  if (!botMember?.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    await interaction.editReply("Botにロールの管理権限がありません。");
+    return;
+  }
+
+  const fetchedAllMembers = await guild.members.fetch().then(() => true).catch(() => false);
+  if (!fetchedAllMembers) {
+    await interaction.editReply("メンバー一覧を取得できなかったため、一括解除を実行しませんでした。時間をおいて再試行してください。");
+    return;
+  }
+  const targetMembers = new Map();
+  let skipped = 0;
+  const reasons = new Set();
+  const usableRoleIds = [];
+  for (const roleId of roleIds) {
+    const role = await guild.roles.fetch(roleId).catch(() => null);
+    if (!role) {
+      skipped += 1;
+      reasons.add("設定済みロールが見つかりません");
+      continue;
+    }
+    if (!role.editable) {
+      skipped += 1;
+      reasons.add("Botのロール階層が不足しています");
+      continue;
+    }
+    usableRoleIds.push(role.id);
+    for (const member of guild.members.cache.filter((item) => item.roles.cache.has(role.id)).values()) {
+      if (member.user.bot) {
+        skipped += 1;
+        reasons.add("Botアカウントは対象外です");
+        continue;
+      }
+      targetMembers.set(member.id, member);
+    }
+  }
+  let fullySucceeded = 0;
+  let partiallySucceeded = 0;
+  let fullyFailed = 0;
+  for (const member of targetMembers.values()) {
+    let attemptedRoles = 0;
+    let removedRoles = 0;
+    let failedRoles = 0;
+    for (const roleId of usableRoleIds) {
+      if (!member.roles.cache.has(roleId)) continue;
+      attemptedRoles += 1;
+      const role = guild.roles.cache.get(roleId);
+      try {
+        await member.roles.remove(role, "一括参加者ロール解除 (/remove role)");
+        const removedAt = new Date();
+        await VoiceParticipantRoleGrant.updateMany(
+          {
+            guildId: guild.id,
+            memberId: member.id,
+            roleId,
+            status: { $in: [null, "active", "removing", "failed"] },
+          },
+          {
+            $set: {
+              status: "removed",
+              removedAt,
+              cleanupAt: new Date(removedAt.getTime() + 30 * 24 * 60 * 60 * 1000),
+            },
+          },
+        );
+        removedRoles += 1;
+      } catch (error) {
+        failedRoles += 1;
+        reasons.add(error?.code === 50013 ? "権限またはロール階層が不足しています" : "一部メンバーの解除に失敗しました");
+      }
+    }
+    if (attemptedRoles > 0 && removedRoles === attemptedRoles) fullySucceeded += 1;
+    else if (removedRoles > 0 && failedRoles > 0) partiallySucceeded += 1;
+    else fullyFailed += 1;
+  }
+  const restoreSettings = await getGuildSettings(guild.id).catch(() => settings);
+  const permissionRestored = restoreSettings?.gatheringVcRestorePending
+    ? await restoreGatheringVcPermissionAfterSplit(guild, restoreSettings).catch(() => false)
+    : null;
+  await interaction.editReply([
+    `完全成功: ${fullySucceeded}人`,
+    `一部成功: ${partiallySucceeded}人`,
+    `完全失敗: ${fullyFailed}人`,
+    "参加者ロールを一括解除しました。",
+    `対象ロール: ${roleIds.length}件`,
+    `対象メンバー: ${targetMembers.size}人`,
+    `スキップ: ${skipped}件`,
+    ...(permissionRestored === null ? [] : [`集合VC権限復元: ${permissionRestored ? "成功" : "失敗"}`]),
+    ...(reasons.size ? [`理由: ${[...reasons].join("、")}`] : []),
+  ].join("\n"));
+  await sendOperationalLog({
+    guild,
+    settings,
+    fallbackChannel: interaction.channel,
+    content: `/remove role を実行しました。対象 ${targetMembers.size} 人、完全成功 ${fullySucceeded} 人、一部成功 ${partiallySucceeded} 人、完全失敗 ${fullyFailed} 人、スキップ ${skipped} 件。理由: ${[...reasons].join("、") || "なし"}`,
+  }).catch((error) => logRecoverableError("Failed to log bulk role removal", error));
+}
+
+async function handleKokuchiSetting(interaction) {
+  const channel = interaction.options.getChannel("announcement_channel", false);
+  const overviewChannel = interaction.options.getChannel("overview_channel", false);
+  const gatheringVoiceChannel = interaction.options.getChannel("gathering_voice_channel", false);
+  const eventTime = interaction.options.getString("event_time", false);
+  const mentionRole = interaction.options.getRole("mention_role", false);
+  const removeMentionRole = interaction.options.getRole("remove_mention_role", false);
+  const parsedEventTime = eventTime === null ? null : normalizeKokuchiEventTime(eventTime);
+
+  if (eventTime !== null && !parsedEventTime) {
+    await replyOrFollowUp(interaction, { content: "開催予定時刻は HH:mm（00:00〜23:59）で指定してください。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  if (!channel && !overviewChannel && !gatheringVoiceChannel && !parsedEventTime && !mentionRole && !removeMentionRole) {
+    await replyOrFollowUp(interaction, { content: "変更する告知設定を1つ以上指定してください。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const current = await getGuildSettings(interaction.guildId);
+  if (mentionRole) {
+    const botMember = interaction.guild.members.me ?? await interaction.guild.members.fetchMe().catch(() => null);
+    if (!mentionRole.mentionable && !botMember?.permissions.has(PermissionFlagsBits.MentionEveryone)) {
+      await replyOrFollowUp(interaction, {
+        content: "そのロールはメンション不可で、Botにロールメンション権限もありません。ロールをメンション可能にするか、Botへ「@everyone、@here、すべてのロールにメンション」権限を付与してください。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+  }
+  const roleIds = new Set(Array.isArray(current?.kokuchiMentionRoleIds)
+    ? current.kokuchiMentionRoleIds
+    : (Array.isArray(current?.kokuchiGatheringReminderRoleIds) ? current.kokuchiGatheringReminderRoleIds : []));
+  if (mentionRole) roleIds.add(mentionRole.id);
+  if (removeMentionRole) roleIds.delete(removeMentionRole.id);
+
+  const settings = await saveGuildSettingsWithCurrent(interaction.guildId, current, {
+    ...(channel ? { kokuchiAnnouncementChannelId: channel.id, wadaiChannelId: channel.id, splitStartChannelId: channel.id } : {}),
+    ...(overviewChannel ? { kokuchiOverviewChannelId: overviewChannel.id } : {}),
+    ...(gatheringVoiceChannel ? { gatheringVoiceChannelId: gatheringVoiceChannel.id } : {}),
+    ...(parsedEventTime ? { kokuchiEventTime: parsedEventTime } : {}),
+    ...(mentionRole || removeMentionRole ? { kokuchiMentionRoleIds: [...roleIds] } : {}),
+  });
+  const rescheduled = await rescheduleCurrentKokuchiEvent(interaction.guild, current, settings);
+  await replyOrFollowUp(interaction, {
+    content: `設定を保存しました。${rescheduled ? " 未実行の告知後続処理を再計算しました。" : ""}\n\n${formatSettings(settings)}`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
@@ -1136,11 +1284,7 @@ async function handleCallWaitSetting(interaction) {
     "call_wait_voice_category",
     false,
   );
-  const callWaitMode = interaction.options.getString("call_wait_mode", false);
-  const callWaitBosyuNoticeEnabled = interaction.options.getBoolean(
-    "call_wait_bosyu_notice_enabled",
-    false,
-  );
+  const callWaitIntervalMinutes = interaction.options.getInteger("call_wait_interval_minutes", false);
   const oteboQuickConfirmSeconds = interaction.options.getInteger(
     "otebo_quick_confirm_seconds",
     false,
@@ -1171,13 +1315,12 @@ async function handleCallWaitSetting(interaction) {
     patch.callWaitVoiceCategoryId = callWaitVoiceCategory.id;
   }
 
-  if (callWaitMode !== null) {
-    patch.callWaitMode = normalizeCallWaitMode(callWaitMode);
+  patch.callWaitMode = CALL_WAIT_MODE_BUTTON;
+
+  if (callWaitIntervalMinutes !== null) {
+    patch.callWaitIntervalMinutes = normalizeCallWaitIntervalMinutes(callWaitIntervalMinutes);
   }
 
-  if (callWaitBosyuNoticeEnabled !== null) {
-    patch.callWaitBosyuNoticeEnabled = callWaitBosyuNoticeEnabled;
-  }
 
   if (oteboQuickConfirmSeconds !== null) {
     patch.oteboQuickConfirmSeconds = oteboQuickConfirmSeconds;
@@ -1201,8 +1344,7 @@ async function handleCallWaitSetting(interaction) {
   if (
     currentSettings?.callWaitPrompt &&
     (callWaitEnabled === false ||
-      callWaitPromptChannel ||
-      callWaitMode)
+      callWaitPromptChannel)
   ) {
     await endCallWaitInterestsForRecruitment(interaction.guildId, currentSettings.callWaitPrompt.messageId);
     await deleteCallWaitPrompt(interaction.guild, currentSettings.callWaitPrompt);
@@ -1561,7 +1703,7 @@ function formatSplitClosingThanksMessage(settings, participantMemberIds) {
 }
 
 function getKokuchiAnnouncementChannelId(settings) {
-  return settings?.wadaiChannelId ?? settings?.splitStartChannelId ?? null;
+  return settings?.kokuchiAnnouncementChannelId ?? settings?.wadaiChannelId ?? settings?.splitStartChannelId ?? null;
 }
 
 function getKokuchiOverviewChannelId(settings) {
@@ -1645,6 +1787,15 @@ async function sendSplitGroupingLog({ guild, settings, content }) {
   });
 }
 
+function hasActiveKokuchiEvent(settings) {
+  return [
+    ["pending", "failed"].includes(settings?.kokuchiPreNoticeState),
+    ["pending", "failed", "processing", "opened"].includes(settings?.gatheringVcUnlockState),
+    ["pending", "failed"].includes(settings?.kokuchiGatheringReminderState),
+    settings?.gatheringVcRestorePending === true,
+  ].some(Boolean);
+}
+
 async function handleKokuchi(interaction) {
   if (!interaction.inGuild()) {
     await replyOrFollowUp(interaction, {
@@ -1676,7 +1827,7 @@ async function handleKokuchi(interaction) {
   if (!sendChannel) {
     await replyOrFollowUp(interaction, {
       content:
-        "告知送信先を取得できませんでした。`channel` を指定するか、`/setting wadai wadaich:送信先` を設定してください。",
+        "告知送信先を取得できませんでした。`channel` を指定するか、`/setting kokuchi announcement_channel:送信先` を設定してください。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1693,7 +1844,7 @@ async function handleKokuchi(interaction) {
   if (!resolvedOverviewChannel || typeof resolvedOverviewChannel.send !== "function") {
     await replyOrFollowUp(interaction, {
       content:
-        "概要案内チャンネルが未設定です。`/setting splitvc kokuchi_overview_channel:概要案内チャンネル` を設定してください。",
+        "概要案内チャンネルが未設定です。`/setting kokuchi overview_channel:概要案内チャンネル` を設定してください。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1721,6 +1872,18 @@ async function handleKokuchi(interaction) {
     return;
   }
 
+  const cancellationInProgress = await KokuchiReservation.exists({
+    guildId: interaction.guildId,
+    status: { $in: ["canceling", "cancel_partial"] },
+  });
+  if (hasActiveKokuchiEvent(settings) || cancellationInProgress) {
+    await replyOrFollowUp(interaction, {
+      content: "前回のkokuchiに関連する処理がまだ完了していません。前回の後続処理をキャンセルするか、イベント終了後にもう一度実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   if (setHour !== null && setHour !== undefined) {
     const scheduledAt = getNextKokuchiReservationAt({ weekday, hour: setHour });
     if (!scheduledAt) {
@@ -1736,6 +1899,7 @@ async function handleKokuchi(interaction) {
       reservation = await KokuchiReservation.create({
       guildId: interaction.guildId, reservationId, weekday, displayHour: setHour, scheduledAt,
       eventDate: getKokuchiEventDate(scheduledAt, setHour),
+      eventAt: getNextKokuchiEventAt({ weekday, eventTime: normalizeKokuchiEventTime(settings?.kokuchiEventTime) ?? "21:00", now: scheduledAt }),
       activeKey: interaction.guildId,
       publicationKey: `${interaction.guildId}:${getKokuchiEventDate(scheduledAt, setHour)}`,
       commandUserId: interaction.user.id, commandChannelId: interaction.channelId,
@@ -1815,6 +1979,7 @@ async function publishImmediateKokuchi({ interaction, weekday, sendChannel, over
   const now = new Date();
   const jstHour = new Date(now.getTime() + 9 * 60 * 60 * 1000).getUTCHours();
   const eventDate = getKokuchiEventDate(now, jstHour);
+  const eventAt = getNextKokuchiEventAt({ weekday, eventTime: normalizeKokuchiEventTime(settings?.kokuchiEventTime) ?? "21:00", now });
   const reservation = await KokuchiReservation.create({
     guildId: interaction.guildId,
     reservationId: createSessionId(),
@@ -1822,6 +1987,7 @@ async function publishImmediateKokuchi({ interaction, weekday, sendChannel, over
     displayHour: jstHour,
     scheduledAt: now,
     eventDate,
+    eventAt,
     activeKey: interaction.guildId,
     publicationKey: `${interaction.guildId}:${eventDate}`,
     commandUserId: interaction.user.id,
@@ -1842,6 +2008,8 @@ async function publishImmediateKokuchi({ interaction, weekday, sendChannel, over
       sendChannel,
       overviewChannel,
       settings,
+      eventAt,
+      kokuchiEventId: reservation.reservationId,
       leaseKey: `kokuchi-publish:${interaction.guildId}:${eventDate}`,
       onPublished: async ({ postedMessage, postedAt }) => {
         const persisted = await KokuchiReservation.updateOne(
@@ -1878,6 +2046,7 @@ async function publishImmediateKokuchi({ interaction, weekday, sendChannel, over
     if (completed.matchedCount !== 1 || completed.modifiedCount !== 1) {
       throw new Error("Immediate kokuchi publication succeeded but confirmation could not be persisted");
     }
+    await createKokuchiCancellationControl(interaction.channel, reservation).catch((error) => logRecoverableError("Failed to create immediate kokuchi cancellation control", error));
   } catch (error) {
     const publication = error?.kokuchiPublication ?? null;
     const unconfirmed = Boolean(publication || error?.kokuchiPublicationAttempted === true);
@@ -2061,6 +2230,24 @@ async function sendKokuchiPreNotice(guildId) {
   });
 }
 
+async function restorePendingGatheringVcPermissions() {
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const settings = await getGuildSettings(guild.id);
+      if (!settings?.gatheringVcRestorePending) continue;
+      const activeSplit = await SplitProcessSession.exists({
+        guildId: guild.id,
+        status: { $in: ["active", "feedback_open", "role_remove_pending", "cleaning_up"] },
+      });
+      // Role-removal recovery owns active sessions.  A snapshot left after a
+      // completed session is safe to retry after restart.
+      if (!activeSplit) await restoreGatheringVcPermissionAfterSplit(guild, settings);
+    } catch (error) {
+      logRecoverableError(`Failed to restore pending gathering VC permission for ${guild.id}`, error);
+    }
+  }
+}
+
 async function scheduleGatheringVcUnlock(guild, settings) {
   clearGatheringVcUnlockTimer(guild.id);
 
@@ -2142,7 +2329,7 @@ async function scheduleKokuchiGatheringReminder(guild, settings) {
   const now = new Date();
 
   if (remindAt.getTime() <= now.getTime()) {
-    // The 20:55 reminder is useful only before its scheduled time.
+    // A reminder is useful only before its scheduled time.
     await transitionKokuchiGatheringReminder({
       guildId: guild.id,
       fromStates: ["pending", "failed"],
@@ -2228,8 +2415,8 @@ async function sendKokuchiGatheringReminder(guildId) {
     return;
   }
 
-  const roleIds = Array.isArray(claimed.kokuchiGatheringReminderRoleIds)
-    ? claimed.kokuchiGatheringReminderRoleIds.filter(Boolean)
+  const roleIds = Array.isArray(claimed.kokuchiMentionRoleIds)
+    ? claimed.kokuchiMentionRoleIds.filter(Boolean)
     : [];
   const gatheringVoiceChannelId = getGatheringVcUnlockChannelId(claimed);
 
@@ -2322,7 +2509,7 @@ async function applyGatheringVcUnlock(guildId) {
     guild,
     settings: claimed,
     canConnect: true,
-    reason: "会話練習会の集合VCを20:40に開放",
+    reason: "会話練習会の集合VCを開放",
   });
 
   if (changed) {
@@ -2345,21 +2532,19 @@ async function applyGatheringVcUnlock(guildId) {
 
 async function closeGatheringVcAfterSplit(guild, settings) {
   clearGatheringVcUnlockTimer(guild.id);
-
-  const changed = await setGatheringVcConnectPermission({
+  const closed = await setGatheringVcConnectPermission({
     guild,
     settings,
     canConnect: false,
-    reason: "/splitvc転送完了に伴う集合VC接続停止",
+    reason: "/splitvc完了に伴う集合VCの閲覧・接続停止",
   });
-
-  if (changed) {
-    await saveGuildSettingsWithCurrent(guild.id, settings, {
-      gatheringVcUnlockState: "closed",
-    });
-  }
-
-  return changed;
+  if (!closed) return false;
+  await saveGuildSettingsWithCurrent(guild.id, settings, {
+    gatheringVcUnlockState: "closed",
+    gatheringVcRestorePending: true,
+    gatheringVcRestorePendingAt: new Date().toISOString(),
+  });
+  return true;
 }
 
 async function setGatheringVcConnectPermission({
@@ -2382,6 +2567,19 @@ async function setGatheringVcConnectPermission({
     return false;
   }
 
+  const snapshot = settings?.gatheringVcPermissionBeforeOpen;
+  if (!snapshot || snapshot.channelId !== channel.id || snapshot.guildId !== guild.id) {
+    const overwrite = channel.permissionOverwrites.cache.get(guild.id) ?? null;
+    settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+      gatheringVcPermissionBeforeOpen: createEveryonePermissionSnapshot({
+        channelId: channel.id,
+        guildId: guild.id,
+        overwrite,
+        permissions: PermissionFlagsBits,
+      }),
+    });
+  }
+
   const changed = await editEveryoneConnectPermission({
     channel,
     guildId: guild.id,
@@ -2398,8 +2596,43 @@ async function setGatheringVcConnectPermission({
   return changed;
 }
 
+async function restoreGatheringVcPermissionAfterSplit(guild, settings) {
+  const snapshot = settings?.gatheringVcPermissionBeforeOpen;
+  const channelId = getGatheringVcUnlockChannelId(settings);
+  if (!snapshot || !channelId || snapshot.channelId !== channelId || snapshot.guildId !== guild.id) {
+    return false;
+  }
+  const channel = await guild.channels.fetch(channelId).catch(() => null);
+  if (!channel?.isVoiceBased() || typeof channel.permissionOverwrites?.edit !== "function") return false;
+
+  const overwrite = channel.permissionOverwrites.cache.get(guild.id) ?? null;
+  const patch = getRestorePermissionPatch({ snapshot, overwrite, permissions: PermissionFlagsBits });
+  try {
+    if (Object.keys(patch).length > 0) {
+      await channel.permissionOverwrites.edit(guild.id, patch, {
+        reason: "/splitvc完了に伴う集合VC権限の復元",
+      });
+    }
+    await saveGuildSettingsWithCurrent(guild.id, settings, {
+      gatheringVcUnlockState: "closed",
+      gatheringVcPermissionBeforeOpen: null,
+      gatheringVcRestorePending: false,
+      gatheringVcRestorePendingAt: null,
+    });
+    return true;
+  } catch (error) {
+    await sendOperationalLog({
+      guild,
+      settings,
+      fallbackChannel: null,
+      content: `集合VC権限の復元に失敗しました: ${error.message}`,
+    }).catch((logError) => logRecoverableError("Failed to log gathering VC permission restore failure", logError));
+    return false;
+  }
+}
+
 /** Shared by immediate and reserved /kokuchi posting. */
-async function publishKokuchi({ guild, weekday, sendChannel, overviewChannel, settings = null, onPublished = null, leaseKey = null }) {
+async function publishKokuchi({ guild, weekday, sendChannel, overviewChannel, settings = null, onPublished = null, leaseKey = null, eventAt = null, kokuchiEventId = null }) {
   if (kokuchiPublishGuildLocks.has(guild.id)) {
     throw new Error("A /kokuchi publication is already in progress for this guild.");
   }
@@ -2413,24 +2646,37 @@ async function publishKokuchi({ guild, weekday, sendChannel, overviewChannel, se
   if (!lease) {
     throw new Error("A /kokuchi publication is already in progress for this guild.");
   }
+  const currentSettings = settings ?? await getGuildSettings(guild.id);
+  const mentionRoleIds = [...new Set(Array.isArray(currentSettings?.kokuchiMentionRoleIds)
+    ? currentSettings.kokuchiMentionRoleIds.filter(Boolean)
+    : [])];
   postedAt = new Date();
   publicationAttempted = true;
   postedMessage = await sendChannel.send({
-    content: formatKokuchiMessage({ weekday, overviewChannelId: overviewChannel.id }),
-    allowedMentions: { parse: [] },
+    content: `${mentionRoleIds.map((roleId) => `<@&${roleId}>`).join(" ")} ${formatKokuchiMessage({ weekday, overviewChannelId: overviewChannel.id, eventTime: currentSettings?.kokuchiEventTime })}`.trim(),
+    allowedMentions: { roles: mentionRoleIds },
   });
   if (onPublished) {
     await onPublished({ postedMessage, postedAt });
   }
-  const currentSettings = settings ?? await getGuildSettings(guild.id);
-  const preNoticeAt = getKokuchiPreNoticeAt(postedAt);
-  const unlockAt = getGatheringVcUnlockAt(postedAt);
-  const reminderAt = getKokuchiGatheringReminderAt(postedAt);
+  const resolvedEventAt = eventAt instanceof Date && Number.isFinite(eventAt.getTime())
+    ? eventAt
+    : getNextKokuchiEventAt({
+      weekday,
+      eventTime: normalizeKokuchiEventTime(currentSettings?.kokuchiEventTime) ?? "21:00",
+      now: postedAt,
+    });
+  if (!resolvedEventAt) throw new Error("Kokuchi event time could not be calculated");
+  const preNoticeAt = getKokuchiPreNoticeAt(resolvedEventAt);
+  const unlockAt = getGatheringVcUnlockAt(resolvedEventAt);
+  const reminderAt = getKokuchiGatheringReminderAt(resolvedEventAt);
   const savedSettings = await saveGuildSettingsWithCurrent(guild.id, currentSettings, {
     lastKokuchiWeekday: weekday,
     lastKokuchiPostedAt: postedAt.toISOString(),
     lastKokuchiMessageId: postedMessage.id,
     lastKokuchiChannelId: postedMessage.channelId,
+    kokuchiEventId: kokuchiEventId,
+    kokuchiEventAt: resolvedEventAt.toISOString(),
     kokuchiPreNoticeAt: preNoticeAt.toISOString(),
     kokuchiPreNoticeChannelId: sendChannel.id,
     kokuchiPreNoticeState: preNoticeAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
@@ -2442,7 +2688,7 @@ async function publishKokuchi({ guild, weekday, sendChannel, overviewChannel, se
     kokuchiGatheringReminderState: reminderAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
   });
   // Each existing scheduler deliberately marks a past event as skipped, so a
-  // late reservation never replays the 20:30/20:40/20:55 actions.
+  // A late reservation never replays the already-passed timed actions.
   await scheduleKokuchiPreNotice(guild, savedSettings);
   await scheduleGatheringVcUnlock(guild, savedSettings);
   await scheduleKokuchiGatheringReminder(guild, savedSettings);
@@ -2565,12 +2811,32 @@ async function processKokuchiReservation(guildId, reservationId) {
       guild?.channels.fetch(reservation.targetChannelId), guild?.channels.fetch(reservation.overviewChannelId), getGuildSettings(guildId),
     ]);
     if (!guild || !sendChannel?.send || !overviewChannel?.send) throw new Error("Configured channel is unavailable");
+    let eventAt = new Date(reservation.eventAt);
+    if (!Number.isFinite(eventAt.getTime())) {
+      eventAt = getNextKokuchiEventAt({
+        weekday: reservation.weekday,
+        eventTime: normalizeKokuchiEventTime(settings?.kokuchiEventTime) ?? "21:00",
+        now: new Date(reservation.scheduledAt),
+      });
+      if (!Number.isFinite(eventAt?.getTime())) {
+        throw new Error("Reserved kokuchi has no valid eventAt");
+      }
+      const eventAtSaved = await KokuchiReservation.updateOne(
+        { _id: reservation._id, status: "processing" },
+        { $set: { eventAt } },
+      );
+      if (eventAtSaved.matchedCount !== 1) {
+        throw new Error("Reserved kokuchi eventAt could not be persisted");
+      }
+    }
     publication = await publishKokuchi({
       guild,
       weekday: reservation.weekday,
       sendChannel,
       overviewChannel,
       settings,
+      eventAt,
+      kokuchiEventId: reservation.reservationId,
       leaseKey: `kokuchi-publish:${guild.id}:${reservation.eventDate ?? getKokuchiEventDate(reservation.scheduledAt, reservation.displayHour)}`,
       onPublished: async ({ postedMessage, postedAt }) => {
         const publicationPersisted = await KokuchiReservation.updateOne(
@@ -2607,7 +2873,11 @@ async function processKokuchiReservation(guildId, reservationId) {
     if (sentPersisted.matchedCount !== 1 || sentPersisted.modifiedCount !== 1) {
       throw new Error("Reservation publication completed but sent status could not be persisted; automatic retry is disabled to prevent duplicates.");
     }
-    await editKokuchiReservationConfirmation(reservation, `【送信済み】\n\n告知を${formatJstReservationTime(new Date(reservation.scheduledAt), reservation.displayHour)}に送信しました。`);
+    await editKokuchiReservationConfirmation(
+      reservation,
+      `【送信済み】\n\n告知を${formatJstReservationTime(new Date(reservation.scheduledAt), reservation.displayHour)}に送信しました。未実行の後続処理は下のボタンでキャンセルできます。`,
+      createKokuchiCancellationComponents(reservation),
+    );
   } catch (error) {
     const confirmedPublication = publication?.postedMessage ?? error?.kokuchiPublication ?? null;
     const publicationUnconfirmed = Boolean(confirmedPublication || error?.kokuchiPublicationAttempted === true);
@@ -2661,14 +2931,31 @@ async function resumeKokuchiPostProcessing(reservation) {
   if (!Number.isFinite(postedAt.getTime())) throw new Error("Published kokuchi reservation has no valid publication time");
 
   const currentSettings = await getGuildSettings(guild.id);
-  const preNoticeAt = getKokuchiPreNoticeAt(postedAt);
-  const unlockAt = getGatheringVcUnlockAt(postedAt);
-  const reminderAt = getKokuchiGatheringReminderAt(postedAt);
+  const eventAt = new Date(reservation.eventAt ?? getNextKokuchiEventAt({
+    weekday: reservation.weekday,
+    eventTime: normalizeKokuchiEventTime(currentSettings?.kokuchiEventTime) ?? "21:00",
+    now: postedAt,
+  }));
+  if (!Number.isFinite(eventAt.getTime())) throw new Error("Published kokuchi reservation has no valid event time");
+  if (!reservation.eventAt) {
+    const eventAtSaved = await KokuchiReservation.updateOne(
+      { _id: reservation._id, status: { $in: ["processing", "published_unconfirmed"] } },
+      { $set: { eventAt } },
+    );
+    if (eventAtSaved.matchedCount !== 1) {
+      throw new Error("Recovered kokuchi eventAt could not be persisted");
+    }
+  }
+  const preNoticeAt = getKokuchiPreNoticeAt(eventAt);
+  const unlockAt = getGatheringVcUnlockAt(eventAt);
+  const reminderAt = getKokuchiGatheringReminderAt(eventAt);
   const savedSettings = await saveGuildSettingsWithCurrent(guild.id, currentSettings, {
     lastKokuchiWeekday: reservation.weekday,
     lastKokuchiPostedAt: postedAt.toISOString(),
     lastKokuchiMessageId: reservation.publicationMessageId,
     lastKokuchiChannelId: reservation.publicationChannelId ?? reservation.targetChannelId,
+    kokuchiEventId: reservation.reservationId,
+    kokuchiEventAt: eventAt.toISOString(),
     kokuchiPreNoticeAt: preNoticeAt.toISOString(),
     kokuchiPreNoticeChannelId: reservation.publicationChannelId ?? reservation.targetChannelId,
     kokuchiPreNoticeState: preNoticeAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
@@ -2702,52 +2989,190 @@ async function resumeKokuchiPostProcessing(reservation) {
   }
   await editKokuchiReservationConfirmation(
     reservation,
-    `【送信済み】\n\n告知を${formatJstReservationTime(new Date(reservation.scheduledAt), reservation.displayHour)}に送信しました。`,
+    `【送信済み】\n\n告知を${formatJstReservationTime(new Date(reservation.scheduledAt), reservation.displayHour)}に送信しました。未実行の後続処理は下のボタンでキャンセルできます。`,
+    createKokuchiCancellationComponents(reservation),
   );
 }
 
-async function editKokuchiReservationConfirmation(reservation, content) {
+function createKokuchiCancellationComponents(reservation) {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`${KOKUCHI_RESERVATION_CANCEL_CUSTOM_ID}:${reservation.reservationId}`).setLabel("後続処理をキャンセル").setStyle(ButtonStyle.Danger),
+  )];
+}
+
+async function editKokuchiReservationConfirmation(reservation, content, components = []) {
   const channel = await client.channels.fetch(reservation.confirmationChannelId).catch(() => null);
   const message = await channel?.messages?.fetch?.(reservation.confirmationMessageId).catch(() => null);
-  await message?.edit({ content, components: [] }).catch((error) => logRecoverableError("Failed to update kokuchi reservation confirmation", error));
+  await message?.edit({ content, components }).catch((error) => logRecoverableError("Failed to update kokuchi reservation confirmation", error));
+}
+
+async function createKokuchiCancellationControl(channel, reservation) {
+  if (!channel?.send) return null;
+  const confirmation = await channel.send({
+    content: "【告知後の操作】\n\n未実行の事前通知・集合VC開放・集合開始通知をキャンセルできます。",
+    components: createKokuchiCancellationComponents(reservation),
+  });
+  const persisted = await KokuchiReservation.updateOne(
+    { _id: reservation._id, status: "sent", confirmationMessageId: null },
+    { $set: { confirmationChannelId: confirmation.channelId, confirmationMessageId: confirmation.id } },
+  );
+  if (persisted.matchedCount !== 1) {
+    await confirmation.delete().catch(() => null);
+    return null;
+  }
+  return confirmation;
 }
 
 async function handleKokuchiReservationCancel(interaction) {
+  // Acknowledge the component before looking up or changing MongoDB state so
+  // a slow database cannot make the cancellation button appear to fail.
+  await interaction.deferUpdate();
   const reservationId = interaction.customId.slice(`${KOKUCHI_RESERVATION_CANCEL_CUSTOM_ID}:`.length);
   const reservation = await KokuchiReservation.findOne({ reservationId }).lean();
   if (!reservation) {
-    await interaction.reply({ content: "この告知予約は見つかりません。", flags: MessageFlags.Ephemeral });
+    await interaction.followUp({ content: "この告知予約は見つかりません。", flags: MessageFlags.Ephemeral });
     return;
   }
   const permitted = reservation.commandUserId === interaction.user.id || interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
   if (!permitted) {
-    await interaction.reply({ content: "この告知予約をキャンセルする権限がありません。", flags: MessageFlags.Ephemeral });
+    await interaction.followUp({ content: "この告知予約をキャンセルする権限がありません。", flags: MessageFlags.Ephemeral });
     return;
   }
-  if (reservation.status !== "pending") {
-    const content = reservation.status === "sent"
-      ? "この告知予約はすでに送信済みです。"
-      : reservation.status === "canceled"
+  if (!["pending", "sent", "cancel_partial"].includes(reservation.status)) {
+    const content = reservation.status === "canceled"
         ? "この告知予約はすでにキャンセルされています。"
         : reservation.status === "failed"
           ? "この告知予約は送信失敗として終了しています。"
           : "この告知予約は現在送信処理中のため、キャンセルできません。";
-    await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
     return;
   }
   const reminderStatus = getKokuchiReminderStatusOnCancel(reservation.reminderStatus);
   const reminderPatch = reminderStatus === reservation.reminderStatus ? {} : { reminderStatus };
   const canceled = await KokuchiReservation.findOneAndUpdate(
-    { _id: reservation._id, status: "pending" },
-    { $set: { status: "canceled", canceledAt: new Date(), cleanupAt: getKokuchiReservationCleanupAt(), ...reminderPatch }, $unset: { activeKey: 1 } },
+    { _id: reservation._id, status: { $in: ["pending", "sent", "cancel_partial"] } },
+    {
+      $set: {
+        status: "canceling",
+        cancellationStartedAt: new Date(),
+        cancellationError: null,
+        ...reminderPatch,
+      },
+    },
     { returnDocument: "after", lean: true },
   );
-  if (!canceled) {
-    await interaction.reply({ content: "この告知予約はすでに処理されています。", flags: MessageFlags.Ephemeral });
+  if (canceled) {
+    const cancellation = await completeKokuchiCancellation({
+      reservation: canceled,
+      guild: interaction.guild ?? await client.guilds.fetch(canceled.guildId).catch(() => null),
+    });
+    const completeContent = formatKokuchiCancellationResult(cancellation);
+    await interaction.editReply({
+      content: completeContent,
+      components: cancellation.status === "canceled" ? [] : createKokuchiCancellationComponents(canceled),
+    });
+    await sendOperationalLog({
+      guild: interaction.guild,
+      settings: cancellation.settings,
+      fallbackChannel: interaction.channel,
+      content: `kokuchi cancellation ${canceled.reservationId}: ${cancellation.status}; ${completeContent.replace(/\n/g, " ")}`,
+    }).catch((error) => logRecoverableError("Failed to log kokuchi reservation cancellation", error));
     return;
   }
-  clearKokuchiReservationTimers(reservationId);
-  await interaction.update({ content: "【キャンセル済み】\n\n予約していた告知の送信をキャンセルしました。", components: [] });
+  await interaction.followUp({ content: "この告知予約はすでに処理されています。", flags: MessageFlags.Ephemeral });
+}
+
+function emptyKokuchiCancellationResult() {
+  return { canceled: 0, alreadyCompleted: 0, alreadyCanceled: 0, failed: 0, errors: [] };
+}
+
+function addKokuchiCancellationResult(total, next) {
+  for (const key of ["canceled", "alreadyCompleted", "alreadyCanceled", "failed"]) {
+    total[key] += Number(next?.[key] ?? 0);
+  }
+  total.errors.push(...(Array.isArray(next?.errors) ? next.errors : []));
+}
+
+function formatKokuchiCancellationResult(result) {
+  const heading = result.status === "canceled" ? "【キャンセル完了】" : "【キャンセル一部完了】";
+  return [
+    heading,
+    `キャンセル成功：${result.canceled}件`,
+    `すでに実行済み：${result.alreadyCompleted}件`,
+    `すでにキャンセル済み：${result.alreadyCanceled}件`,
+    `失敗：${result.failed}件`,
+    `VC権限復元：${result.permissionRestored === "restored" ? "成功" : result.permissionRestored === "not_needed" ? "不要" : "失敗"}`,
+    ...(result.status === "cancel_partial" ? ["失敗した処理は同じボタンから再試行できます。"] : []),
+  ].join("\n");
+}
+
+async function completeKokuchiCancellation({ reservation, guild }) {
+  const result = emptyKokuchiCancellationResult();
+  clearKokuchiReservationTimers(reservation.reservationId);
+  let settings = null;
+  try {
+    settings = await getGuildSettings(reservation.guildId);
+  } catch (error) {
+    result.failed += 1;
+    result.errors.push(`GuildSettings could not be read: ${error.message}`);
+  }
+
+  const isCurrentEvent = settings?.kokuchiEventId === reservation.reservationId;
+  if (isCurrentEvent) {
+    clearKokuchiPreNoticeTimer(reservation.guildId);
+    clearGatheringVcUnlockTimer(reservation.guildId);
+    clearKokuchiGatheringReminderTimer(reservation.guildId);
+  }
+
+  const work = await Promise.allSettled([
+    cancelKokuchiTimedActions({ guildId: reservation.guildId, kokuchiEventId: reservation.reservationId }),
+    cancelKokuchiScheduledActions({ guildId: reservation.guildId, kokuchiEventId: reservation.reservationId }),
+  ]);
+  for (const item of work) {
+    if (item.status === "fulfilled") addKokuchiCancellationResult(result, item.value);
+    else {
+      result.failed += 1;
+      result.errors.push(item.reason?.message ?? String(item.reason));
+    }
+  }
+
+  let permissionRestored = "not_needed";
+  if (isCurrentEvent && (settings?.gatheringVcUnlockState === "opened" || settings?.gatheringVcRestorePending)) {
+    if (!guild) {
+      permissionRestored = "failed";
+      result.failed += 1;
+      result.errors.push("Guild was unavailable for gathering VC permission restoration.");
+    } else {
+      const restored = await restoreGatheringVcPermissionAfterSplit(guild, settings).catch((error) => {
+        result.errors.push(`Gathering VC permission restoration failed: ${error.message}`);
+        return false;
+      });
+      if (restored) permissionRestored = "restored";
+      else {
+        permissionRestored = "failed";
+        result.failed += 1;
+      }
+    }
+  }
+
+  const status = result.failed === 0 ? "canceled" : "cancel_partial";
+  const updated = await KokuchiReservation.updateOne(
+    { _id: reservation._id, status: "canceling" },
+    {
+      $set: {
+        status,
+        cancellationResults: result,
+        ...(status === "canceled"
+          ? { canceledAt: new Date(), cleanupAt: getKokuchiReservationCleanupAt(), cancellationError: null }
+          : { cancellationError: result.errors.join(" | ").slice(0, 4000) }),
+      },
+      $unset: status === "canceled" ? { activeKey: 1, cancellationStartedAt: 1 } : { activeKey: 1 },
+    },
+  );
+  if (updated.matchedCount !== 1) {
+    throw new Error("Kokuchi cancellation final state could not be persisted.");
+  }
+  return { ...result, status, settings, permissionRestored };
 }
 
 async function restoreKokuchiReservations() {
@@ -2806,6 +3231,31 @@ async function restoreKokuchiReservations() {
       console.error(`Failed to resume kokuchi post-processing ${reservation.reservationId}: ${error.message}`);
     }
   }
+  const unfinishedCancellations = await KokuchiReservation.find({
+    status: { $in: ["canceling", "cancel_partial"] },
+  }).lean();
+  for (const pendingCancellation of unfinishedCancellations) {
+    try {
+      const canceling = pendingCancellation.status === "canceling"
+        ? pendingCancellation
+        : await KokuchiReservation.findOneAndUpdate(
+          { _id: pendingCancellation._id, status: "cancel_partial" },
+          { $set: { status: "canceling", cancellationStartedAt: new Date() } },
+          { returnDocument: "after", lean: true },
+        );
+      if (!canceling) continue;
+      const guild = client.guilds.cache.get(canceling.guildId)
+        ?? await client.guilds.fetch(canceling.guildId).catch(() => null);
+      const result = await completeKokuchiCancellation({ reservation: canceling, guild });
+      await editKokuchiReservationConfirmation(
+        canceling,
+        formatKokuchiCancellationResult(result),
+        result.status === "canceled" ? [] : createKokuchiCancellationComponents(canceling),
+      );
+    } catch (error) {
+      console.error(`Failed to resume kokuchi cancellation ${pendingCancellation.reservationId}: ${error.message}`);
+    }
+  }
   const reservations = await KokuchiReservation.find({ status: "pending" }).lean();
   for (const reservation of reservations) {
     try {
@@ -2827,38 +3277,103 @@ function getGatheringVcUnlockChannelId(settings) {
   );
 }
 
-function getKokuchiPreNoticeAt(date) {
-  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
-  return new Date(Date.UTC(
-    jstDate.getUTCFullYear(),
-    jstDate.getUTCMonth(),
-    jstDate.getUTCDate(),
-    KOKUCHI_PRE_NOTICE_HOUR_JST - 9,
-    KOKUCHI_PRE_NOTICE_MINUTE_JST,
-    0,
-    0,
-  ));
+function normalizeKokuchiEventTime(value) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return null;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
-function getGatheringVcUnlockAt(date) {
-  return getJstScheduledTime(
-    date,
-    GATHERING_VC_OPEN_HOUR_JST,
-    GATHERING_VC_OPEN_MINUTE_JST,
+function getKokuchiTimedActionAt(eventAt, minutesBefore) {
+  return new Date(new Date(eventAt).getTime() - minutesBefore * 60_000);
+}
+
+function formatKokuchiDerivedTime(settings, minutesBefore) {
+  const [hour, minute] = (normalizeKokuchiEventTime(settings?.kokuchiEventTime) ?? "21:00")
+    .split(":")
+    .map(Number);
+  const minutes = (hour * 60 + minute - minutesBefore + 24 * 60) % (24 * 60);
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+function getKokuchiPreNoticeAt(eventAt) {
+  return getKokuchiTimedActionAt(eventAt, 30);
+}
+
+function getGatheringVcUnlockAt(eventAt) {
+  return getKokuchiTimedActionAt(eventAt, 20);
+}
+
+function getKokuchiGatheringReminderAt(eventAt) {
+  return getKokuchiTimedActionAt(eventAt, 5);
+}
+
+function getKokuchiEventAtOnSameJstDate(previousEventAt, eventTime) {
+  const prior = new Date(previousEventAt);
+  const [hour, minute] = (normalizeKokuchiEventTime(eventTime) ?? "21:00").split(":").map(Number);
+  const jst = new Date(prior.getTime() + 9 * 60 * 60 * 1000);
+  return new Date(Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth(), jst.getUTCDate(), hour - 9, minute, 0, 0));
+}
+
+async function rescheduleCurrentKokuchiEvent(guild, previousSettings, nextSettings) {
+  const eventId = previousSettings?.kokuchiEventId;
+  if (!eventId || previousSettings?.kokuchiEventId !== nextSettings?.kokuchiEventId) return false;
+  const settingsChanged = previousSettings.kokuchiEventTime !== nextSettings.kokuchiEventTime
+    || previousSettings.gatheringVoiceChannelId !== nextSettings.gatheringVoiceChannelId
+    || getKokuchiAnnouncementChannelId(previousSettings) !== getKokuchiAnnouncementChannelId(nextSettings);
+  if (!settingsChanged) return false;
+  const reservation = await KokuchiReservation.findOne({ reservationId: eventId, status: "sent" }).lean();
+  if (!reservation) return false;
+  const eventAt = getKokuchiEventAtOnSameJstDate(previousSettings.kokuchiEventAt ?? reservation.eventAt, nextSettings.kokuchiEventTime);
+  if (!Number.isFinite(eventAt.getTime())) return false;
+  clearKokuchiPreNoticeTimer(guild.id);
+  clearGatheringVcUnlockTimer(guild.id);
+  clearKokuchiGatheringReminderTimer(guild.id);
+  const now = new Date();
+  const stateFor = (previousState, at) => {
+    if (!["pending", "failed"].includes(previousState)) return previousState;
+    return at.getTime() > now.getTime() ? "pending" : "skipped";
+  };
+  const preNoticePending = ["pending", "failed"].includes(previousSettings.kokuchiPreNoticeState);
+  const unlockPending = ["pending", "failed"].includes(previousSettings.gatheringVcUnlockState);
+  const reminderPending = ["pending", "failed"].includes(previousSettings.kokuchiGatheringReminderState);
+  const saved = await saveGuildSettingsWithCurrent(guild.id, nextSettings, {
+    kokuchiEventAt: eventAt.toISOString(),
+    ...(preNoticePending ? {
+      kokuchiPreNoticeAt: getKokuchiPreNoticeAt(eventAt).toISOString(),
+      kokuchiPreNoticeChannelId: getKokuchiAnnouncementChannelId(nextSettings),
+      kokuchiPreNoticeState: stateFor(previousSettings.kokuchiPreNoticeState, getKokuchiPreNoticeAt(eventAt)),
+    } : {}),
+    ...(unlockPending ? {
+      gatheringVcUnlockAt: getGatheringVcUnlockAt(eventAt).toISOString(),
+      gatheringVcUnlockChannelId: getGatheringVcUnlockChannelId(nextSettings),
+      gatheringVcUnlockState: stateFor(previousSettings.gatheringVcUnlockState, getGatheringVcUnlockAt(eventAt)),
+    } : {}),
+    ...(reminderPending ? {
+      kokuchiGatheringReminderAt: getKokuchiGatheringReminderAt(eventAt).toISOString(),
+      kokuchiGatheringReminderChannelId: getKokuchiAnnouncementChannelId(nextSettings),
+      kokuchiGatheringReminderState: stateFor(previousSettings.kokuchiGatheringReminderState, getKokuchiGatheringReminderAt(eventAt)),
+    } : {}),
+  });
+  await KokuchiReservation.updateOne(
+    { _id: reservation._id, status: "sent" },
+    { $set: { eventAt } },
   );
-}
-
-function getKokuchiGatheringReminderAt(date) {
-  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
-  return new Date(Date.UTC(
-    jstDate.getUTCFullYear(),
-    jstDate.getUTCMonth(),
-    jstDate.getUTCDate(),
-    KOKUCHI_GATHERING_REMINDER_HOUR_JST - 9,
-    KOKUCHI_GATHERING_REMINDER_MINUTE_JST,
-    0,
-    0,
-  ));
+  await Promise.all([
+    preNoticePending ? scheduleKokuchiPreNotice(guild, saved) : null,
+    unlockPending ? scheduleGatheringVcUnlock(guild, saved) : null,
+    reminderPending ? scheduleKokuchiGatheringReminder(guild, saved) : null,
+  ]);
+  await sendOperationalLog({
+    guild,
+    settings: saved,
+    fallbackChannel: null,
+    content: `kokuchi開催設定を変更したため、未実行の後続処理を再スケジュールしました。開催回: ${eventId}`,
+  }).catch((error) => logRecoverableError("Failed to log kokuchi rescheduling", error));
+  return true;
 }
 
 function isSameJstDate(left, right) {
@@ -3610,13 +4125,18 @@ function scheduleNextCallWaitTick() {
     clearTimeout(callWaitTimer);
   }
 
-  const delayMs = getMsUntilNextHalfHour(new Date());
+  const now = new Date();
+  const delayMs = Math.min(...CALL_WAIT_INTERVAL_MINUTES.map((intervalMinutes) =>
+    getMsUntilNextJstCallWaitSlot({ now, intervalMinutes }),
+  ));
   callWaitTimer = setTimeout(() => {
+    processingScheduledCallWaitTick = true;
     void processCallWaitForAllGuilds()
       .catch((error) => {
         console.error(error);
       })
       .finally(() => {
+        processingScheduledCallWaitTick = false;
         scheduleNextCallWaitTick();
       });
   }, delayMs);
@@ -3813,7 +4333,15 @@ async function processCallWaitForGuild(guild, settings) {
     return;
   }
 
-    await sendCallWaitPromptForGuild(guild, settings, { force: false, now });
+    if (
+      !processingScheduledCallWaitTick
+      || isJstCallWaitSlotDue({
+        now,
+        intervalMinutes: getCallWaitIntervalMinutes(settings),
+      })
+    ) {
+      await sendCallWaitPromptForGuild(guild, settings, { force: false, now });
+    }
   } finally {
     if (lease) {
       await releaseMongoLease(lease).catch((error) => {
@@ -3860,18 +4388,15 @@ async function sendCallWaitPromptForGuild(guild, settings, { force = false, now 
     };
   }
 
-  const targetAt = getNextJstHalfHour(now);
-  const mode = normalizeCallWaitMode(settings.callWaitMode);
+  const targetAt = getNextJstCallWaitSlot({
+    now,
+    intervalMinutes: getCallWaitIntervalMinutes(settings),
+  });
   const message = await configured.promptChannel.send({
     content: formatCallWaitPromptV2(targetAt),
     allowedMentions: { parse: [] },
-    components:
-      mode === CALL_WAIT_MODE_BUTTON ? [createCallWaitInterestRow()] : [],
+    components: [createCallWaitInterestRow()],
   });
-
-  if (mode === CALL_WAIT_MODE_REACTION) {
-    await message.react(CALL_WAIT_REACTION).catch(() => null);
-  }
 
   try {
     await saveGuildSettingsWithCurrent(guild.id, settings, {
@@ -3879,7 +4404,8 @@ async function sendCallWaitPromptForGuild(guild, settings, { force = false, now 
         channelId: configured.promptChannel.id,
         messageId: message.id,
         targetAt: targetAt.toISOString(),
-        mode,
+        slotKey: getCallWaitSlotKey(targetAt, settings),
+        mode: CALL_WAIT_MODE_BUTTON,
         memberIds: [],
         lifecycleState: "open",
         lifecycleUpdatedAt: new Date().toISOString(),
@@ -3975,33 +4501,8 @@ async function evaluateCallWaitPrompt(guild, settings, now) {
     return { evaluated: true, memberIds: [] };
   }
 
-  const mode = normalizeCallWaitMode(prompt.mode ?? settings.callWaitMode);
-
-  if (mode === CALL_WAIT_MODE_BUTTON) {
-    const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
-    return { evaluated: true, memberIds, mode };
-  }
-
-  const reaction = message.reactions.cache.find(
-    (cachedReaction) => cachedReaction.emoji.name === CALL_WAIT_REACTION,
-  );
-  const users = reaction ? await reaction.users.fetch().catch(() => null) : null;
-  const memberIds = new Set();
-
-  if (users) {
-    for (const user of users.values()) {
-      if (user.bot) {
-        continue;
-      }
-
-      const member = await guild.members.fetch(user.id).catch(() => null);
-      if (member) {
-        memberIds.add(member.id);
-      }
-    }
-  }
-
-  return { evaluated: true, memberIds: [...memberIds], mode };
+  const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
+  return { evaluated: true, memberIds, mode: CALL_WAIT_MODE_BUTTON };
 }
 
 async function deleteCallWaitPrompt(guild, prompt) {
@@ -5365,34 +5866,6 @@ async function maybeSendPendingCallWaitStartNotice(guild, settings) {
   return true;
 }
 
-async function sendOteboBosyuFollowupNotice(guild, settings) {
-  if (settings.callWaitBosyuNoticeEnabled !== true || !settings.bosyuMentionRoleId) {
-    return;
-  }
-
-  const channel = await resolveConfiguredTextChannel(
-    guild,
-    getCallWaitNoticeChannelId(settings),
-  );
-
-  if (!channel || typeof channel.send !== "function") {
-    return;
-  }
-
-  await channel.send({
-    content: `<@&${settings.bosyuMentionRoleId}> 雑談が始まりました！ぜひ途中参加してみてください！`,
-    allowedMentions: { roles: [settings.bosyuMentionRoleId] },
-  }).catch((error) => {
-    console.error(`Failed to send otebo bosyu follow-up notice: ${error.message}`);
-  });
-}
-
-function normalizeCallWaitMode(mode) {
-  return mode === CALL_WAIT_MODE_REACTION
-    ? CALL_WAIT_MODE_REACTION
-    : CALL_WAIT_MODE_BUTTON;
-}
-
 function normalizeCallWaitMemberIds(memberIds) {
   return Array.isArray(memberIds)
     ? [...new Set(memberIds.filter((memberId) => typeof memberId === "string"))]
@@ -5541,6 +6014,11 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
           },
         },
       );
+      if (settings?.gatheringVcRestorePending) {
+        await restoreGatheringVcPermissionAfterSplit(guild, settings).catch((error) => {
+          logRecoverableError("Failed to restore gathering VC permission after split role removal", error);
+        });
+      }
       await SplitReviewDraft.deleteMany({ guildId: guild.id, splitSessionId: payload.sessionId }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
       if (session?.reviewButtonShown && session?.finishNoticeChannelId && session?.finishNoticeMessageId) {
         const noticeChannel = await guild.channels.fetch(session.finishNoticeChannelId).catch(() => null);
@@ -6568,7 +7046,7 @@ async function sendCallWaitSkippedNotice({ guild, settings, channel, now }) {
   }
 
   const message = await channel.send({
-    content: `現在複数人が雑談中のため、${formatJstTime(getNextJstHalfHour(now))}からの定時募集は行いません。`,
+    content: `現在複数人が雑談中のため、${formatJstTime(getNextJstCallWaitSlot({ now, intervalMinutes: getCallWaitIntervalMinutes(settings) }))}からの定時募集は行いません。`,
     allowedMentions: { parse: [] },
   }).catch((error) => {
     console.error(`Failed to send skipped call wait notice: ${error.message}`);
@@ -6651,8 +7129,12 @@ function formatCallWaitPromptV2(targetAt, memberIds = []) {
   ].join("\n");
 }
 
-function getMsUntilNextHalfHour(date) {
-  return Math.max(1000, getNextJstHalfHour(date).getTime() - date.getTime());
+function getCallWaitIntervalMinutes(settings = null) {
+  return normalizeCallWaitIntervalMinutes(settings?.callWaitIntervalMinutes);
+}
+
+function getCallWaitSlotKey(targetAt, settings = null) {
+  return createCallWaitSlotKey(targetAt, getCallWaitIntervalMinutes(settings));
 }
 
 function formatJstTime(date) {
@@ -7175,14 +7657,9 @@ function addUniqueMemberId(memberIds, memberId) {
   return [...new Set([...normalizeCallWaitMemberIds(memberIds), memberId].filter(Boolean))];
 }
 
-function createOteboVoiceStatusSession({ recruitment, memberIds, notifiedAt, settings }) {
+function createOteboVoiceStatusSession({ recruitment, memberIds, notifiedAt }) {
   const durationMinutes = getOteboDurationMinutes(recruitment.duration);
-  const shouldSendBosyuNotice = shouldSendOteboBosyuFollowupNotice(
-    recruitment,
-    settings,
-  );
-
-  if (!durationMinutes && !shouldSendBosyuNotice) {
+  if (!durationMinutes) {
     return null;
   }
 
@@ -7192,8 +7669,6 @@ function createOteboVoiceStatusSession({ recruitment, memberIds, notifiedAt, set
     memberIds: normalizeCallWaitMemberIds(memberIds),
     duration: normalizeOteboDuration(recruitment.duration),
     durationMinutes,
-    sendBosyuNotice: shouldSendBosyuNotice,
-    bosyuNoticeSentAt: null,
     notifiedAt: notifiedAt.toISOString(),
     statusChannelId: null,
     statusSetAt: null,
@@ -7212,15 +7687,6 @@ function getOteboDurationMinutes(duration) {
   }
 
   return null;
-}
-
-function shouldSendOteboBosyuFollowupNotice(recruitment, settings) {
-  return Boolean(
-    settings?.callWaitBosyuNoticeEnabled === true &&
-      settings?.bosyuMentionRoleId &&
-      recruitment?.mentionBosyu !== true &&
-      normalizeOteboDuration(recruitment?.duration) === OTEBO_DURATION_NONE,
-  );
 }
 
 function getOteboVoiceStatusLabel(duration) {
@@ -7966,15 +8432,6 @@ async function processOteboVoiceStatusSessions(guild, settings) {
 
     let nextSession = session;
 
-    if (session.sendBosyuNotice && !session.bosyuNoticeSentAt) {
-      await sendOteboBosyuFollowupNotice(guild, settings);
-      nextSession = {
-        ...nextSession,
-        bosyuNoticeSentAt: new Date().toISOString(),
-      };
-      changed = true;
-    }
-
     if (!session.durationMinutes) {
       delete sessions[session.id];
       changed = true;
@@ -8241,10 +8698,11 @@ function getOteboVoiceStatusTimerKey(guildId, sessionId) {
 }
 
 function formatKokuchiMessage({ weekday, overviewChannelId }) {
+  const eventTime = normalizeKokuchiEventTime(arguments[0]?.eventTime) ?? "21:00";
   const weekdayLabel = weekday === "土" ? "土曜日" : "火曜日";
   const lines = [
     `本日は${weekdayLabel}！`,
-    "21:00から会話練習会です！",
+    `${normalizeKokuchiEventTime(eventTime) ?? "21:00"}から会話練習会です！`,
     `（概要は <#${overviewChannelId}> から）`,
   ];
 
@@ -10120,6 +10578,7 @@ async function handleSplitVoice(interaction) {
     await operationChannel.send("転送をキャンセルしました。");
   } else {
     const transferResult = await transferGroups(groups, {
+      splitSessionId,
       parentChannel: config.parentChannel,
       childCategoryId: config.childCategoryId,
       participantRole: config.tempRole,
@@ -10914,6 +11373,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     participantRole,
     participantMemberIds,
     participantRoleGrantedMemberIds = null,
+    splitSessionId,
   ) {
     const alreadyHasRole = member.roles.cache.has(participantRole.id);
     if (!alreadyHasRole) {
@@ -11022,6 +11482,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           config.participantRole,
           participantMemberIds,
           participantRoleGrantedMemberIds,
+          config.splitSessionId,
         );
 
         if (!seedTransfer.moved) {
@@ -11037,7 +11498,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           if (!seedHadParticipantRole) {
             await removeVoiceParticipantRole(seedMember, config.participantRole.id, {
               sourceType: "splitvc",
-              sourceId: splitSessionId,
+              sourceId: config.splitSessionId,
             }).catch((rollbackError) => {
               console.error(`Failed to roll back split participant role for ${seedMember.id}: ${rollbackError.message}`);
             });
@@ -11072,6 +11533,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
               config.participantRole,
               participantMemberIds,
               participantRoleGrantedMemberIds,
+              config.splitSessionId,
             );
 
             if (!transfer.moved) {
@@ -11326,6 +11788,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           options.participantRole,
           options.participantMemberIds,
           options.participantRoleGrantedMemberIds,
+          options.splitSessionId,
         );
         if (!transfer.moved) {
           throw new Error(`Participant role grant failed for ${transfer.memberName}`);
@@ -11378,6 +11841,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         participantRoleGrantedMemberIds: options.participantRoleGrantedMemberIds,
         guild: options.guild,
         settings: options.settings,
+        splitSessionId: options.splitSessionId,
       });
 
       if (result.childChannelId) {
@@ -11474,6 +11938,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     participantRole,
     participantMemberIds,
     participantRoleGrantedMemberIds,
+    splitSessionId,
   ) {
     return moveMemberWithParticipantRole(
       member,
@@ -11482,6 +11947,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       participantRole,
       participantMemberIds,
       participantRoleGrantedMemberIds,
+      splitSessionId,
     );
   }
 
@@ -11499,6 +11965,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         config.participantRole,
         config.participantMemberIds,
         config.participantRoleGrantedMemberIds,
+        config.splitSessionId,
       );
 
       if (!seedTransfer.moved) {
@@ -11516,7 +11983,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         if (!seedHadParticipantRole) {
           await removeVoiceParticipantRole(seedMember, config.participantRole.id, {
             sourceType: "splitvc",
-            sourceId: splitSessionId,
+            sourceId: config.splitSessionId,
           }).catch((rollbackError) => {
             console.error(`Failed to roll back waiting split participant role for ${seedMember.id}: ${rollbackError.message}`);
           });
@@ -11549,6 +12016,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
             config.participantRole,
             config.participantMemberIds,
             config.participantRoleGrantedMemberIds,
+            config.splitSessionId,
           );
 
           if (!transfer.moved) {
@@ -11606,6 +12074,22 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       if (claimed) await failAction(actionKey, `Failed to remove role from ${result.failed} member(s)`).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
       await persistSplitProcessSession(options.splitSessionId, { status: "role_remove_pending", phase: "role_remove_pending", roleRemovalCompleted: false, lastError: `Failed to remove role from ${result.failed} member(s)` });
       throw new Error(`Failed to remove role from ${result.failed} member(s)`);
+    }
+    const settings = await getGuildSettings(options.guild.id);
+    if (settings?.gatheringVcRestorePending) {
+      const restored = await restoreGatheringVcPermissionAfterSplit(options.guild, settings)
+        .catch((error) => {
+          logRecoverableError("Failed to restore gathering VC permission after split cancellation", error);
+          return false;
+        });
+      if (!restored) {
+        await sendOperationalLog({
+          guild: options.guild,
+          settings,
+          fallbackChannel: options.channel,
+          content: `集合VC権限を復元できませんでした。再起動時に再試行します。session=${options.splitSessionId}`,
+        }).catch((error) => logRecoverableError("Failed to log gathering VC restore pending state", error));
+      }
     }
     if (claimed) await finishAction(actionKey);
     if (options.temporaryWaitingVcDeleteTimer) clearTimeout(options.temporaryWaitingVcDeleteTimer);
@@ -11926,11 +12410,10 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     }
 
     return [
-      "【/splitvc・PB連携】",
+      "【splitvc】",
       `参加者ロール: ${settings.tempRoleId ? `<@&${settings.tempRoleId}>` : "未設定"}`,
       `PB親チャンネル: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
       `子VCカテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
-      `告知の概要案内チャンネル: ${getKokuchiOverviewChannelId(settings) ? `<#${getKokuchiOverviewChannelId(settings)}>` : "未設定"}`,
       `待機VCカテゴリ: ${settings.waitingVcCategoryId ? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
       `待機VC名: ${settings.waitingVcName || DEFAULT_WAITING_VC_NAME}`,
       `転送前待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
@@ -11938,23 +12421,28 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `通知後ロール解除待機: ${getNonNegativeInteger(settings.roleRemoveWaitMinutes, DEFAULT_ROLE_REMOVE_WAIT_MINUTES)}分`,
       `終了通知文: ${settings.finishMessage || DEFAULT_FINISH_MESSAGE}`,
       "",
-      "【/b 募集】",
+      "【通常募集】",
       `使用チャンネル: ${settings.bosyuChannelId ? `<#${settings.bosyuChannelId}>` : "制限なし"}`,
       `メンションロール: ${settings.bosyuMentionRoleId ? `<@&${settings.bosyuMentionRoleId}>` : "未設定"}`,
       "",
-      "【VC集合フォーム】",
+      "【雑談・VC集合】",
       `機能: ${settings.voiceReminderEnabled === false ? "無効" : "有効"}`,
       `対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
       `対象子VCカテゴリ: ${settings.voiceReminderChildCategoryId ? `<#${settings.voiceReminderChildCategoryId}>` : "未設定"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       "",
-      "【おすすめ話題・案内】",
+      "【kokuchi】",
+      `開催予定時刻: ${normalizeKokuchiEventTime(settings.kokuchiEventTime) ?? "21:00"}`,
+      `30分前通知時刻: ${formatKokuchiDerivedTime(settings, 30)}`,
+      `VC開放時刻: ${formatKokuchiDerivedTime(settings, 20)}`,
+      `募集開始通知時刻: ${formatKokuchiDerivedTime(settings, 5)}`,
       `/kokuchi告知・スタート案内送信先: ${getKokuchiAnnouncementChannelId(settings) ? `<#${getKokuchiAnnouncementChannelId(settings)}>` : "未設定"}`,
+      `概要チャンネル: ${getKokuchiOverviewChannelId(settings) ? `<#${getKokuchiOverviewChannelId(settings)}>` : "未設定"}`,
       `集合VC: ${settings.gatheringVoiceChannelId ? `<#${settings.gatheringVoiceChannelId}>` : "未設定"}`,
-      `20:55集合通知メンションロール: ${Array.isArray(settings.kokuchiGatheringReminderRoleIds) && settings.kokuchiGatheringReminderRoleIds.length > 0 ? settings.kokuchiGatheringReminderRoleIds.map((roleId) => `<@&${roleId}>`).join(" ") : "未設定"}`,
+      `告知メンションロール: ${Array.isArray(settings.kokuchiMentionRoleIds) && settings.kokuchiMentionRoleIds.length > 0 ? settings.kokuchiMentionRoleIds.map((roleId) => `<@&${roleId}>`).join(" ") : "未設定"}`,
       `終了後意見・苦情チャンネル: ${settings.splitFeedbackChannelId ? `<#${settings.splitFeedbackChannelId}>` : `<#${DEFAULT_SPLIT_FEEDBACK_CHANNEL_ID}>`}`,
       "",
-      "【意見・相談フォーム】",
+      "【フォーム・感想】",
       `フォーム設置先: ${settings.formChannelId ? `<#${settings.formChannelId}>` : "未設定"}`,
       `フォーム転送先: ${settings.formSendChannelId ? `<#${settings.formSendChannelId}>` : "未設定"}`,
       `感想送信先: ${settings.reviewSendChannelId ? `<#${settings.reviewSendChannelId}>` : "未設定"}`,
@@ -11963,15 +12451,15 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "【運用ログ】",
       `送信先: ${settings.logChannelId ? `<#${settings.logChannelId}>` : "未設定"}`,
       "",
-      "【通話待機システム】",
+      "【定時募集・通話待機】",
       `機能: ${settings.callWaitEnabled === true ? "有効" : "無効"}`,
-      `募集方式: ${normalizeCallWaitMode(settings.callWaitMode) === CALL_WAIT_MODE_BUTTON ? "ボタン式" : "リアクション式"}`,
+      "募集方式: ボタン式",
       `参加希望者ロール: ${settings.callWaitRoleId ? `<@&${settings.callWaitRoleId}>` : "未設定"}`,
       `募集メッセージ送信先: ${getCallWaitPromptChannelId(settings) ? `<#${getCallWaitPromptChannelId(settings)}>` : "未設定"}`,
       `集合通知送信先: ${getCallWaitNoticeChannelId(settings) ? `<#${getCallWaitNoticeChannelId(settings)}>` : "未設定"}`,
       `お手軽募集の30分前までの掲載先: ${settings.oteboPreviewChannelId ? `<#${settings.oteboPreviewChannelId}>` : "未設定"}`,
       `参加確認VCカテゴリ: ${settings.callWaitVoiceCategoryId ? `<#${settings.callWaitVoiceCategoryId}>` : "未設定"}`,
-      `募集ロール途中参加案内: ${settings.callWaitBosyuNoticeEnabled === true ? "有効" : "無効"}`,
+      `募集間隔: ${getCallWaitIntervalMinutes(settings)}分（JST 0:00基準）`,
       `お手軽募集の即時募集キャンセル猶予: ${getOteboQuickConfirmSeconds(settings)}秒`,
     ].join("\n");
   }
@@ -11979,7 +12467,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   function formatSettings(settings) {
     const text = formatLegacySettings(settings);
     if (!settings) return text;
-    return `${text}\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}\nVCコントロール対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\nVCタイマー通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}`;
+    return `${text}\n\n【プロフィール】\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}\n\n【VCコントロール】\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}`;
   }
 
   async function persistSplitParticipantMemberIds(sessionId, participantMemberIds) {

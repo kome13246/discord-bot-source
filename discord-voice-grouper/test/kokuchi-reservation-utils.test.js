@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getInterestCooldownSeconds, getKokuchiEventDate, getKokuchiReminderStatusOnCancel, getNextJstHalfHour, getNextKokuchiReservationAt } from "../src/kokuchi-reservation-utils.js";
+import { getInterestCooldownSeconds, getKokuchiEventDate, getKokuchiReminderStatusOnCancel, getNextJstHalfHour, getNextKokuchiEventAt, getNextKokuchiReservationAt } from "../src/kokuchi-reservation-utils.js";
 import { CallWaitInterest } from "../src/models/call-wait-interest.js";
 import { KokuchiReservation } from "../src/models/kokuchi-reservation.js";
 import { SplitProcessSession } from "../src/models/split-process-session.js";
@@ -59,6 +59,21 @@ test("同じ曜日の予約は未来なら当日、時刻を過ぎていれば�
   assert.equal(
     getNextKokuchiReservationAt({ weekday: "火", hour: 18, now: atTime }).toISOString(),
     "2026-08-04T09:00:00.000Z",
+  );
+});
+
+test("開催日時は投稿日ではなく指定曜日とJST開催時刻から計算する", () => {
+  assert.equal(
+    getNextKokuchiEventAt({ weekday: "火", eventTime: "00:15", now: new Date("2026-07-27T08:00:00.000Z") }).toISOString(),
+    "2026-07-27T15:15:00.000Z",
+  );
+  assert.equal(
+    getNextKokuchiEventAt({ weekday: "火", eventTime: "21:00", now: new Date("2026-07-26T15:00:00.000Z") }).toISOString(),
+    "2026-07-28T12:00:00.000Z",
+  );
+  assert.equal(
+    getNextKokuchiEventAt({ weekday: "火", eventTime: "00:15", now: new Date("2026-07-27T15:20:00.000Z") }).toISOString(),
+    "2026-08-03T15:15:00.000Z",
   );
 });
 
