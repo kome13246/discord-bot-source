@@ -4,10 +4,10 @@ const schema = new mongoose.Schema({
   guildId: { type: String, required: true },
   // Present only while pending/processing; a sparse unique index makes the
   // one-active-reservation rule safe across concurrent bot instances.
-  activeKey: { type: String, sparse: true },
+  activeKey: { type: String },
   // Retained after a confirmed publication so an immediate command cannot
   // publish the same guild/event-date combination twice.
-  publicationKey: { type: String, sparse: true },
+  publicationKey: { type: String },
   reservationId: { type: String, required: true, unique: true },
   weekday: { type: String, required: true },
   displayHour: { type: Number, required: true, min: 0, max: 24 },
