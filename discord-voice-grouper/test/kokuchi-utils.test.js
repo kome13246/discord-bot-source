@@ -1,16 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  createEveryonePermissionSnapshot,
   countUniqueParticipantIds,
   editEveryoneConnectPermission,
   formatSplitClosingThanks,
   getJstScheduledTime,
+  getRestorePermissionPatch,
   isKokuchiCallWaitPause,
   resolveKokuchiGatheringVoiceChannelId,
 } from "../src/kokuchi-utils.js";
-import { mergeGuildSettingsWithEnvironmentDefaults } from "../src/settings-store.js";
+import { mergeGuildSettingsWithEnvironmentDefaults, normalizeGuildSettings } from "../src/settings-store.js";
+import { readFile } from "node:fs/promises";
 
-test("集合VCの開放時刻は/kokuchi実行日のJST 20:40になる", () => {
+test("集合VCの開放時刻は/kokuchi実行日のJST指定時刻を正しく扱う", () => {
   assert.equal(
     getJstScheduledTime(new Date("2026-01-01T14:30:00.000Z"), 20, 40).toISOString(),
     "2026-01-01T11:40:00.000Z",
@@ -51,7 +54,7 @@ test("/kokuchi開始時の集合VC設定を話題選択後もスケジュール�
   );
 });
 
-test("集合VCの@everyoneへConnect許可を明示的に更新する", async () => {
+test("集合VCの@everyoneへViewChannelとConnectを明示的に更新する", async () => {
   const calls = [];
   const channel = {
     permissionOverwrites: {
@@ -66,15 +69,69 @@ test("集合VCの@everyoneへConnect許可を明示的に更新する", async ()
     channel,
     guildId: "guild-id-is-everyone-role-id",
     canConnect: true,
-    reason: "会話練習会の集合VCを20:40に開放",
+    reason: "会話練習会の集合VCを開放",
   });
 
   assert.equal(changed, true);
   assert.deepEqual(calls, [[
     "guild-id-is-everyone-role-id",
-    { Connect: true },
-    { reason: "会話練習会の集合VCを20:40に開放" },
+    { ViewChannel: true, Connect: true },
+    { reason: "会話練習会の集合VCを開放" },
   ]]);
+});
+
+test("集合VCのViewChannelとConnectは元の許可・拒否・未設定へ正確に復元する", () => {
+  const permissions = { ViewChannel: "view", Connect: "connect" };
+  const overwrite = (allow = [], deny = []) => ({
+    allow: { has: (permission) => allow.includes(permission) },
+    deny: { has: (permission) => deny.includes(permission) },
+  });
+  const snapshot = createEveryonePermissionSnapshot({
+    channelId: "vc",
+    guildId: "guild",
+    overwrite: overwrite(["view"], ["connect"]),
+    permissions,
+  });
+  assert.deepEqual(snapshot, { channelId: "vc", guildId: "guild", viewChannel: true, connect: false });
+  assert.deepEqual(
+    getRestorePermissionPatch({ snapshot, overwrite: overwrite(["view", "connect"]), permissions }),
+    { ViewChannel: true, Connect: false },
+  );
+  assert.deepEqual(
+    getRestorePermissionPatch({
+      snapshot: { ...snapshot, viewChannel: null, connect: null },
+      overwrite: overwrite(["view", "connect"]),
+      permissions,
+    }),
+    { ViewChannel: null, Connect: null },
+  );
+  assert.deepEqual(
+    getRestorePermissionPatch({ snapshot, overwrite: overwrite([], ["connect"]), permissions }),
+    {},
+  );
+});
+
+test("集合VCは分割直後に拒否し、ロール解除後または再起動復元で復元する", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const close = source.slice(source.indexOf("async function closeGatheringVcAfterSplit"), source.indexOf("async function setGatheringVcConnectPermission"));
+
+  assert.match(close, /canConnect: false/);
+  assert.doesNotMatch(close, /restoreGatheringVcPermissionAfterSplit/);
+  assert.match(source, /gatheringVcRestorePending: true/);
+  assert.match(source, /restoreGatheringVcPermissionAfterSplit\(guild, settings\)/);
+  assert.match(source, /async function restorePendingGatheringVcPermissions/);
+});
+
+test("旧設定は安全にkokuchi・ボタン式・定時募集間隔の現在形式へ正規化する", () => {
+  const old = normalizeGuildSettings({
+    callWaitMode: "reaction",
+    kokuchiGatheringReminderRoleIds: ["role-a", "role-a", "role-b"],
+  });
+  assert.equal(old.callWaitMode, "button");
+  assert.equal(old.callWaitIntervalMinutes, 30);
+  assert.equal(old.kokuchiEventTime, "21:00");
+  assert.deepEqual(old.kokuchiMentionRoleIds, ["role-a", "role-b"]);
+  assert.deepEqual(normalizeGuildSettings(old), old);
 });
 
 test("定時募集はJST 20:00から21:59まで停止する", () => {
@@ -118,4 +175,13 @@ test("終了お礼は途中参加を含むユニーク参加人数を表示で�
       "次回(土曜日)もぜひご参加ください！",
     ].join("\n"),
   );
+});
+
+test("/remove role marks removed temporary-role grants as removed", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const handler = source.slice(source.indexOf("async function handleRemoveRole"), source.indexOf("async function handleKokuchiSetting"));
+
+  assert.match(handler, /VoiceParticipantRoleGrant\.updateMany/);
+  assert.match(handler, /status: "removed"/);
+  assert.match(handler, /cleanupAt:/);
 });

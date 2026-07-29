@@ -6,7 +6,7 @@ const schema = new mongoose.Schema(
     guildId: { type: String, required: true },
     type: { type: String, required: true },
     executeAt: { type: Date, required: true },
-    status: { type: String, enum: ["pending", "running", "completed", "failed"], default: "pending" },
+    status: { type: String, enum: ["pending", "running", "completed", "failed", "canceled"], default: "pending" },
     roleId: String,
     memberIds: { type: [String], default: [] },
     payload: { type: mongoose.Schema.Types.Mixed, default: {} },

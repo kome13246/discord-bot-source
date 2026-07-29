@@ -15,11 +15,12 @@ const schema = new mongoose.Schema({
   // The user-selected JST calendar day.  This intentionally differs from
   // scheduledAt for `set:24`, whose actual timestamp is the following 00:00.
   eventDate: String,
+  eventAt: Date,
   commandUserId: { type: String, required: true },
   commandChannelId: { type: String, required: true },
   targetChannelId: { type: String, required: true },
   overviewChannelId: { type: String, required: true },
-  status: { type: String, enum: ["pending", "processing", "canceled", "sent", "failed", "published_unconfirmed"], default: "pending" },
+  status: { type: String, enum: ["pending", "processing", "canceling", "cancel_partial", "canceled", "sent", "failed", "published_unconfirmed"], default: "pending" },
   publicationStatus: {
     type: String,
     enum: ["pending", "processing", "published", "published_unconfirmed", "failed_before_publish"],
@@ -44,6 +45,9 @@ const schema = new mongoose.Schema({
   confirmationChannelId: String,
   confirmationMessageId: String,
   canceledAt: Date,
+  cancellationStartedAt: Date,
+  cancellationError: String,
+  cancellationResults: mongoose.Schema.Types.Mixed,
   sentAt: Date,
   publishedAt: Date,
   failedAt: Date,

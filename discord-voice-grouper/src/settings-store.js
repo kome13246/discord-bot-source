@@ -21,7 +21,7 @@ export async function getGuildSettings(guildId) {
         { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, lean: true },
       );
     } else {
-      return environmentSettings;
+      return environmentSettings ? normalizeGuildSettings(environmentSettings) : null;
     }
   }
   const { _id, __v, guildId: ignoredGuildId, createdAt, updatedAt, ...settings } = document;
@@ -39,10 +39,36 @@ export function mergeGuildSettingsWithEnvironmentDefaults(
   environmentSettings,
   storedSettings,
 ) {
-  return {
+  return normalizeGuildSettings({
     ...environmentSettings,
     ...storedSettings,
-  };
+  });
+}
+
+/** Backward-compatible, idempotent read-time normalization. */
+export function normalizeGuildSettings(settings = {}) {
+  const result = { ...settings };
+  result.callWaitMode = "button";
+  result.callWaitIntervalMinutes = [30, 45, 60].includes(Number(result.callWaitIntervalMinutes))
+    ? Number(result.callWaitIntervalMinutes)
+    : 30;
+  const eventTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(result.kokuchiEventTime ?? "")
+    ? result.kokuchiEventTime
+    : null;
+  if (!eventTime) {
+    result.kokuchiEventTime = "21:00";
+  }
+  if (!result.kokuchiAnnouncementChannelId) {
+    result.kokuchiAnnouncementChannelId = result.wadaiChannelId ?? result.splitStartChannelId ?? null;
+  }
+  const mentionRoles = result.kokuchiMentionRoleIds
+    ?? result.kokuchiGatheringReminderRoleIds
+    ?? [result.kokuchiMentionRoleId, result.kokuchiGatheringReminderRoleId];
+  result.kokuchiMentionRoleIds = [...new Set(
+    (Array.isArray(mentionRoles) ? mentionRoles : [mentionRoles])
+      .filter((roleId) => typeof roleId === "string" && roleId.length > 0),
+  )];
+  return result;
 }
 
 /** Atomically updates only the supplied fields. `undefined` is ignored. */
@@ -58,7 +84,7 @@ export async function patchGuildSettings(guildId, patch) {
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, runValidators: true, lean: true },
   );
   const { _id, __v, guildId: ignoredGuildId, ...settings } = saved;
-  return { ...settings, guildId };
+  return normalizeGuildSettings({ ...settings, guildId });
 }
 
 export async function saveGuildSettings(guildId, patch) {
@@ -170,7 +196,7 @@ export async function recoverInterruptedCallWaitPendingNotices() {
 /**
  * A Discord send may have completed even when the process stopped before its
  * message ID was persisted.  Keep this state terminal to prevent a duplicate
- * 20:55 reminder after restart; an operator can inspect the recorded error.
+ * kokuchi reminder after restart; an operator can inspect the recorded error.
  */
 export async function recoverInterruptedKokuchiGatheringReminders() {
   if (mongoose.connection.readyState !== 1) {
@@ -353,6 +379,52 @@ export async function transitionKokuchiTimedAction({
   );
 }
 
+/** Atomically stops the still-pending timers for exactly one kokuchi event. */
+export async function cancelKokuchiTimedActions({ guildId, kokuchiEventId }) {
+  if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is unavailable; kokuchi actions cannot be canceled.");
+  const before = await GuildSettings.findOneAndUpdate(
+    { guildId, kokuchiEventId },
+    [
+      {
+        $set: {
+          kokuchiPreNoticeState: {
+            $cond: [{ $in: ["$kokuchiPreNoticeState", ["pending", "failed"]] }, "canceled", "$kokuchiPreNoticeState"],
+          },
+          gatheringVcUnlockState: {
+            $cond: [{ $in: ["$gatheringVcUnlockState", ["pending", "failed"]] }, "canceled", "$gatheringVcUnlockState"],
+          },
+          kokuchiGatheringReminderState: {
+            $cond: [{ $in: ["$kokuchiGatheringReminderState", ["pending", "failed"]] }, "canceled", "$kokuchiGatheringReminderState"],
+          },
+          kokuchiTimedActionsCanceledAt: new Date(),
+        },
+      },
+    ],
+    { returnDocument: "before", lean: true },
+  );
+  if (!before) {
+    return {
+      canceled: 0,
+      alreadyCompleted: 0,
+      alreadyCanceled: 0,
+      failed: 1,
+      errors: ["The current GuildSettings kokuchi event does not match the cancellation target."],
+    };
+  }
+
+  const states = [
+    before.kokuchiPreNoticeState,
+    before.gatheringVcUnlockState,
+    before.kokuchiGatheringReminderState,
+  ];
+  return states.reduce((result, state) => {
+    if (["pending", "failed"].includes(state)) result.canceled += 1;
+    else if (state === "canceled") result.alreadyCanceled += 1;
+    else result.alreadyCompleted += 1;
+    return result;
+  }, { canceled: 0, alreadyCompleted: 0, alreadyCanceled: 0, failed: 0, errors: [] });
+}
+
 export async function replaceNestedObject({ guildId, path, value }) {
   if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is unavailable; nested state cannot be saved.");
   return GuildSettings.findOneAndUpdate(
@@ -437,6 +509,8 @@ function getEnvironmentSettings(guildId) {
     voiceReminderEnabled: bool("PB_VOICE_REMINDER_ENABLED"), wadaiChannelId: value("PB_WADAI_CHANNEL_ID"),
     splitStartChannelId: value("PB_SPLIT_START_CHANNEL_ID"),
     gatheringVoiceChannelId: value("PB_GATHERING_VOICE_CHANNEL_ID"), splitFeedbackChannelId: value("PB_SPLIT_FEEDBACK_CHANNEL_ID"),
+    kokuchiMentionRoleIds: parseOptionalIdList(value("PB_KOKUCHI_MENTION_ROLE_IDS")),
+    // Legacy environment name remains a read-only migration source.
     kokuchiGatheringReminderRoleIds: parseOptionalIdList(value("PB_KOKUCHI_GATHERING_REMINDER_ROLE_IDS")),
     logChannelId: value("PB_LOG_CHANNEL_ID"), formChannelId: value("PB_FORM_CHANNEL_ID"), formSendChannelId: value("PB_FORM_SEND_CHANNEL_ID"),
     formModeratorRoleId: value("PB_FORM_MODERATOR_ROLE_ID"), finishMessage: value("PB_FINISH_MESSAGE"),
@@ -444,7 +518,7 @@ function getEnvironmentSettings(guildId) {
     callWaitEnabled: bool("PB_CALL_WAIT_ENABLED"), callWaitRoleId: value("PB_CALL_WAIT_ROLE_ID"), callWaitChannelId: value("PB_CALL_WAIT_CHANNEL_ID"),
     callWaitPromptChannelId: value("PB_CALL_WAIT_PROMPT_CHANNEL_ID"), callWaitNoticeChannelId: value("PB_CALL_WAIT_NOTICE_CHANNEL_ID"),
     oteboPreviewChannelId: value("PB_OTEBO_PREVIEW_CHANNEL_ID"), callWaitVoiceCategoryId: value("PB_CALL_WAIT_VOICE_CATEGORY_ID"),
-    callWaitMode: value("PB_CALL_WAIT_MODE"), callWaitBosyuNoticeEnabled: bool("PB_CALL_WAIT_BOSYU_NOTICE_ENABLED"),
+    callWaitIntervalMinutes: integer("PB_CALL_WAIT_INTERVAL_MINUTES"),
     oteboQuickConfirmSeconds: integer("PB_OTEBO_QUICK_CONFIRM_SECONDS"), updatedAt: "environment",
   };
   return Object.values(settings).some((item) => item !== undefined && item !== "environment") ? settings : null;

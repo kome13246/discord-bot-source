@@ -58,6 +58,16 @@ test("/splitvc はカウントダウン開始前に転送予定セッション�
   assert.ok(SplitProcessSession.schema.path("plannedMemberIds"));
 });
 
+test("splitvcの通常・途中参加転送は渡されたsplitSessionIdをロール付与の発生源に使う", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const transfer = source.slice(source.indexOf("async function moveMemberWithParticipantRole"), source.indexOf("async function runWaitingRoomMonitor"));
+
+  assert.match(transfer, /participantRoleGrantedMemberIds = null,\s*splitSessionId/);
+  assert.match(transfer, /sourceId: config\.splitSessionId/);
+  assert.match(source, /splitSessionId: options\.splitSessionId/);
+  assert.match(transfer, /config\.splitSessionId/);
+});
+
 test("/splitvc は成功グループが0件なら後続処理を予約せず回収して失敗終了する", async () => {
   const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
   const start = source.indexOf("const transferResult = await transferGroups(groups");

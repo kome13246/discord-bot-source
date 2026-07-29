@@ -21,6 +21,25 @@ export function getNextKokuchiReservationAt({ weekday, hour, now = new Date() })
   return candidate;
 }
 
+/** Calculates the next absolute JST event datetime from its weekday and HH:mm. */
+export function getNextKokuchiEventAt({ weekday, eventTime, now = new Date() }) {
+  if (!WEEKDAYS.includes(weekday) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(eventTime ?? "")) return null;
+  const [hour, minute] = eventTime.split(":").map(Number);
+  const jstNow = new Date(now.getTime() + JST_OFFSET_MS);
+  const candidate = new Date(Date.UTC(
+    jstNow.getUTCFullYear(),
+    jstNow.getUTCMonth(),
+    jstNow.getUTCDate() + (WEEKDAYS.indexOf(weekday) - jstNow.getUTCDay() + 7) % 7,
+    hour,
+    minute,
+    0,
+    0,
+  ) - JST_OFFSET_MS);
+  return candidate.getTime() <= now.getTime()
+    ? new Date(candidate.getTime() + 7 * 24 * 60 * 60 * 1000)
+    : candidate;
+}
+
 export function formatJstReservationTime(date, displayHour) {
   const jst = new Date(date.getTime() + JST_OFFSET_MS);
   const hour = displayHour === 24 ? 24 : jst.getUTCHours();

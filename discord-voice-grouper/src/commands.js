@@ -56,13 +56,6 @@ export const settingCommand = new SlashCommandBuilder()
       )
       .addChannelOption((option) =>
         option
-          .setName("kokuchi_overview_channel")
-          .setDescription("/kokuchiで使う概要案内チャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
           .setName("waiting_vc_category")
           .setDescription("途中参加用の待機VCを作成するカテゴリ")
           .addChannelTypes(ChannelType.GuildCategory)
@@ -73,26 +66,6 @@ export const settingCommand = new SlashCommandBuilder()
           .setName("waiting_vc_name")
           .setDescription("自動作成する待機VCの名前")
           .setMaxLength(100)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("split_start_channel")
-          .setDescription("/kokuchi告知・/splitvc後のスタート案内送信先")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("gathering_voice_channel")
-          .setDescription("/kokuchi当日20:40に接続許可する集合VC")
-          .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
-          .setRequired(false),
-      )
-      .addRoleOption((option) =>
-        option
-          .setName("kokuchi_gathering_reminder_role")
-          .setDescription("/kokuchi当日20:55の集合通知でメンションするロール")
           .setRequired(false),
       )
       .addChannelOption((option) =>
@@ -151,7 +124,7 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
-      .setName("shugo")
+      .setName("zatudan")
       .setDescription("VC集合フォーム設定を保存します")
       .addRoleOption((option) =>
         option
@@ -182,15 +155,20 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
-      .setName("wadai")
+      .setName("kokuchi")
       .setDescription("会話練習会告知の送信先設定を保存します")
       .addChannelOption((option) =>
         option
-          .setName("wadaich")
+          .setName("announcement_channel")
           .setDescription("/kokuchi告知・/splitvc後のスタート案内送信先")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
-      ),
+      )
+      .addChannelOption((option) => option.setName("overview_channel").setDescription("告知で案内する概要チャンネル").addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(false))
+      .addStringOption((option) => option.setName("event_time").setDescription("開催予定時刻（JST、HH:mm）").setRequired(false))
+      .addChannelOption((option) => option.setName("gathering_voice_channel").setDescription("開催時に使用する集合VC").addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice).setRequired(false))
+      .addRoleOption((option) => option.setName("mention_role").setDescription("告知時に追加するメンションロール").setRequired(false))
+      .addRoleOption((option) => option.setName("remove_mention_role").setDescription("告知メンションから外すロール").setRequired(false)),
   )
   .addSubcommand((subcommand) =>
     subcommand
@@ -234,7 +212,7 @@ export const settingCommand = new SlashCommandBuilder()
           .setName("moderator_role")
           .setDescription("相談・苦情フォームでメンションするモデレーターロール")
           .setRequired(false),
-      ),
+      )
   )
   .addSubcommand((subcommand) =>
     subcommand
@@ -244,6 +222,17 @@ export const settingCommand = new SlashCommandBuilder()
         option
           .setName("call_wait_enabled")
           .setDescription("通話待機システムを有効または無効にする")
+          .setRequired(false),
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("call_wait_interval_minutes")
+          .setDescription("定時募集の間隔（JST 0:00基準）")
+          .addChoices(
+            { name: "30分", value: 30 },
+            { name: "45分", value: 45 },
+            { name: "60分", value: 60 },
+          )
           .setRequired(false),
       )
       .addRoleOption((option) =>
@@ -278,22 +267,6 @@ export const settingCommand = new SlashCommandBuilder()
           .setName("call_wait_voice_category")
           .setDescription("参加者確認に使うVCカテゴリ")
           .addChannelTypes(ChannelType.GuildCategory)
-          .setRequired(false),
-      )
-      .addStringOption((option) =>
-        option
-          .setName("call_wait_mode")
-          .setDescription("募集方式")
-          .addChoices(
-            { name: "リアクション式", value: "reaction" },
-            { name: "ボタン式", value: "button" },
-          )
-          .setRequired(false),
-      )
-      .addBooleanOption((option) =>
-        option
-          .setName("call_wait_bosyu_notice_enabled")
-          .setDescription("集合通知後に募集ロールへ途中参加案内を送るか")
           .setRequired(false),
       )
       .addIntegerOption((option) =>
@@ -432,7 +405,7 @@ export const kokuchiCommand = new SlashCommandBuilder()
   .addChannelOption((option) =>
     option
       .setName("channel")
-      .setDescription("告知を送るチャンネル。省略時は /setting wadai の設定を使用")
+          .setDescription("告知を送るチャンネル。省略時は /setting kokuchi の設定を使用")
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
       .setRequired(false),
   );
@@ -440,6 +413,14 @@ export const kokuchiCommand = new SlashCommandBuilder()
 export const sendCallWaitCommand = new SlashCommandBuilder()
   .setName("sendcallwait")
   .setDescription("通話待機システムの募集メッセージを今すぐ送信します");
+
+export const removeCommand = new SlashCommandBuilder()
+  .setName("remove")
+  .setDescription("Botが付与した参加者ロールを一括で解除します")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+  .addSubcommand((subcommand) => subcommand
+    .setName("role")
+    .setDescription("splitvcとVC集合の参加者ロールを一括解除します"));
 
 export const sendOteboCommand = new SlashCommandBuilder()
   .setName("sendotebo")
@@ -459,6 +440,7 @@ export const commands = [
   showWadaiCommand.toJSON(),
   delWadaiCommand.toJSON(),
   kokuchiCommand.toJSON(),
+  removeCommand.toJSON(),
   sendCallWaitCommand.toJSON(),
   sendOteboCommand.toJSON(),
   setupFormsCommand.toJSON(),
