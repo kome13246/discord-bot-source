@@ -18,7 +18,7 @@ import {
   PermissionsBitField,
   version as discordJsVersion,
 } from "discord.js";
-import { connectToMongoDB } from "./mongodb.js";
+import { connectToMongoDB, disconnectFromMongoDB } from "./mongodb.js";
 import {
   deleteBumpReminder,
   getBumpReminders,
@@ -35,12 +35,13 @@ import {
   getPairKeysFromGroups,
   shuffle,
 } from "./grouping.js";
-import { deleteOteboRecruitmentIfOnlyMember, getGuildSettings, replaceNestedObject, saveGuildSettings, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
-import { claimAction, failAction, finishAction, getPendingActions, recoverInterruptedActions, scheduleAction } from "./scheduled-action-store.js";
+import { claimCallWaitPendingNotice, deleteOteboRecruitmentIfOnlyMember, failCallWaitPendingNotice, getGuildSettings, recoverInterruptedCallWaitPendingNotices, recoverInterruptedCallWaitPrompts, recoverInterruptedKokuchiGatheringReminders, replaceNestedObject, saveGuildSettings, transitionCallWaitPrompt, transitionKokuchiGatheringReminder, transitionKokuchiTimedAction, transitionOteboRecruitment, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
+import { claimAction, failAction, finishAction, getPendingActions, recoverInterruptedActions, retryAction, scheduleAction, scheduleSingleGuildAction } from "./scheduled-action-store.js";
 import { consumeBosyuCooldown, deleteBosyuEditSession, getActiveBosyuEditSessions, getBosyuEditSession, getExpiredBosyuEditSessions, saveBosyuEditSession } from "./bosyu-state-store.js";
 import { SplitProcessSession } from "./models/split-process-session.js";
 import { SplitReview } from "./models/split-review.js";
 import { SplitReviewDraft } from "./models/split-review-draft.js";
+import { ScheduledAction } from "./models/scheduled-action.js";
 import {
   addMembersToCurrentGroup,
   getSplitGroupingState,
@@ -48,7 +49,14 @@ import {
 } from "./split-grouping-state-store.js";
 import mongoose from "mongoose";
 import { UserProfile } from "./models/user-profile.js";
-import { VoiceParticipantRoleGrant } from "./models/voice-participant-role-grant.js";
+import {
+  ensureVoiceParticipantRoleGrantIndexes,
+  VoiceParticipantRoleGrant,
+} from "./models/voice-participant-role-grant.js";
+import { CallWaitInterest } from "./models/call-wait-interest.js";
+import { KokuchiReservation } from "./models/kokuchi-reservation.js";
+import { MongoLeaseLock } from "./models/mongo-lease-lock.js";
+import { acquireMongoLease, releaseMongoLease } from "./mongo-lease-lock-store.js";
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
 import {
   canSendPublicProfile,
@@ -66,6 +74,8 @@ import {
   isKokuchiCallWaitPause,
   resolveKokuchiGatheringVoiceChannelId,
 } from "./kokuchi-utils.js";
+import { formatJstReservationTime, getInterestCooldownSeconds, getKokuchiEventDate, getKokuchiReminderStatusOnCancel, getNextJstHalfHour, getNextKokuchiReservationAt } from "./kokuchi-reservation-utils.js";
+import { toCurrentGroupMemberIds } from "./split-waiting-utils.js";
 
 const {
   DISCORD_TOKEN,
@@ -81,6 +91,7 @@ const DISBOARD_DEFAULT_BOT_ID = "302050872383242240";
 const BUMP_REMINDER_WAIT_MS = 2 * 60 * 60 * 1000;
 const WAITING_ROOM_MONITOR_MS = 10 * 60 * 1000;
 const WAITING_ROOM_POLL_MS = 5 * 1000;
+const WAITING_MONITOR_LEASE_MS = 30 * 1000;
 const DEFAULT_TRANSFER_WAIT_SECONDS = 30;
 const DEFAULT_NOTICE_WAIT_MINUTES = 25;
 const DEFAULT_ROLE_REMOVE_WAIT_MINUTES = 150;
@@ -114,10 +125,15 @@ const CALL_WAIT_REACTION = "🤚";
 const CALL_WAIT_MIN_MEMBERS = 2;
 const CALL_WAIT_ROLE_REMOVE_MS = 30 * 60 * 1000;
 const CALL_WAIT_FOLLOWUP_CHECK_MS = 30 * 60 * 1000;
+const CALL_WAIT_FOLLOWUP_RETRY_MS = 5 * 60 * 1000;
 const CALL_WAIT_MODE_REACTION = "reaction";
 const CALL_WAIT_MODE_BUTTON = "button";
 const CALL_WAIT_JOIN_CUSTOM_ID = "call_wait_join";
 const CALL_WAIT_CANCEL_CUSTOM_ID = "call_wait_cancel";
+const CALL_WAIT_INTEREST_CUSTOM_ID = "call_wait_interest";
+const CALL_WAIT_INTEREST_SELECT_CUSTOM_ID = "call_wait_interest_threshold";
+const KOKUCHI_RESERVATION_CANCEL_CUSTOM_ID = "kokuchi_reservation_cancel";
+const KOKUCHI_RESERVATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const OTEBO_CREATE_CUSTOM_ID = "otebo_create";
 const OTEBO_DRAFT_SELECT_CUSTOM_ID = "otebo_draft_select";
 const OTEBO_DRAFT_NOTE_CUSTOM_ID = "otebo_draft_note";
@@ -144,11 +160,6 @@ const KOKUCHI_PRE_NOTICE_HOUR_JST = 20;
 const KOKUCHI_PRE_NOTICE_MINUTE_JST = 30;
 const KOKUCHI_GATHERING_REMINDER_HOUR_JST = 20;
 const KOKUCHI_GATHERING_REMINDER_MINUTE_JST = 55;
-const KOKUCHI_GATHERING_REMINDER_ROLE_IDS = [
-  "1504093435525861416",
-  "1506629235438129323",
-];
-const KOKUCHI_GATHERING_REMINDER_VOICE_CHANNEL_ID = "1510233872464347347";
 const DEFAULT_SPLIT_FEEDBACK_CHANNEL_ID = "1513457664041160765";
 
 const activeSessions = new Map();
@@ -161,13 +172,23 @@ const topicFormSessions = new Map();
 const autoSplitSuggestionMessages = new Map();
 const callWaitRoleRemovalTimers = new Map();
 const callWaitFollowupTimers = new Map();
+const callWaitGuildLocks = new Set();
 const gatheringVcUnlockTimers = new Map();
 const kokuchiPreNoticeTimers = new Map();
 const kokuchiGatheringReminderTimers = new Map();
+const kokuchiReservationTimers = new Map();
+const kokuchiPublishGuildLocks = new Set();
 const oteboDrafts = new Map();
 const oteboRecruitmentTimers = new Map();
 const profilePublicationLocks = new Set();
 const splitVoiceGuildLocks = new Set();
+const activeSplitVoiceLeases = new Map();
+const autoSplitLocks = new Set();
+const waitingMemberRetryAfter = new Map();
+const restoredWaitingMonitorTimers = new Map();
+const restoredWaitingMonitorLocks = new Set();
+const localWaitingMonitorSessions = new Set();
+const waitingMonitorLeaseOwner = `${process.pid}:${Math.random().toString(36).slice(2)}`;
 const lastTopicIdByChildChannel = new Map();
 const randomTopicCooldownByChannel = new Map();
 
@@ -210,6 +231,17 @@ const FEEDBACK_FORM_TYPES = {
 
 let callWaitTimer = null;
 let shouldSendMongoSuccessLog = false;
+let startupRestoreCompleted = false;
+let startupRestoreFailed = false;
+let shuttingDown = false;
+
+function getKokuchiReservationCleanupAt(now = new Date()) {
+  return new Date(now.getTime() + KOKUCHI_RESERVATION_RETENTION_MS);
+}
+
+function logRecoverableError(context, error) {
+  console.error(`${context}: ${error?.message ?? error}`, error);
+}
 
 if (!DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is required.");
@@ -219,6 +251,10 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    // Required for the documented normal-message features such as topic
+    // requests and DISBOARD bump detection.  It must also be enabled in the
+    // Discord Developer Portal for this application.
+    GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildVoiceStates,
   ],
@@ -233,37 +269,35 @@ if (Number.isInteger(healthPort) && healthPort > 0) {
   startHealthServer(healthPort);
 }
 
-client.once(Events.ClientReady, (readyClient) => {
+client.once(Events.ClientReady, async (readyClient) => {
   if (discordReadyWatchdog) {
     clearTimeout(discordReadyWatchdog);
     discordReadyWatchdog = null;
   }
   console.log(`Logged in as ${readyClient.user.tag}`);
-  void restoreBumpReminders().catch((error) => {
-    console.error(error);
-  });
-  void restoreGatheringVcUnlockSchedules().catch((error) => {
-    console.error(error);
-  });
-  void restoreOteboRecruitmentTimers().catch((error) => {
-    console.error(error);
-  });
-  void restoreProfiles(client, { sendOperationalLog, getGuildSettings }).catch((error) => {
-    console.error("Profile startup restore failed:", error);
-  });
-  void restoreScheduledActions().catch((error) => {
-    console.error("Scheduled action startup restore failed:", error);
-  });
-  void restoreBosyuEditSessions().catch((error) => {
-    console.error("Bosyu edit session startup restore failed:", error);
-  });
-  void restoreSplitProcessSessions().catch((error) => {
-    console.error("Split process startup restore failed:", error);
-  });
-  void restoreVoiceMonitorSessions().catch((error) => {
-    console.error("Voice monitor startup restore failed:", error);
-  });
-  void voiceChannelControlService.restore(client).catch((error) => console.error("VC control restore failed:", error));
+  const restoreResults = await Promise.allSettled([
+    recoverInterruptedCallWaitPrompts(),
+    recoverInterruptedCallWaitPendingNotices(),
+    recoverInterruptedKokuchiGatheringReminders(),
+    restoreBumpReminders(),
+    restoreGatheringVcUnlockSchedules(),
+    restoreKokuchiReservations(),
+    restoreOteboRecruitmentTimers(),
+    restoreFailedSplitReviewDeliveries(),
+    restoreProfiles(client, { sendOperationalLog, getGuildSettings }),
+    restoreScheduledActions(),
+    restoreBosyuEditSessions(),
+    restoreSplitProcessSessions(),
+    restoreVoiceMonitorSessions(),
+    voiceChannelControlService.restore(client),
+  ]);
+  for (const result of restoreResults) {
+    if (result.status === "rejected") {
+      startupRestoreFailed = true;
+      console.error("Startup restore failed:", result.reason);
+    }
+  }
+  startupRestoreCompleted = true;
   if (shouldSendMongoSuccessLog) {
     shouldSendMongoSuccessLog = false;
     void (async () => {
@@ -277,6 +311,14 @@ client.once(Events.ClientReady, (readyClient) => {
       console.error("Failed to send MongoDB success log embed:", error);
     });
   }
+  // Do not wait until the next :00/:30 tick after a restart.  This closes
+  // overdue recruitments and starts an already-due one immediately.
+  await processCallWaitForAllGuilds().catch((error) => {
+    console.error("Initial call-wait processing failed:", error);
+  });
+  await retryPendingCallWaitEndNotifications().catch((error) => {
+    console.error("Initial call-wait end-notification retry failed:", error);
+  });
   scheduleNextCallWaitTick();
 });
 
@@ -311,22 +353,22 @@ if (DISCORD_DEBUG_LOGS === "true") {
 }
 
 client.on(Events.MessageCreate, async (message) => {
+  if (shuttingDown) return;
   try {
     await handleDisboardBumpMessage(message);
     await handleTopicRequestMessage(message);
   } catch (error) {
-    console.error("Interaction processing failed", {
-      processName: interaction.commandName ?? interaction.customId ?? interaction.type,
-      guildId: interaction.guildId ?? null,
-      channelId: interaction.channelId ?? null,
-      userId: interaction.user?.id ?? null,
-      customId: interaction.customId ?? null,
+    console.error("Message processing failed", {
+      guildId: message.guildId ?? null,
+      channelId: message.channelId ?? null,
+      userId: message.author?.id ?? null,
       error: error?.stack ?? error,
     });
   }
 });
 
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+  if (shuttingDown) return;
   try {
     await handleProfileVoiceState(oldState, newState, { client, sendOperationalLog, getGuildSettings });
     await handleVoiceStateUpdate(oldState, newState);
@@ -338,17 +380,26 @@ client.on(Events.ChannelCreate, async (channel) => {
   if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.ensurePanel(channel).catch((error) => console.error("VC control panel create failed:", error));
 });
 client.on(Events.ChannelDelete, async (channel) => {
-  if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.cleanup(channel).catch(() => {});
+  if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.cleanup(channel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
 });
 client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
   if (newChannel.type !== ChannelType.GuildVoice) return;
   const settings = await getGuildSettings(newChannel.guild.id).catch(() => null);
   const wasTarget = oldChannel.parentId === settings?.vcControlCategoryId;
   const isTarget = newChannel.parentId === settings?.vcControlCategoryId;
-  if (isTarget && !wasTarget) await voiceChannelControlService.ensurePanel(newChannel).catch(() => {});
-  if (!isTarget && wasTarget) await voiceChannelControlService.cleanup(newChannel).catch(() => {});
+  if (isTarget && !wasTarget) await voiceChannelControlService.ensurePanel(newChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+  if (!isTarget && wasTarget) await voiceChannelControlService.cleanup(newChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
 });
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (shuttingDown) {
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.reply({
+        content: "Botは再起動中です。少し待ってからもう一度お試しください。",
+        flags: MessageFlags.Ephemeral,
+      }).catch((error) => console.error("Failed to reply during shutdown:", error));
+    }
+    return;
+  }
   try {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith(`${SPLIT_REVIEW_OPEN}:`) || interaction.customId.startsWith(`${SPLIT_REVIEW_SUBMIT}:`)) { await handleSplitReviewButton(interaction); return; }
@@ -391,10 +442,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (
         interaction.customId === CALL_WAIT_JOIN_CUSTOM_ID ||
+        interaction.customId === CALL_WAIT_INTEREST_CUSTOM_ID ||
         interaction.customId === CALL_WAIT_CANCEL_CUSTOM_ID ||
-        interaction.customId.startsWith(`${CALL_WAIT_CANCEL_CUSTOM_ID}:`)
+        interaction.customId.startsWith(`${CALL_WAIT_CANCEL_CUSTOM_ID}:`) ||
+        (interaction.isButton() && interaction.customId.startsWith("call_wait_interest_"))
       ) {
         await handleCallWaitButton(interaction);
+        return;
+      }
+
+      if (interaction.customId.startsWith(`${KOKUCHI_RESERVATION_CANCEL_CUSTOM_ID}:`)) {
+        await handleKokuchiReservationCancel(interaction);
         return;
       }
 
@@ -418,6 +476,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId.startsWith("vc_control:")) { await voiceChannelControlService.handle(interaction); return; }
       if (interaction.customId.startsWith(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:`)) {
         await handleOteboDraftSelect(interaction);
+        return;
+      }
+
+      if (interaction.customId.startsWith(`${CALL_WAIT_INTEREST_SELECT_CUSTOM_ID}:`)) {
+        await handleCallWaitInterestThresholdSelect(interaction);
         return;
       }
 
@@ -509,13 +572,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 async function handleShowReview(interaction) {
   if (!interaction.inGuild()) return;
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const settings = await getGuildSettings(interaction.guildId);
   const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
   const canManageGuild = interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
   const hasModeratorRole = settings?.formModeratorRoleId
     && member?.roles.cache.has(settings.formModeratorRoleId);
   if (!canManageGuild && !hasModeratorRole) {
-    return interaction.reply({
+    return interaction.editReply({
       content: "このコマンドを使用する権限がありません。",
       flags: MessageFlags.Ephemeral,
     });
@@ -586,7 +650,7 @@ async function handleShowReview(interaction) {
   };
 
   if (question !== "all" && !fields[question]) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "選択した質問は集計できません。",
       flags: MessageFlags.Ephemeral,
     });
@@ -598,7 +662,7 @@ async function handleShowReview(interaction) {
   const content = question === "all"
     ? [...scopeLines, "", renderedQuestions].join("\n")
     : [...scopeLines, "", renderQuestion(fields[question])].join("\n");
-  await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+  await interaction.editReply({ content, flags: MessageFlags.Ephemeral });
 }
 
 
@@ -609,6 +673,13 @@ async function handleShowReview(interaction) {
   } catch (error) {
     if (interaction.commandName === "splitvc") {
       splitVoiceGuildLocks.delete(interaction.guildId);
+      const splitLease = activeSplitVoiceLeases.get(interaction.guildId);
+      if (splitLease) {
+        activeSplitVoiceLeases.delete(interaction.guildId);
+        await releaseMongoLease(splitLease).catch((releaseError) => {
+          console.error(`Failed to release splitvc lease after an error for ${interaction.guildId}: ${releaseError.message}`);
+        });
+      }
     }
     console.error(error);
     await replySafely(interaction, "処理中にエラーが発生しました。Renderのログを確認してください。");
@@ -626,33 +697,25 @@ async function handleSetupProfile(interaction) {
 
 async function handleProfileOpen(interaction) {
   if (!interaction.inGuild()) return interaction.reply({ content: "サーバー内で使用してください。", flags: MessageFlags.Ephemeral });
-  let profile;
-  try {
-    profile = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id });
-  } catch (error) {
-    await logProfileFailure(interaction, "profile modal fetch failed", error);
-    await interaction.reply({ content: "プロフィールの取得に失敗しました。", flags: MessageFlags.Ephemeral });
-    return;
-  }
   const input = (id, label, style, max, value, required) => new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setMaxLength(max).setRequired(required).setValue(value ?? ""));
   const modal = new ModalBuilder().setCustomId("profile_modal").setTitle("プロフィール登録・編集").addComponents(
-    input("profile_nickname", "呼び名", TextInputStyle.Short, 20, profile?.nickname, true),
-    input("profile_status", "現状", TextInputStyle.Short, 30, profile?.status, false),
-    input("profile_hobby", "趣味", TextInputStyle.Paragraph, 80, profile?.hobby, false),
-    input("profile_comment", "ひとこと", TextInputStyle.Paragraph, 150, profile?.comment, false),
+    input("profile_nickname", "呼び名", TextInputStyle.Short, 20, null, true),
+    input("profile_status", "現状", TextInputStyle.Short, 30, null, false),
+    input("profile_hobby", "趣味", TextInputStyle.Paragraph, 80, null, false),
+    input("profile_comment", "ひとこと", TextInputStyle.Paragraph, 150, null, false),
   );
   await interaction.showModal(modal);
 }
 
 async function handleProfileModal(interaction) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const values = {
+  const submittedValues = {
     nickname: normalizeProfileValue(interaction.fields.getTextInputValue("profile_nickname"), 20),
     status: normalizeProfileValue(interaction.fields.getTextInputValue("profile_status"), 30),
     hobby: normalizeProfileValue(interaction.fields.getTextInputValue("profile_hobby"), 80),
     comment: normalizeProfileValue(interaction.fields.getTextInputValue("profile_comment"), 150),
   };
-  if (!values.nickname) {
+  if (!submittedValues.nickname) {
     await interaction.editReply({ content: "呼び名は必須です。" });
     return;
   }
@@ -660,13 +723,21 @@ async function handleProfileModal(interaction) {
   let existing;
   try {
     existing = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id });
+    const values = {
+      nickname: submittedValues.nickname,
+      // A modal must be shown before any database read.  Empty optional
+      // fields therefore preserve existing values instead of erasing them.
+      status: submittedValues.status || existing?.status || "",
+      hobby: submittedValues.hobby || existing?.hobby || "",
+      comment: submittedValues.comment || existing?.comment || "",
+    };
     await UserProfile.findOneAndUpdate(
       { guildId: interaction.guildId, userId: interaction.user.id },
       values,
       { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   } catch (error) {
-    await interaction.editReply({ content: "プロフィールの保存に失敗しました。" }).catch(() => {});
+    await interaction.editReply({ content: "プロフィールの保存に失敗しました。" }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     await logProfileFailure(interaction, "profile save failed", error);
     return;
   }
@@ -760,8 +831,14 @@ async function handleProfilePublishButton(interaction) {
   }
   profilePublicationLocks.add(lockKey);
   let profile = null;
+  let profileLease = null;
   try {
     await interaction.update({ content: "自己紹介を送信しています…", components: [] });
+    profileLease = await acquireMongoLease(`profile-publish:${interaction.guildId}:${targetUserId}`, { leaseMs: 2 * 60 * 1000 });
+    if (!profileLease) {
+      await interaction.editReply({ content: "自己紹介の送信処理を実行中です。少し待ってから確認してください。" });
+      return;
+    }
     profile = await UserProfile.findOne({ guildId: interaction.guildId, userId: targetUserId });
     if (!profile) {
       await interaction.editReply({ content: "プロフィールが見つかりません。先にプロフィールを保存してください。" });
@@ -798,8 +875,13 @@ async function handleProfilePublishButton(interaction) {
     const content = error?.code === "PUBLIC_PROFILE_STATE_SAVE_FAILED"
       ? "自己紹介の送信状態を保存できなかったため、投稿を取り消しました。時間をおいてもう一度お試しください。"
       : "自己紹介の送信に失敗しました。時間をおいてもう一度お試しください。";
-    await interaction.editReply({ content }).catch(() => {});
+    await interaction.editReply({ content }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
   } finally {
+    if (profileLease) {
+      await releaseMongoLease(profileLease).catch((error) => {
+        console.error(`Failed to release profile publication lease for ${lockKey}: ${error.message}`);
+      });
+    }
     profilePublicationLocks.delete(lockKey);
   }
 }
@@ -843,6 +925,8 @@ async function handleSetting(interaction) {
     return;
   }
 
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
   if (subcommand === "vc_control") {
     const category = interaction.options.getChannel("category", false);
     const notifyRole = interaction.options.getRole("notify_role", false);
@@ -860,7 +944,7 @@ async function handleSetting(interaction) {
     });
     await replyOrFollowUp(interaction, { content: `VCコントロール設定を保存しました。\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
     if (category) {
-      for (const channel of interaction.guild.channels.cache.values()) if (channel.type === ChannelType.GuildVoice && channel.parentId === category.id) await voiceChannelControlService.ensurePanel(channel).catch(() => {});
+      for (const channel of interaction.guild.channels.cache.values()) if (channel.type === ChannelType.GuildVoice && channel.parentId === category.id) await voiceChannelControlService.ensurePanel(channel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     }
     return;
   }
@@ -891,6 +975,7 @@ async function handleSetting(interaction) {
   const wadaiChannel = interaction.options.getChannel("wadaich", false);
   const splitStartChannel = interaction.options.getChannel("split_start_channel", false);
   const gatheringVoiceChannel = interaction.options.getChannel("gathering_voice_channel", false);
+  const kokuchiGatheringReminderRole = interaction.options.getRole("kokuchi_gathering_reminder_role", false);
   const splitFeedbackChannel = interaction.options.getChannel("split_feedback_channel", false);
   const logChannel = interaction.options.getChannel("log_channel", false);
   const formChannel = interaction.options.getChannel("form_channel", false);
@@ -958,6 +1043,10 @@ async function handleSetting(interaction) {
     patch.gatheringVoiceChannelId = gatheringVoiceChannel.id;
   }
 
+  if (kokuchiGatheringReminderRole) {
+    patch.kokuchiGatheringReminderRoleIds = [kokuchiGatheringReminderRole.id];
+  }
+
   if (splitFeedbackChannel) {
     patch.splitFeedbackChannelId = splitFeedbackChannel.id;
   }
@@ -978,7 +1067,7 @@ async function handleSetting(interaction) {
     const me = interaction.guild.members.me ?? await interaction.guild.members.fetchMe();
     const permissions = reviewSendChannel.permissionsFor(me);
     if (!reviewSendChannel.isTextBased() || !permissions?.has(PermissionFlagsBits.ViewChannel) || !permissions?.has(PermissionFlagsBits.SendMessages)) {
-      await interaction.reply({ content: "感想送信先は、Botが閲覧・送信できるテキストチャンネルを指定してください。", flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: "感想送信先は、Botが閲覧・送信できるテキストチャンネルを指定してください。" });
       return;
     }
     patch.reviewSendChannelId = reviewSendChannel.id;
@@ -1005,9 +1094,8 @@ async function handleSetting(interaction) {
   }
 
   if (Object.keys(patch).length === 0) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "変更する項目を1つ以上指定してください。",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -1116,6 +1204,7 @@ async function handleCallWaitSetting(interaction) {
       callWaitPromptChannel ||
       callWaitMode)
   ) {
+    await endCallWaitInterestsForRecruitment(interaction.guildId, currentSettings.callWaitPrompt.messageId);
     await deleteCallWaitPrompt(interaction.guild, currentSettings.callWaitPrompt);
     settings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
       callWaitPrompt: null,
@@ -1573,6 +1662,8 @@ async function handleKokuchi(interaction) {
     return;
   }
 
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
   const weekday = interaction.options.getString("weekday", true);
   const overviewChannel = interaction.options.getChannel("overview_channel", false);
   const targetChannel = interaction.options.getChannel("channel", false);
@@ -1607,44 +1698,222 @@ async function handleKokuchi(interaction) {
     });
     return;
   }
+  const botMember = interaction.guild.members.me ?? await interaction.guild.members.fetchMe().catch(() => null);
+  const sendPermissions = botMember && sendChannel.permissionsFor?.(botMember);
+  if (sendPermissions && (!sendPermissions.has(PermissionFlagsBits.ViewChannel) || !sendPermissions.has(PermissionFlagsBits.SendMessages))) {
+    await replyOrFollowUp(interaction, {
+      content: "告知先チャンネルを閲覧・送信する権限がBotにありません。権限を確認してから再実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
-  const postedAt = new Date();
-  const kokuchiPreNoticeAt = getKokuchiPreNoticeAt(postedAt);
-  const gatheringVcUnlockAt = getGatheringVcUnlockAt(postedAt);
-  const kokuchiGatheringReminderAt = getKokuchiGatheringReminderAt(postedAt);
-  await sendChannel.send({
-    content: formatKokuchiMessage({
+  const setHour = interaction.options.getInteger("set", false);
+  const activeReservation = await KokuchiReservation.findOne({
+    guildId: interaction.guildId,
+    status: { $in: ["pending", "processing"] },
+  }).lean();
+  if (activeReservation) {
+    await replyOrFollowUp(interaction, {
+      content: "すでに告知の送信予約があります。変更する場合は、現在の予約をキャンセルしてからもう一度実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (setHour !== null && setHour !== undefined) {
+    const scheduledAt = getNextKokuchiReservationAt({ weekday, hour: setHour });
+    if (!scheduledAt) {
+      await replyOrFollowUp(interaction, { content: "予約時刻を解釈できませんでした。", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const reservationId = createSessionId();
+    // The reminder is sent only when the reservation is at least exactly
+    // thirty minutes away.  A reservation made 29:59 beforehand is skipped.
+    const reminderStatus = scheduledAt.getTime() - Date.now() < 30 * 60 * 1000 ? "skipped" : "pending";
+    let reservation;
+    try {
+      reservation = await KokuchiReservation.create({
+      guildId: interaction.guildId, reservationId, weekday, displayHour: setHour, scheduledAt,
+      eventDate: getKokuchiEventDate(scheduledAt, setHour),
+      activeKey: interaction.guildId,
+      publicationKey: `${interaction.guildId}:${getKokuchiEventDate(scheduledAt, setHour)}`,
+      commandUserId: interaction.user.id, commandChannelId: interaction.channelId,
+      targetChannelId: sendChannel.id, overviewChannelId: resolvedOverviewChannel.id,
+      reminderStatus,
+      });
+    } catch (error) {
+      if (error?.code === 11000) {
+        await replyOrFollowUp(interaction, { content: "すでに告知の送信予約があります。変更する場合は、現在の予約をキャンセルしてからもう一度実行してください。", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      throw error;
+    }
+    try {
+    const confirmation = await interaction.channel.send({
+      content: `告知は${formatJstReservationTime(scheduledAt, setHour)}に送信されます。`,
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`${KOKUCHI_RESERVATION_CANCEL_CUSTOM_ID}:${reservationId}`).setLabel("送信をキャンセル").setStyle(ButtonStyle.Danger),
+      )],
+    });
+    const confirmationSaved = await KokuchiReservation.updateOne(
+      { _id: reservation._id, status: "pending" },
+      { $set: { confirmationChannelId: confirmation.channelId, confirmationMessageId: confirmation.id } },
+    );
+    if (confirmationSaved.matchedCount !== 1 || confirmationSaved.modifiedCount !== 1) {
+      await confirmation.edit({ content: "【予約失敗】\n\n予約情報を確定できなかったため、送信は行われません。", components: [] }).catch((error) => logRecoverableError("Failed to update rejected kokuchi reservation confirmation", error));
+      await KokuchiReservation.updateOne(
+        { _id: reservation._id, status: "pending" },
+        { $set: { status: "failed", failedAt: new Date(), cleanupAt: getKokuchiReservationCleanupAt() }, $unset: { activeKey: 1 } },
+      );
+      throw new Error("Reservation confirmation ID persistence failed");
+    }
+    await scheduleKokuchiReservation(interaction.guild, { ...reservation.toObject(), confirmationChannelId: confirmation.channelId, confirmationMessageId: confirmation.id });
+    } catch (error) {
+      // A reservation without its confirmation/cancel control must not remain
+      // active.  This also releases the sparse active-key slot.
+      clearKokuchiReservationTimers(reservationId);
+      await KokuchiReservation.deleteOne({ _id: reservation._id, status: "pending" });
+      console.error("Kokuchi reservation confirmation failed:", error);
+      await replyOrFollowUp(interaction, {
+        content: "予約の確認メッセージを送信できなかったため、予約を取り消しました。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    await replyOrFollowUp(interaction, { content: "予約を受け付けました。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  try {
+    await publishImmediateKokuchi({
+      interaction,
       weekday,
-      overviewChannelId: resolvedOverviewChannel.id,
-    }),
-    allowedMentions: { parse: [] },
-  });
-
-  const savedSettings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
-    lastKokuchiWeekday: weekday,
-    lastKokuchiPostedAt: postedAt.toISOString(),
-    kokuchiPreNoticeAt: kokuchiPreNoticeAt.toISOString(),
-    kokuchiPreNoticeChannelId: sendChannel.id,
-    kokuchiPreNoticeState: "pending",
-    gatheringVcUnlockAt: gatheringVcUnlockAt.toISOString(),
-    gatheringVcUnlockChannelId: resolveKokuchiGatheringVoiceChannelId(
+      sendChannel,
+      overviewChannel: resolvedOverviewChannel,
       settings,
-      settings,
-    ),
-    gatheringVcUnlockState: "pending",
-    kokuchiGatheringReminderAt: kokuchiGatheringReminderAt.toISOString(),
-    kokuchiGatheringReminderChannelId: sendChannel.id,
-    kokuchiGatheringReminderState: "pending",
-  });
-  await scheduleKokuchiPreNotice(interaction.guild, savedSettings);
-  await scheduleGatheringVcUnlock(interaction.guild, savedSettings);
-  await scheduleKokuchiGatheringReminder(interaction.guild, savedSettings);
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      await replyOrFollowUp(interaction, {
+        content: "この開催日の告知はすでに投稿済み、または送信確認中です。重複投稿を防ぐため再送しません。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    throw error;
+  }
 
   await replyOrFollowUp(interaction, {
     content: `告知を ${sendChannel} に投稿しました。`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
+}
+
+async function publishImmediateKokuchi({ interaction, weekday, sendChannel, overviewChannel, settings }) {
+  const now = new Date();
+  const jstHour = new Date(now.getTime() + 9 * 60 * 60 * 1000).getUTCHours();
+  const eventDate = getKokuchiEventDate(now, jstHour);
+  const reservation = await KokuchiReservation.create({
+    guildId: interaction.guildId,
+    reservationId: createSessionId(),
+    weekday,
+    displayHour: jstHour,
+    scheduledAt: now,
+    eventDate,
+    activeKey: interaction.guildId,
+    publicationKey: `${interaction.guildId}:${eventDate}`,
+    commandUserId: interaction.user.id,
+    commandChannelId: interaction.channelId,
+    targetChannelId: sendChannel.id,
+    overviewChannelId: overviewChannel.id,
+    status: "processing",
+    publicationStatus: "processing",
+    publicationStartedAt: now,
+    postProcessingStatus: "pending",
+    reminderStatus: "skipped",
+  });
+
+  try {
+    await publishKokuchi({
+      guild: interaction.guild,
+      weekday,
+      sendChannel,
+      overviewChannel,
+      settings,
+      leaseKey: `kokuchi-publish:${interaction.guildId}:${eventDate}`,
+      onPublished: async ({ postedMessage, postedAt }) => {
+        const persisted = await KokuchiReservation.updateOne(
+          { _id: reservation._id, status: "processing" },
+          {
+            $set: {
+              publicationStatus: "published",
+              publicationChannelId: postedMessage.channelId,
+              publicationMessageId: postedMessage.id,
+              publicationSentAt: postedAt,
+              postProcessingStatus: "processing",
+            },
+          },
+        );
+        if (persisted.matchedCount !== 1 || persisted.modifiedCount !== 1) {
+          throw new Error("Immediate kokuchi publication message ID could not be persisted");
+        }
+      },
+    });
+    const completed = await KokuchiReservation.updateOne(
+      { _id: reservation._id, status: "processing" },
+      {
+        $set: {
+          status: "sent",
+          sentAt: new Date(),
+          cleanupAt: getKokuchiReservationCleanupAt(),
+          publicationStatus: "published",
+          publicationConfirmedAt: new Date(),
+          postProcessingStatus: "completed",
+        },
+        $unset: { activeKey: 1, processingAt: 1, postProcessingError: 1 },
+      },
+    );
+    if (completed.matchedCount !== 1 || completed.modifiedCount !== 1) {
+      throw new Error("Immediate kokuchi publication succeeded but confirmation could not be persisted");
+    }
+  } catch (error) {
+    const publication = error?.kokuchiPublication ?? null;
+    const unconfirmed = Boolean(publication || error?.kokuchiPublicationAttempted === true);
+    const failed = await KokuchiReservation.updateOne(
+      { _id: reservation._id, status: "processing" },
+      {
+        $set: unconfirmed
+          ? {
+            status: "published_unconfirmed",
+            publicationStatus: "published_unconfirmed",
+            publicationChannelId: publication?.channelId,
+            publicationMessageId: publication?.messageId,
+            publicationSentAt: publication?.sentAt ?? new Date(),
+            postProcessingStatus: "failed",
+            postProcessingError: error.message,
+            publishedAt: new Date(),
+            recoveryReason: `Immediate Discord publication may have succeeded: ${error.message}`,
+          }
+          : {
+            status: "failed",
+            publicationStatus: "failed_before_publish",
+            postProcessingStatus: "failed",
+            postProcessingError: error.message,
+            failedAt: new Date(),
+            cleanupAt: getKokuchiReservationCleanupAt(),
+          },
+        $unset: unconfirmed
+          ? { activeKey: 1, processingAt: 1 }
+          : { activeKey: 1, processingAt: 1, publicationKey: 1 },
+      },
+    );
+    if (failed.matchedCount !== 1) {
+      console.error(`Immediate kokuchi failure state could not be persisted for ${reservation.reservationId}`);
+    }
+    throw error;
+  }
 }
 
 async function restoreGatheringVcUnlockSchedules() {
@@ -1661,7 +1930,7 @@ async function scheduleKokuchiPreNotice(guild, settings) {
 
   if (
     !settings?.kokuchiPreNoticeChannelId ||
-    settings.kokuchiPreNoticeState !== "pending"
+    !["pending", "failed"].includes(settings.kokuchiPreNoticeState)
   ) {
     return;
   }
@@ -1675,8 +1944,11 @@ async function scheduleKokuchiPreNotice(guild, settings) {
   const now = new Date();
 
   if (noticeAt.getTime() <= now.getTime()) {
-    await saveGuildSettingsWithCurrent(guild.id, settings, {
-      kokuchiPreNoticeState: "skipped",
+    await transitionKokuchiTimedAction({
+      guildId: guild.id,
+      stateKey: "kokuchiPreNoticeState",
+      fromStates: ["pending", "failed"],
+      toState: "skipped",
     });
     return;
   }
@@ -1713,23 +1985,45 @@ async function sendKokuchiPreNotice(guildId) {
 
   if (
     !settings?.kokuchiPreNoticeChannelId ||
-    settings.kokuchiPreNoticeState !== "pending"
+    !["pending", "failed"].includes(settings.kokuchiPreNoticeState)
   ) {
     return;
   }
 
   const noticeAt = new Date(settings.kokuchiPreNoticeAt);
 
-  if (!Number.isFinite(noticeAt.getTime()) || !isSameJstDate(noticeAt, new Date())) {
+  const now = new Date();
+  if (!Number.isFinite(noticeAt.getTime()) || noticeAt.getTime() + 5_000 < now.getTime()) {
+    await transitionKokuchiTimedAction({
+      guildId: guild.id,
+      stateKey: "kokuchiPreNoticeState",
+      fromStates: ["pending", "failed"],
+      toState: "skipped",
+    });
     return;
   }
 
+  const claimed = await transitionKokuchiTimedAction({
+    guildId: guild.id,
+    stateKey: "kokuchiPreNoticeState",
+    fromStates: ["pending", "failed"],
+    toState: "processing",
+  });
+  if (!claimed) return;
+
   const channel = await resolveConfiguredTextChannel(
     guild,
-    settings.kokuchiPreNoticeChannelId,
+    claimed.kokuchiPreNoticeChannelId,
   );
 
   if (!channel) {
+    await transitionKokuchiTimedAction({
+      guildId: guild.id,
+      stateKey: "kokuchiPreNoticeState",
+      fromStates: ["processing"],
+      toState: "failed",
+      patch: { kokuchiPreNoticeLastError: "Configured pre-notice channel could not be resolved" },
+    });
     return;
   }
 
@@ -1742,15 +2036,27 @@ async function sendKokuchiPreNotice(guildId) {
   });
 
   if (!message) {
+    await transitionKokuchiTimedAction({
+      guildId: guild.id,
+      stateKey: "kokuchiPreNoticeState",
+      fromStates: ["processing"],
+      toState: "sent_unconfirmed",
+      patch: { kokuchiPreNoticeLastError: "Discord pre-notice send result was not confirmed; automatic retry was disabled to prevent duplicates" },
+    });
     return;
   }
 
-  await saveGuildSettingsWithCurrent(guild.id, settings, {
-    kokuchiPreNoticeState: "sent",
-    kokuchiPreNoticeMessage: {
-      channelId: channel.id,
-      messageId: message.id,
-      sentAt: new Date().toISOString(),
+  await transitionKokuchiTimedAction({
+    guildId: guild.id,
+    stateKey: "kokuchiPreNoticeState",
+    fromStates: ["processing"],
+    toState: "sent",
+    patch: {
+      kokuchiPreNoticeMessage: {
+        channelId: channel.id,
+        messageId: message.id,
+        sentAt: new Date().toISOString(),
+      },
     },
   });
 }
@@ -1783,14 +2089,18 @@ async function scheduleGatheringVcUnlock(guild, settings) {
     return;
   }
 
-  if (settings.gatheringVcUnlockState !== "pending") {
+  if (!["pending", "failed"].includes(settings.gatheringVcUnlockState)) {
     return;
   }
 
   if (unlockAt.getTime() <= now.getTime()) {
-    if (isSameJstDate(unlockAt, now)) {
-      await applyGatheringVcUnlock(guild.id);
-    }
+    // A delayed process must never replay an action from earlier today.
+    await transitionKokuchiTimedAction({
+      guildId: guild.id,
+      stateKey: "gatheringVcUnlockState",
+      fromStates: ["pending", "failed"],
+      toState: "skipped",
+    });
     return;
   }
 
@@ -1818,7 +2128,7 @@ async function scheduleKokuchiGatheringReminder(guild, settings) {
 
   if (
     !settings?.kokuchiGatheringReminderChannelId ||
-    settings.kokuchiGatheringReminderState !== "pending"
+    !["pending", "failed"].includes(settings.kokuchiGatheringReminderState)
   ) {
     return;
   }
@@ -1832,9 +2142,12 @@ async function scheduleKokuchiGatheringReminder(guild, settings) {
   const now = new Date();
 
   if (remindAt.getTime() <= now.getTime()) {
-    if (isSameJstDate(remindAt, now)) {
-      await sendKokuchiGatheringReminder(guild.id);
-    }
+    // The 20:55 reminder is useful only before its scheduled time.
+    await transitionKokuchiGatheringReminder({
+      guildId: guild.id,
+      fromStates: ["pending", "failed"],
+      toState: "skipped",
+    });
     return;
   }
 
@@ -1873,50 +2186,97 @@ async function sendKokuchiGatheringReminder(guildId) {
 
   if (
     !settings?.kokuchiGatheringReminderChannelId ||
-    settings.kokuchiGatheringReminderState !== "pending"
+    !["pending", "failed"].includes(settings.kokuchiGatheringReminderState)
   ) {
     return;
   }
 
   const remindAt = new Date(settings.kokuchiGatheringReminderAt);
 
-  if (!Number.isFinite(remindAt.getTime()) || !isSameJstDate(remindAt, new Date())) {
+  const now = new Date();
+  if (!Number.isFinite(remindAt.getTime()) || remindAt.getTime() + 5_000 < now.getTime()) {
+    await transitionKokuchiGatheringReminder({
+      guildId: guild.id,
+      fromStates: ["pending", "failed"],
+      toState: "skipped",
+    });
+    return;
+  }
+
+  const claimed = await transitionKokuchiGatheringReminder({
+    guildId: guild.id,
+    fromStates: ["pending", "failed"],
+    toState: "sending",
+  });
+
+  if (!claimed) {
     return;
   }
 
   const channel = await resolveConfiguredTextChannel(
     guild,
-    settings.kokuchiGatheringReminderChannelId,
+    claimed.kokuchiGatheringReminderChannelId,
   );
 
   if (!channel) {
+    await transitionKokuchiGatheringReminder({
+      guildId: guild.id,
+      fromStates: ["sending"],
+      toState: "failed",
+      patch: { kokuchiGatheringReminderLastError: "Configured reminder channel could not be resolved" },
+    });
     return;
   }
 
-  const roleMentions = KOKUCHI_GATHERING_REMINDER_ROLE_IDS
+  const roleIds = Array.isArray(claimed.kokuchiGatheringReminderRoleIds)
+    ? claimed.kokuchiGatheringReminderRoleIds.filter(Boolean)
+    : [];
+  const gatheringVoiceChannelId = getGatheringVcUnlockChannelId(claimed);
+
+  if (!gatheringVoiceChannelId) {
+    await transitionKokuchiGatheringReminder({
+      guildId: guild.id,
+      fromStates: ["sending"],
+      toState: "failed",
+      patch: { kokuchiGatheringReminderLastError: "Gathering voice channel is not configured" },
+    });
+    return;
+  }
+
+  const roleMentions = roleIds
     .map((roleId) => `<@&${roleId}>`)
     .join(" ");
 
   const message = await channel.send({
     content:
       `${roleMentions} 会話練習会の集合が開始しました！ ` +
-      `<#${KOKUCHI_GATHERING_REMINDER_VOICE_CHANNEL_ID}> からぜひご参加ください！5分後に締め切られます`,
-    allowedMentions: { roles: KOKUCHI_GATHERING_REMINDER_ROLE_IDS },
+      `<#${gatheringVoiceChannelId}> からぜひご参加ください！5分後に締め切られます`,
+    allowedMentions: { roles: roleIds },
   }).catch((error) => {
     console.error(`Failed to send kokuchi gathering reminder: ${error.message}`);
     return null;
   });
 
   if (!message) {
+    await transitionKokuchiGatheringReminder({
+      guildId: guild.id,
+      fromStates: ["sending"],
+      toState: "unconfirmed",
+      patch: { kokuchiGatheringReminderLastError: "Discord message send result was not confirmed; automatic retry was disabled to prevent duplicates" },
+    });
     return;
   }
 
-  await saveGuildSettingsWithCurrent(guild.id, settings, {
-    kokuchiGatheringReminderState: "sent",
-    kokuchiGatheringReminderMessage: {
-      channelId: channel.id,
-      messageId: message.id,
-      sentAt: new Date().toISOString(),
+  await transitionKokuchiGatheringReminder({
+    guildId: guild.id,
+    fromStates: ["sending"],
+    toState: "sent",
+    patch: {
+      kokuchiGatheringReminderMessage: {
+        channelId: channel.id,
+        messageId: message.id,
+        sentAt: new Date().toISOString(),
+      },
     },
   });
 }
@@ -1934,21 +2294,51 @@ async function applyGatheringVcUnlock(guildId) {
 
   if (
     !getGatheringVcUnlockChannelId(settings) ||
-    settings.gatheringVcUnlockState !== "pending"
+    !["pending", "failed"].includes(settings.gatheringVcUnlockState)
   ) {
     return;
   }
 
+  const unlockAt = new Date(settings.gatheringVcUnlockAt);
+  if (!Number.isFinite(unlockAt.getTime()) || unlockAt.getTime() + 5_000 < Date.now()) {
+    await transitionKokuchiTimedAction({
+      guildId: guild.id,
+      stateKey: "gatheringVcUnlockState",
+      fromStates: ["pending", "failed"],
+      toState: "skipped",
+    });
+    return;
+  }
+
+  const claimed = await transitionKokuchiTimedAction({
+    guildId: guild.id,
+    stateKey: "gatheringVcUnlockState",
+    fromStates: ["pending", "failed"],
+    toState: "processing",
+  });
+  if (!claimed) return;
+
   const changed = await setGatheringVcConnectPermission({
     guild,
-    settings,
+    settings: claimed,
     canConnect: true,
     reason: "会話練習会の集合VCを20:40に開放",
   });
 
   if (changed) {
-    await saveGuildSettingsWithCurrent(guild.id, settings, {
-      gatheringVcUnlockState: "opened",
+    await transitionKokuchiTimedAction({
+      guildId: guild.id,
+      stateKey: "gatheringVcUnlockState",
+      fromStates: ["processing"],
+      toState: "opened",
+    });
+  } else {
+    await transitionKokuchiTimedAction({
+      guildId: guild.id,
+      stateKey: "gatheringVcUnlockState",
+      fromStates: ["processing"],
+      toState: "failed",
+      patch: { gatheringVcUnlockLastError: "Gathering VC permission update was not applied" },
     });
   }
 }
@@ -2006,6 +2396,427 @@ async function setGatheringVcConnectPermission({
     });
 
   return changed;
+}
+
+/** Shared by immediate and reserved /kokuchi posting. */
+async function publishKokuchi({ guild, weekday, sendChannel, overviewChannel, settings = null, onPublished = null, leaseKey = null }) {
+  if (kokuchiPublishGuildLocks.has(guild.id)) {
+    throw new Error("A /kokuchi publication is already in progress for this guild.");
+  }
+  kokuchiPublishGuildLocks.add(guild.id);
+  let lease = null;
+  let publicationAttempted = false;
+  let postedMessage = null;
+  let postedAt = null;
+  try {
+  lease = await acquireMongoLease(leaseKey ?? `kokuchi:${guild.id}`, { leaseMs: 2 * 60 * 1000 });
+  if (!lease) {
+    throw new Error("A /kokuchi publication is already in progress for this guild.");
+  }
+  postedAt = new Date();
+  publicationAttempted = true;
+  postedMessage = await sendChannel.send({
+    content: formatKokuchiMessage({ weekday, overviewChannelId: overviewChannel.id }),
+    allowedMentions: { parse: [] },
+  });
+  if (onPublished) {
+    await onPublished({ postedMessage, postedAt });
+  }
+  const currentSettings = settings ?? await getGuildSettings(guild.id);
+  const preNoticeAt = getKokuchiPreNoticeAt(postedAt);
+  const unlockAt = getGatheringVcUnlockAt(postedAt);
+  const reminderAt = getKokuchiGatheringReminderAt(postedAt);
+  const savedSettings = await saveGuildSettingsWithCurrent(guild.id, currentSettings, {
+    lastKokuchiWeekday: weekday,
+    lastKokuchiPostedAt: postedAt.toISOString(),
+    lastKokuchiMessageId: postedMessage.id,
+    lastKokuchiChannelId: postedMessage.channelId,
+    kokuchiPreNoticeAt: preNoticeAt.toISOString(),
+    kokuchiPreNoticeChannelId: sendChannel.id,
+    kokuchiPreNoticeState: preNoticeAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
+    gatheringVcUnlockAt: unlockAt.toISOString(),
+    gatheringVcUnlockChannelId: resolveKokuchiGatheringVoiceChannelId(currentSettings, currentSettings),
+    gatheringVcUnlockState: unlockAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
+    kokuchiGatheringReminderAt: reminderAt.toISOString(),
+    kokuchiGatheringReminderChannelId: sendChannel.id,
+    kokuchiGatheringReminderState: reminderAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
+  });
+  // Each existing scheduler deliberately marks a past event as skipped, so a
+  // late reservation never replays the 20:30/20:40/20:55 actions.
+  await scheduleKokuchiPreNotice(guild, savedSettings);
+  await scheduleGatheringVcUnlock(guild, savedSettings);
+  await scheduleKokuchiGatheringReminder(guild, savedSettings);
+  return { settings: savedSettings, postedMessage };
+  } catch (error) {
+    error.kokuchiPublicationAttempted = publicationAttempted;
+    if (postedMessage) {
+      error.kokuchiPublication = {
+        channelId: postedMessage.channelId,
+        messageId: postedMessage.id,
+        sentAt: postedAt ?? new Date(),
+      };
+    }
+    throw error;
+  } finally {
+    if (lease) {
+      await releaseMongoLease(lease).catch((error) => {
+        console.error(`Failed to release /kokuchi lease for ${guild.id}: ${error.message}`);
+      });
+    }
+    kokuchiPublishGuildLocks.delete(guild.id);
+  }
+}
+
+async function scheduleKokuchiReservation(guild, reservation) {
+  clearKokuchiReservationTimers(reservation.reservationId);
+  if (reservation.status !== "pending") return;
+  const scheduledAt = new Date(reservation.scheduledAt);
+  const sendIn = scheduledAt.getTime() - Date.now();
+  if (!Number.isFinite(scheduledAt.getTime())) return;
+  const sendTimer = setTimeout(() => {
+    void processKokuchiReservation(guild.id, reservation.reservationId).catch((error) => console.error("Reserved /kokuchi failed:", error));
+  }, Math.max(0, sendIn));
+  kokuchiReservationTimers.set(`${reservation.reservationId}:send`, sendTimer);
+  if (reservation.reminderStatus === "pending") {
+    const reminderIn = sendIn - 30 * 60 * 1000;
+    if (reminderIn >= -5_000) {
+      const reminderTimer = setTimeout(() => {
+        void sendKokuchiReservationReminder(guild.id, reservation.reservationId).catch((error) => console.error("Reserved /kokuchi reminder failed:", error));
+      }, reminderIn);
+      kokuchiReservationTimers.set(`${reservation.reservationId}:reminder`, reminderTimer);
+    } else {
+      // This can occur when restoring an older reservation which was created
+      // inside the 30-minute reminder window.  Do not send a late reminder.
+      await KokuchiReservation.updateOne(
+        { _id: reservation._id, status: "pending", reminderStatus: "pending" },
+        { $set: { reminderStatus: "skipped" } },
+      );
+    }
+  }
+}
+
+function clearKokuchiReservationTimers(reservationId) {
+  const prefix = `${reservationId}:`;
+  for (const [key, timer] of kokuchiReservationTimers) {
+    if (!key.startsWith(prefix)) continue;
+    if (timer) clearTimeout(timer);
+    kokuchiReservationTimers.delete(key);
+  }
+}
+
+async function sendKokuchiReservationReminder(guildId, reservationId) {
+  const reservation = await KokuchiReservation.findOneAndUpdate(
+    { guildId, reservationId, status: "pending", reminderStatus: "pending" },
+    { $set: { reminderStatus: "processing", reminderProcessingAt: new Date() } },
+    { returnDocument: "after" },
+  ).lean();
+  if (!reservation) return;
+  try {
+    const currentBeforeSend = await KokuchiReservation.findOne({
+      _id: reservation._id,
+      status: "pending",
+      reminderStatus: "processing",
+    }).lean();
+    if (!currentBeforeSend) return;
+    // A cancellation can still win only after Discord has accepted the
+    // outbound request; that API-level race cannot be recalled.
+    const channel = await client.channels.fetch(reservation.commandChannelId).catch(() => null);
+    if (!channel?.send) throw new Error("Reservation command channel is unavailable");
+    await channel.send({ content: `<@${reservation.commandUserId}> 予約した告知の送信30分前です。\n告知は${formatJstReservationTime(new Date(reservation.scheduledAt), reservation.displayHour)}に送信されます。`, allowedMentions: { users: [reservation.commandUserId] } });
+    const current = await KokuchiReservation.findOne({
+      _id: reservation._id,
+      status: "pending",
+      reminderStatus: "processing",
+    }).lean();
+    if (!current) return;
+    await KokuchiReservation.updateOne(
+      { _id: reservation._id, status: "pending", reminderStatus: "processing" },
+      { $set: { reminderStatus: "sent" }, $unset: { reminderProcessingAt: 1 } },
+    );
+  } catch (error) {
+    await KokuchiReservation.updateOne(
+      { _id: reservation._id, status: "pending", reminderStatus: "processing" },
+      { $set: { reminderStatus: "failed" }, $unset: { reminderProcessingAt: 1 } },
+    );
+    console.error("Reserved /kokuchi reminder failed:", error);
+  }
+}
+
+async function processKokuchiReservation(guildId, reservationId) {
+  const reservation = await KokuchiReservation.findOneAndUpdate(
+    { guildId, reservationId, status: "pending" },
+    {
+      $set: {
+        status: "processing",
+        processingAt: new Date(),
+        publicationStatus: "processing",
+        publicationStartedAt: new Date(),
+        postProcessingStatus: "pending",
+      },
+    },
+    { returnDocument: "after" },
+  ).lean();
+  if (!reservation) return;
+  clearKokuchiReservationTimers(reservationId);
+  const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId).catch(() => null);
+  let publication = null;
+  try {
+    const [sendChannel, overviewChannel, settings] = await Promise.all([
+      guild?.channels.fetch(reservation.targetChannelId), guild?.channels.fetch(reservation.overviewChannelId), getGuildSettings(guildId),
+    ]);
+    if (!guild || !sendChannel?.send || !overviewChannel?.send) throw new Error("Configured channel is unavailable");
+    publication = await publishKokuchi({
+      guild,
+      weekday: reservation.weekday,
+      sendChannel,
+      overviewChannel,
+      settings,
+      leaseKey: `kokuchi-publish:${guild.id}:${reservation.eventDate ?? getKokuchiEventDate(reservation.scheduledAt, reservation.displayHour)}`,
+      onPublished: async ({ postedMessage, postedAt }) => {
+        const publicationPersisted = await KokuchiReservation.updateOne(
+          { _id: reservation._id, status: "processing" },
+          {
+            $set: {
+              publicationStatus: "published",
+              publicationChannelId: postedMessage.channelId,
+              publicationMessageId: postedMessage.id,
+              publicationSentAt: postedAt,
+              postProcessingStatus: "processing",
+            },
+          },
+        );
+        if (publicationPersisted.matchedCount !== 1 || publicationPersisted.modifiedCount !== 1) {
+          throw new Error("Reservation publication succeeded but its message ID could not be persisted.");
+        }
+      },
+    });
+    const sentPersisted = await KokuchiReservation.updateOne(
+      { _id: reservation._id, status: "processing" },
+      {
+        $set: {
+          status: "sent",
+          sentAt: new Date(),
+          cleanupAt: getKokuchiReservationCleanupAt(),
+          publicationStatus: "published",
+          publicationConfirmedAt: new Date(),
+          postProcessingStatus: "completed",
+        },
+        $unset: { activeKey: 1, processingAt: 1, postProcessingError: 1 },
+      },
+    );
+    if (sentPersisted.matchedCount !== 1 || sentPersisted.modifiedCount !== 1) {
+      throw new Error("Reservation publication completed but sent status could not be persisted; automatic retry is disabled to prevent duplicates.");
+    }
+    await editKokuchiReservationConfirmation(reservation, `【送信済み】\n\n告知を${formatJstReservationTime(new Date(reservation.scheduledAt), reservation.displayHour)}に送信しました。`);
+  } catch (error) {
+    const confirmedPublication = publication?.postedMessage ?? error?.kokuchiPublication ?? null;
+    const publicationUnconfirmed = Boolean(confirmedPublication || error?.kokuchiPublicationAttempted === true);
+    await KokuchiReservation.updateOne(
+      { _id: reservation._id, status: "processing" },
+      {
+        $set: publicationUnconfirmed
+          ? {
+            status: "published_unconfirmed",
+            publicationStatus: "published_unconfirmed",
+            publicationChannelId: confirmedPublication?.channelId,
+            publicationMessageId: confirmedPublication?.messageId,
+            publicationSentAt: confirmedPublication?.sentAt ?? new Date(),
+            postProcessingStatus: "failed",
+            postProcessingError: error.message,
+            publishedAt: new Date(),
+            failedAt: new Date(),
+            recoveryReason: `Discord publication may have succeeded; manual confirmation required: ${error.message}`,
+          }
+          : {
+            status: "failed",
+            publicationStatus: "failed_before_publish",
+            postProcessingStatus: "failed",
+            postProcessingError: error.message,
+            failedAt: new Date(),
+            cleanupAt: getKokuchiReservationCleanupAt(),
+          },
+        $unset: publicationUnconfirmed
+          ? { activeKey: 1, processingAt: 1 }
+          : { activeKey: 1, processingAt: 1, publicationKey: 1 },
+      },
+    );
+    await editKokuchiReservationConfirmation(
+      reservation,
+      publicationUnconfirmed
+        ? "【送信状態を確認中】\n\n告知投稿後の確認処理に失敗しました。重複投稿を防ぐため自動再送は行いません。"
+        : "【送信失敗】\n\n予約していた告知を送信できませんでした。\n送信先チャンネルやBotの権限をご確認ください。",
+    );
+    const commandChannel = await client.channels.fetch(reservation.commandChannelId).catch(() => null);
+    await commandChannel?.send?.({ content: `<@${reservation.commandUserId}> 予約していた告知を送信できませんでした。`, allowedMentions: { users: [reservation.commandUserId] } }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    await sendOperationalLog({ guild, settings: await getGuildSettings(guildId).catch(() => null), fallbackChannel: commandChannel, content: `予約告知送信失敗: ${error.message}` }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+  }
+}
+
+async function resumeKokuchiPostProcessing(reservation) {
+  const guild = client.guilds.cache.get(reservation.guildId)
+    ?? await client.guilds.fetch(reservation.guildId).catch(() => null);
+  if (!guild) throw new Error("Guild is unavailable for kokuchi post-processing recovery");
+
+  const postedAt = new Date(reservation.publicationSentAt ?? reservation.publishedAt ?? reservation.scheduledAt);
+  if (!Number.isFinite(postedAt.getTime())) throw new Error("Published kokuchi reservation has no valid publication time");
+
+  const currentSettings = await getGuildSettings(guild.id);
+  const preNoticeAt = getKokuchiPreNoticeAt(postedAt);
+  const unlockAt = getGatheringVcUnlockAt(postedAt);
+  const reminderAt = getKokuchiGatheringReminderAt(postedAt);
+  const savedSettings = await saveGuildSettingsWithCurrent(guild.id, currentSettings, {
+    lastKokuchiWeekday: reservation.weekday,
+    lastKokuchiPostedAt: postedAt.toISOString(),
+    lastKokuchiMessageId: reservation.publicationMessageId,
+    lastKokuchiChannelId: reservation.publicationChannelId ?? reservation.targetChannelId,
+    kokuchiPreNoticeAt: preNoticeAt.toISOString(),
+    kokuchiPreNoticeChannelId: reservation.publicationChannelId ?? reservation.targetChannelId,
+    kokuchiPreNoticeState: preNoticeAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
+    gatheringVcUnlockAt: unlockAt.toISOString(),
+    gatheringVcUnlockChannelId: resolveKokuchiGatheringVoiceChannelId(currentSettings, currentSettings),
+    gatheringVcUnlockState: unlockAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
+    kokuchiGatheringReminderAt: reminderAt.toISOString(),
+    kokuchiGatheringReminderChannelId: reservation.publicationChannelId ?? reservation.targetChannelId,
+    kokuchiGatheringReminderState: reminderAt.getTime() > postedAt.getTime() ? "pending" : "skipped",
+  });
+  await scheduleKokuchiPreNotice(guild, savedSettings);
+  await scheduleGatheringVcUnlock(guild, savedSettings);
+  await scheduleKokuchiGatheringReminder(guild, savedSettings);
+
+  const completed = await KokuchiReservation.updateOne(
+    { _id: reservation._id, status: { $in: ["processing", "published_unconfirmed"] } },
+    {
+      $set: {
+        status: "sent",
+        sentAt: new Date(),
+        cleanupAt: getKokuchiReservationCleanupAt(),
+        publicationStatus: "published",
+        publicationConfirmedAt: new Date(),
+        postProcessingStatus: "completed",
+      },
+      $unset: { activeKey: 1, processingAt: 1, postProcessingError: 1 },
+    },
+  );
+  if (completed.matchedCount !== 1 || completed.modifiedCount !== 1) {
+    throw new Error("Kokuchi post-processing completion could not be persisted");
+  }
+  await editKokuchiReservationConfirmation(
+    reservation,
+    `【送信済み】\n\n告知を${formatJstReservationTime(new Date(reservation.scheduledAt), reservation.displayHour)}に送信しました。`,
+  );
+}
+
+async function editKokuchiReservationConfirmation(reservation, content) {
+  const channel = await client.channels.fetch(reservation.confirmationChannelId).catch(() => null);
+  const message = await channel?.messages?.fetch?.(reservation.confirmationMessageId).catch(() => null);
+  await message?.edit({ content, components: [] }).catch((error) => logRecoverableError("Failed to update kokuchi reservation confirmation", error));
+}
+
+async function handleKokuchiReservationCancel(interaction) {
+  const reservationId = interaction.customId.slice(`${KOKUCHI_RESERVATION_CANCEL_CUSTOM_ID}:`.length);
+  const reservation = await KokuchiReservation.findOne({ reservationId }).lean();
+  if (!reservation) {
+    await interaction.reply({ content: "この告知予約は見つかりません。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const permitted = reservation.commandUserId === interaction.user.id || interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
+  if (!permitted) {
+    await interaction.reply({ content: "この告知予約をキャンセルする権限がありません。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  if (reservation.status !== "pending") {
+    const content = reservation.status === "sent"
+      ? "この告知予約はすでに送信済みです。"
+      : reservation.status === "canceled"
+        ? "この告知予約はすでにキャンセルされています。"
+        : reservation.status === "failed"
+          ? "この告知予約は送信失敗として終了しています。"
+          : "この告知予約は現在送信処理中のため、キャンセルできません。";
+    await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const reminderStatus = getKokuchiReminderStatusOnCancel(reservation.reminderStatus);
+  const reminderPatch = reminderStatus === reservation.reminderStatus ? {} : { reminderStatus };
+  const canceled = await KokuchiReservation.findOneAndUpdate(
+    { _id: reservation._id, status: "pending" },
+    { $set: { status: "canceled", canceledAt: new Date(), cleanupAt: getKokuchiReservationCleanupAt(), ...reminderPatch }, $unset: { activeKey: 1 } },
+    { returnDocument: "after", lean: true },
+  );
+  if (!canceled) {
+    await interaction.reply({ content: "この告知予約はすでに処理されています。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  clearKokuchiReservationTimers(reservationId);
+  await interaction.update({ content: "【キャンセル済み】\n\n予約していた告知の送信をキャンセルしました。", components: [] });
+}
+
+async function restoreKokuchiReservations() {
+  // Never automatically replay an interrupted publication: it may already
+  // have reached Discord before the process stopped.
+  const interrupted = await KokuchiReservation.find({ status: "processing" }).lean();
+  for (const reservation of interrupted) {
+    try {
+      if (reservation.publicationMessageId) {
+        await resumeKokuchiPostProcessing(reservation);
+        continue;
+      }
+      const failed = await KokuchiReservation.findOneAndUpdate(
+        { _id: reservation._id, status: "processing" },
+        {
+          $set: {
+            status: "failed",
+            failedAt: new Date(),
+            cleanupAt: getKokuchiReservationCleanupAt(),
+            recoveryReason: "Bot restarted while reservation publication was processing",
+          },
+          $unset: { activeKey: 1, processingAt: 1 },
+        },
+        { returnDocument: "after", lean: true },
+      );
+      if (!failed) continue;
+      await editKokuchiReservationConfirmation(failed, "【送信失敗】\n\nBotの再起動中に送信処理が中断されたため、予約していた告知を送信できませんでした。\n重複投稿防止のため、自動再送は行っていません。");
+      const commandChannel = await client.channels.fetch(failed.commandChannelId).catch(() => null);
+      await commandChannel?.send?.({
+        content: `<@${failed.commandUserId}> 予約告知の送信処理がBot再起動により中断されました。`,
+        allowedMentions: { users: [failed.commandUserId] },
+      }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      const guild = client.guilds.cache.get(failed.guildId) ?? await client.guilds.fetch(failed.guildId).catch(() => null);
+      await sendOperationalLog({
+        guild,
+        settings: await getGuildSettings(failed.guildId).catch(() => null),
+        fallbackChannel: commandChannel,
+        content: `予約告知を再起動中断として失敗にしました。予約ID: ${failed.reservationId}`,
+      }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    } catch (error) {
+      console.error(`Failed to recover interrupted kokuchi reservation ${reservation.reservationId}: ${error.message}`);
+    }
+  }
+  await KokuchiReservation.updateMany(
+    { status: "pending", reminderStatus: "processing" },
+    { $set: { reminderStatus: "failed" }, $unset: { reminderProcessingAt: 1 } },
+  );
+  const unconfirmedPublications = await KokuchiReservation.find({
+    status: "published_unconfirmed",
+    publicationMessageId: { $exists: true, $ne: null },
+  }).lean();
+  for (const reservation of unconfirmedPublications) {
+    try {
+      await resumeKokuchiPostProcessing(reservation);
+    } catch (error) {
+      console.error(`Failed to resume kokuchi post-processing ${reservation.reservationId}: ${error.message}`);
+    }
+  }
+  const reservations = await KokuchiReservation.find({ status: "pending" }).lean();
+  for (const reservation of reservations) {
+    try {
+      const guild = client.guilds.cache.get(reservation.guildId) ?? await client.guilds.fetch(reservation.guildId).catch(() => null);
+      if (!guild) continue;
+      if (new Date(reservation.scheduledAt).getTime() <= Date.now()) await processKokuchiReservation(guild.id, reservation.reservationId);
+      else await scheduleKokuchiReservation(guild, reservation);
+    } catch (error) {
+      console.error(`Failed to restore kokuchi reservation ${reservation.reservationId}: ${error.message}`);
+    }
+  }
 }
 
 function getGatheringVcUnlockChannelId(settings) {
@@ -2085,7 +2896,7 @@ async function handleSendCallWait(interaction) {
 
   await replyOrFollowUp(interaction, {
     content: result.sent
-      ? `通話待機システムの募集メッセージを ${result.channel} に送信しました。${formatJstHour(result.targetAt)} に希望者を確認します。`
+      ? `通話待機システムの募集メッセージを ${result.channel} に送信しました。${formatJstTime(result.targetAt)} に希望者を確認します。`
       : `通話待機システムの募集メッセージを送信できませんでした。${result.reason}`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
@@ -2109,6 +2920,7 @@ async function handleSendOtebo(interaction) {
     return;
   }
 
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const settings = await getGuildSettings(interaction.guildId);
   const channel = await resolveConfiguredTextChannel(
     interaction.guild,
@@ -2298,10 +3110,11 @@ async function handleOteboDraftNoteButton(interaction) {
 }
 
 async function handleOteboDraftSubmitButton(interaction) {
+  await interaction.deferUpdate();
   const result = await createOteboRecruitmentFromDraft(interaction, "");
 
   if (!result.ok) {
-    await interaction.update({
+    await interaction.editReply({
       content: result.reason,
       components: result.keepDraft
         ? createOteboDraftRows(result.draft)
@@ -2311,7 +3124,7 @@ async function handleOteboDraftSubmitButton(interaction) {
     return;
   }
 
-  await interaction.update({
+  await interaction.editReply({
     content: formatOteboOwnerCancelMessage(),
     components: [],
     allowedMentions: { parse: [] },
@@ -2320,10 +3133,11 @@ async function handleOteboDraftSubmitButton(interaction) {
 
 async function handleOteboNoteModal(interaction) {
   const note = interaction.fields.getTextInputValue("note") ?? "";
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const result = await createOteboRecruitmentFromDraft(interaction, note);
 
   if (!result.ok) {
-    await interaction.reply({
+    await interaction.editReply({
       content: result.reason,
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
@@ -2333,7 +3147,7 @@ async function handleOteboNoteModal(interaction) {
 
   await updateOteboDraftMenuAfterModal(result.draftMenu);
 
-  await interaction.reply({
+  await interaction.editReply({
     content: formatOteboOwnerCancelMessage(),
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
@@ -2675,11 +3489,12 @@ async function handleOteboOwnerCancelButton(interaction, recruitmentId) {
 }
 
 async function handleOteboOwnerCancelConfirmButton(interaction, recruitmentId) {
+  await interaction.deferUpdate();
   const settings = await getGuildSettings(interaction.guildId);
   const recruitment = getOteboRecruitment(settings, recruitmentId);
 
   if (!isActiveOteboRecruitment(recruitment)) {
-    await interaction.update({
+    await interaction.editReply({
       content: "この募集は現在有効ではありません。",
       components: [],
     });
@@ -2687,7 +3502,7 @@ async function handleOteboOwnerCancelConfirmButton(interaction, recruitmentId) {
   }
 
   if (interaction.user.id !== recruitment.ownerId) {
-    await interaction.update({
+    await interaction.editReply({
       content: "この確認ボタンを使えるのは募集作成者だけです。",
       components: [],
     });
@@ -2695,7 +3510,7 @@ async function handleOteboOwnerCancelConfirmButton(interaction, recruitmentId) {
   }
 
   if (!normalizeCallWaitMemberIds(recruitment.memberIds).includes(interaction.user.id)) {
-    await interaction.update({
+    await interaction.editReply({
       content: "この募集への参加の予定はありません。",
       components: [],
     });
@@ -2707,7 +3522,7 @@ async function handleOteboOwnerCancelConfirmButton(interaction, recruitmentId) {
     settings,
     recruitment,
     userId: interaction.user.id,
-    response: "update",
+    response: "editReply",
   });
 }
 
@@ -2775,8 +3590,8 @@ async function cancelOteboParticipation({
 }
 
 async function respondOteboCancel(interaction, response) {
-  if (response === "update") {
-    await interaction.update({
+  if (response === "update" || response === "editReply") {
+    await interaction[response]({
       content: "参加の希望をキャンセルしました。",
       components: [],
     });
@@ -2790,11 +3605,12 @@ async function respondOteboCancel(interaction, response) {
 }
 
 function scheduleNextCallWaitTick() {
+  if (shuttingDown) return;
   if (callWaitTimer) {
     clearTimeout(callWaitTimer);
   }
 
-  const delayMs = getMsUntilNextHour(new Date());
+  const delayMs = getMsUntilNextHalfHour(new Date());
   callWaitTimer = setTimeout(() => {
     void processCallWaitForAllGuilds()
       .catch((error) => {
@@ -2807,45 +3623,150 @@ function scheduleNextCallWaitTick() {
 }
 
 async function processCallWaitForAllGuilds() {
+  if (shuttingDown) return;
   for (const guild of client.guilds.cache.values()) {
-    const settings = await getGuildSettings(guild.id);
-    await processCallWaitForGuild(guild, settings).catch((error) => {
+    // Settings retrieval is also an external MongoDB operation.  Keep it in
+    // the per-guild boundary so one unavailable document cannot prevent every
+    // other guild from receiving its scheduled evaluation.
+    try {
+      const settings = await getGuildSettings(guild.id);
+      await processCallWaitForGuild(guild, settings);
+    } catch (error) {
       console.error(`Failed to process call wait for ${guild.id}: ${error.message}`, error);
-    });
+    }
   }
+  await retryPendingCallWaitEndNotifications().catch((error) => {
+    console.error("Call-wait end notification retry failed:", error);
+  });
 }
 
 async function processCallWaitForGuild(guild, settings) {
-  if (settings?.callWaitEnabled !== true) {
-    return;
-  }
+  if (callWaitGuildLocks.has(guild.id)) return;
+  callWaitGuildLocks.add(guild.id);
+  let lease = null;
+  try {
+    lease = await acquireMongoLease(`callwait:${guild.id}`, { leaseMs: 5 * 60 * 1000 });
+    if (!lease) return;
+    await endOrphanedCallWaitInterests(guild.id, settings?.callWaitPrompt?.messageId);
+    if (settings?.callWaitEnabled !== true) {
+      const prompt = settings?.callWaitPrompt;
+      if (prompt?.messageId) {
+        const closing = await transitionCallWaitPrompt({
+          guildId: guild.id,
+          messageId: prompt.messageId,
+          fromStates: ["open", "evaluating", "role_granting", "failed"],
+          toState: "closing",
+          patch: { lastError: "Closing call-wait prompt because the feature is disabled" },
+        });
+        if (closing) {
+          await endCallWaitInterestsForRecruitment(guild.id, prompt.messageId);
+          await deleteCallWaitPrompt(guild, prompt).catch((error) => {
+            console.error(`Failed to delete disabled call-wait prompt ${prompt.messageId}: ${error.message}`);
+          });
+          await saveGuildSettingsWithCurrent(guild.id, closing, { callWaitPrompt: null });
+        }
+      }
+      return;
+    }
 
   const configured = await validateCallWaitSettings(guild, settings);
+  const now = new Date();
 
   if (!configured.ok) {
+    const expiredPrompt = settings.callWaitPrompt;
+    if (
+      expiredPrompt?.messageId
+      && (
+        !Number.isFinite(new Date(expiredPrompt.targetAt).getTime())
+        || new Date(expiredPrompt.targetAt).getTime() <= now.getTime()
+      )
+    ) {
+      const closing = await transitionCallWaitPrompt({
+        guildId: guild.id,
+        messageId: expiredPrompt.messageId,
+        fromStates: ["open", "evaluating", "role_granting", "failed"],
+        toState: "closing",
+        patch: { lastError: `Closing expired prompt because call-wait settings are incomplete: ${configured.reason}` },
+      });
+      if (closing) {
+        await endCallWaitInterestsForRecruitment(guild.id, expiredPrompt.messageId);
+        await deleteCallWaitPrompt(guild, expiredPrompt).catch((error) => {
+          console.error(`Failed to delete expired call-wait prompt ${expiredPrompt.messageId}: ${error.message}`);
+        });
+        await saveGuildSettingsWithCurrent(guild.id, closing, { callWaitPrompt: null });
+        await sendOperationalLog({
+          guild,
+          settings: closing,
+          fallbackChannel: null,
+          content: `設定不備のため、期限到達済みの定時募集を終了しました。募集ID: ${expiredPrompt.messageId}`,
+        });
+      }
+    }
     return;
   }
 
-  const now = new Date();
+  if (
+    settings.callWaitPrompt?.messageId
+    && new Date(settings.callWaitPrompt.targetAt).getTime() <= now.getTime()
+  ) {
+    const transitioned = await transitionCallWaitPrompt({
+      guildId: guild.id,
+      messageId: settings.callWaitPrompt.messageId,
+      fromStates: ["open", "evaluating", "failed"],
+      toState: "evaluating",
+    });
+    if (!transitioned) return;
+    settings = transitioned;
+  }
   const promptResult = await evaluateCallWaitPrompt(guild, settings, now);
 
   if (promptResult.evaluated) {
-    settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
-      callWaitPrompt: null,
-    });
+    const evaluatedRecruitmentId = settings.callWaitPrompt?.messageId;
+    const evaluatedPrompt = settings.callWaitPrompt;
 
     if (promptResult.memberIds.length >= CALL_WAIT_MIN_MEMBERS) {
+      const roleGranting = await transitionCallWaitPrompt({
+        guildId: guild.id,
+        messageId: evaluatedRecruitmentId,
+        fromStates: ["evaluating"],
+        toState: "role_granting",
+      });
+      if (!roleGranting) return;
       const queued = await grantCallWaitRoleAndQueueNotice({
         guild,
-        settings,
+        settings: roleGranting,
         memberIds: promptResult.memberIds,
+        sourceId: evaluatedRecruitmentId,
       });
 
       if (queued) {
+        await endCallWaitInterestsForRecruitment(guild.id, evaluatedRecruitmentId);
+        settings = await saveGuildSettingsWithCurrent(guild.id, roleGranting, {
+          callWaitPrompt: null,
+        });
+        await deleteCallWaitPrompt(guild, roleGranting.callWaitPrompt).catch((error) => {
+          console.error(`Failed to delete completed call-wait prompt ${evaluatedRecruitmentId}: ${error.message}`);
+        });
         await scheduleCallWaitFollowupCheck(guild);
         return;
       }
-    } else if (promptResult.mode === CALL_WAIT_MODE_BUTTON) {
+      await transitionCallWaitPrompt({
+        guildId: guild.id,
+        messageId: evaluatedRecruitmentId,
+        fromStates: ["role_granting"],
+        toState: "failed",
+      });
+      return;
+    }
+
+    await endCallWaitInterestsForRecruitment(guild.id, evaluatedRecruitmentId);
+    settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+      callWaitPrompt: null,
+    });
+    await deleteCallWaitPrompt(guild, evaluatedPrompt).catch((error) => {
+      console.error(`Failed to delete evaluated call-wait prompt ${evaluatedRecruitmentId}: ${error.message}`);
+    });
+    if (promptResult.mode === CALL_WAIT_MODE_BUTTON) {
       await sendCallWaitApplicantLog({
         guild,
         settings,
@@ -2865,12 +3786,13 @@ async function processCallWaitForGuild(guild, settings) {
   }
 
   // /kokuchi 当日は、21時・22時向けの定時募集を出さない。
-  if (isKokuchiCallWaitPause(settings, now)) {
+  if (await isKokuchiCallWaitPaused(settings, guild.id, now)) {
     return;
   }
 
   if (activeVoiceMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
     if (settings.callWaitPrompt) {
+      await endCallWaitInterestsForRecruitment(guild.id, settings.callWaitPrompt.messageId);
       await deleteCallWaitPrompt(guild, settings.callWaitPrompt);
       settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
         callWaitPrompt: null,
@@ -2891,7 +3813,15 @@ async function processCallWaitForGuild(guild, settings) {
     return;
   }
 
-  await sendCallWaitPromptForGuild(guild, settings, { force: false, now });
+    await sendCallWaitPromptForGuild(guild, settings, { force: false, now });
+  } finally {
+    if (lease) {
+      await releaseMongoLease(lease).catch((error) => {
+        console.error(`Failed to release call-wait lease for ${guild.id}: ${error.message}`);
+      });
+    }
+    callWaitGuildLocks.delete(guild.id);
+  }
 }
 
 async function sendCallWaitPromptForGuild(guild, settings, { force = false, now = new Date() } = {}) {
@@ -2909,6 +3839,7 @@ async function sendCallWaitPromptForGuild(guild, settings, { force = false, now 
   }
 
   if (force && settings.callWaitPrompt) {
+    await endCallWaitInterestsForRecruitment(guild.id, settings.callWaitPrompt.messageId);
     await deleteCallWaitPrompt(guild, settings.callWaitPrompt);
     settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
       callWaitPrompt: null,
@@ -2929,30 +3860,40 @@ async function sendCallWaitPromptForGuild(guild, settings, { force = false, now 
     };
   }
 
-  const targetAt = getNextHourStart(now);
+  const targetAt = getNextJstHalfHour(now);
   const mode = normalizeCallWaitMode(settings.callWaitMode);
   const message = await configured.promptChannel.send({
-    content: formatCallWaitPrompt(targetAt, mode),
+    content: formatCallWaitPromptV2(targetAt),
     allowedMentions: { parse: [] },
     components:
-      mode === CALL_WAIT_MODE_BUTTON ? [createCallWaitJoinRow(targetAt)] : [],
+      mode === CALL_WAIT_MODE_BUTTON ? [createCallWaitInterestRow()] : [],
   });
 
   if (mode === CALL_WAIT_MODE_REACTION) {
     await message.react(CALL_WAIT_REACTION).catch(() => null);
   }
 
-  await saveGuildSettingsWithCurrent(guild.id, settings, {
-    callWaitPrompt: {
-      channelId: configured.promptChannel.id,
-      messageId: message.id,
-      targetAt: targetAt.toISOString(),
-      mode,
-      memberIds: [],
-    },
-    callWaitPendingNotice: null,
-    callWaitSkippedNotice: null,
-  });
+  try {
+    await saveGuildSettingsWithCurrent(guild.id, settings, {
+      callWaitPrompt: {
+        channelId: configured.promptChannel.id,
+        messageId: message.id,
+        targetAt: targetAt.toISOString(),
+        mode,
+        memberIds: [],
+        lifecycleState: "open",
+        lifecycleUpdatedAt: new Date().toISOString(),
+      },
+      callWaitPendingNotice: null,
+      callWaitSkippedNotice: null,
+    });
+  } catch (error) {
+    // A visible prompt without a persisted identity cannot be evaluated or
+    // closed safely on a later tick, so remove that orphan before surfacing
+    // the failure to the scheduler.
+    await message.delete().catch((error) => logRecoverableError("Failed to delete call-wait prompt", error));
+    throw error;
+  }
 
   return {
     sent: true,
@@ -3038,8 +3979,6 @@ async function evaluateCallWaitPrompt(guild, settings, now) {
 
   if (mode === CALL_WAIT_MODE_BUTTON) {
     const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
-    await message.delete().catch(() => null);
-
     return { evaluated: true, memberIds, mode };
   }
 
@@ -3061,8 +4000,6 @@ async function evaluateCallWaitPrompt(guild, settings, now) {
       }
     }
   }
-
-  await message.delete().catch(() => null);
 
   return { evaluated: true, memberIds: [...memberIds], mode };
 }
@@ -3088,7 +4025,890 @@ async function deleteCallWaitMessage(guild, messageRef) {
   }
 }
 
+function getCallWaitInterestComponents(recruitmentId, {
+  includeJoin = false,
+  showThreshold = false,
+  threshold = 1,
+  linkUrl = null,
+  allowRenotification = false,
+  disabled = false,
+} = {}) {
+  const rows = [];
+  if (showThreshold) {
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`${CALL_WAIT_INTEREST_SELECT_CUSTOM_ID}:${recruitmentId}`)
+        .setPlaceholder(`通知条件：参加予定者${threshold}人以上`)
+        .setDisabled(disabled)
+        .addOptions(
+          { label: "参加予定者が1人以上になったら通知", description: "自分が参加すると2人以上になります", value: "1", default: threshold === 1 },
+          { label: "参加予定者が2人以上になったら通知", description: "自分が参加すると3人以上になります", value: "2", default: threshold === 2 },
+          { label: "参加予定者が3人以上になったら通知", description: "自分が参加すると4人以上になります", value: "3", default: threshold === 3 },
+        ),
+    ));
+  }
+  const buttons = [];
+  if (allowRenotification) buttons.push(new ButtonBuilder().setCustomId(`call_wait_interest_renotify:${recruitmentId}`).setLabel("再び集まったら通知する").setStyle(ButtonStyle.Primary).setDisabled(disabled));
+  if (includeJoin) buttons.push(new ButtonBuilder().setCustomId(`call_wait_interest_join:${recruitmentId}`).setLabel("参加予定").setStyle(ButtonStyle.Success).setDisabled(disabled));
+  if (linkUrl) buttons.push(new ButtonBuilder().setLabel("現在の募集を開く").setStyle(ButtonStyle.Link).setURL(linkUrl));
+  buttons.push(new ButtonBuilder().setCustomId(`call_wait_interest_cancel:${recruitmentId}`).setLabel("興味ありを解除").setStyle(ButtonStyle.Danger).setDisabled(disabled));
+  rows.push(new ActionRowBuilder().addComponents(buttons));
+  return rows;
+}
+
+function buildCallWaitInterestReceiptContent({
+  targetAt,
+  participantCount,
+  notificationThreshold,
+  hasOtherInterest,
+}) {
+  const target = targetAt ? formatJstTime(new Date(targetAt)) : "今回";
+  const currentCount = Math.max(0, Number(participantCount) || 0);
+  const threshold = Math.min(3, Math.max(1, Number(notificationThreshold) || 1));
+  const otherInterestNote = currentCount === 0 && hasOtherInterest
+    ? "\n\n受付時点では、あなた以外にもこの募集に興味を持っている方がいます。"
+    : "";
+  if (currentCount === 0) {
+    return `【興味ありを受け付けました】\n\n${target}からの定時募集に、興味ありとして登録しました。${otherInterestNote}\n\n参加予定者が指定した人数以上になった際に、DMでお知らせします。\n\n現在の通知条件：\n参加予定者が${threshold}人以上になったら通知\n\n通知条件は、下のメニューから変更できます。`;
+  }
+  return `【興味ありを受け付けました】\n\n${target}からの定時募集に、興味ありとして登録しました。\n\n現在の参加予定者数：${currentCount}人\nあなたが参加すると${currentCount + 1}人になります。\n\n参加する場合は、下の「参加予定」を押してください。\n通知条件の変更も可能です。`;
+}
+
+function formatCallWaitInterestEndedContent(interest) {
+  return `【終了済み】\n\n${interest.targetAt ? formatJstTime(new Date(interest.targetAt)) : "今回"}からの定時募集は終了しました。\n今回の興味あり登録は自動的に解除されています。\n\n設定していた通知条件：\n参加予定者が${interest.notificationThreshold}人以上になったら通知`;
+}
+
+function formatCallWaitInterestCanceledContent(interest) {
+  return `【解除済み】\n\n${interest.targetAt ? formatJstTime(new Date(interest.targetAt)) : "今回"}からの定時募集に対する興味ありを解除しました。\n\nこの募集についてのDM通知は送信されません。`;
+}
+
+function formatCallWaitInterestJoinedContent(interest) {
+  return `【参加予定へ変更済み】\n\n${interest.targetAt ? formatJstTime(new Date(interest.targetAt)) : "今回"}からの定時募集に、参加予定として登録しました。\n\nこれにより興味あり登録が解除されました。`;
+}
+
+function getCallWaitPromptUrl(guildId, prompt) {
+  if (!guildId || !prompt?.channelId || !prompt?.messageId) return null;
+  return `https://discord.com/channels/${guildId}/${prompt.channelId}/${prompt.messageId}`;
+}
+
+function formatCallWaitInterestEndNotificationContent(interest) {
+  const target = interest.targetAt ? formatJstTime(new Date(interest.targetAt)) : "今回";
+  return `${target}からの定時募集は終了しました。\n\n今回の興味あり登録は自動的に解除されました。\n次回の募集に興味がある場合は、新しい募集から改めて「興味あり」を押してください。`;
+}
+
+async function endCallWaitInterestsForRecruitment(guildId, recruitmentId) {
+  if (!recruitmentId) return;
+  const interests = await CallWaitInterest.find({ guildId, recruitmentId, status: { $in: ["pending", "active", "joining"] } }).lean();
+  for (const interest of interests) {
+    const ended = await CallWaitInterest.findOneAndUpdate({ _id: interest._id, status: { $in: ["pending", "active", "joining"] } }, { $set: { status: "ended", endedAt: new Date() } }, { returnDocument: "after" }).lean();
+    if (!ended) continue;
+    await editCallWaitInterestMessages(ended, {
+      content: formatCallWaitInterestEndedContent(ended),
+      components: [],
+    });
+    const channel = await client.channels.fetch(ended.receiptDmChannelId).catch(() => null);
+    if (!ended.endNotificationSentAt) {
+      await CallWaitInterest.updateOne(
+        { _id: ended._id, status: "ended", endNotificationSentAt: null },
+        { $inc: { endNotificationAttemptCount: 1 }, $set: { endNotificationLastAttemptAt: new Date() } },
+      );
+      const sent = await channel?.send?.({ content: formatCallWaitInterestEndNotificationContent(ended) }).catch(() => null);
+      if (sent) await CallWaitInterest.updateOne(
+        { _id: ended._id, endNotificationSentAt: null },
+        { $set: { endNotificationSentAt: new Date(), endNotificationStatus: "sent" } },
+      );
+    }
+  }
+  await retryPendingCallWaitEndNotifications();
+}
+
+async function retryPendingCallWaitEndNotifications() {
+  const retryBefore = new Date(Date.now() - 5 * 60 * 1000);
+  const interests = await CallWaitInterest.find({
+    status: "ended",
+    endNotificationSentAt: null,
+    endNotificationStatus: { $ne: "failed" },
+    endNotificationAttemptCount: { $lt: 3 },
+    $or: [
+      { endNotificationLastAttemptAt: null },
+      { endNotificationLastAttemptAt: { $lte: retryBefore } },
+    ],
+  }).lean();
+  for (const interest of interests) {
+    const claimed = await CallWaitInterest.findOneAndUpdate(
+      {
+        _id: interest._id,
+        status: "ended",
+        endNotificationSentAt: null,
+        endNotificationStatus: { $ne: "failed" },
+        endNotificationAttemptCount: { $lt: 3 },
+        $or: [
+          { endNotificationLastAttemptAt: null },
+          { endNotificationLastAttemptAt: { $lte: retryBefore } },
+        ],
+      },
+      {
+        $inc: { endNotificationAttemptCount: 1 },
+        $set: { endNotificationLastAttemptAt: new Date() },
+      },
+      { returnDocument: "after", lean: true },
+    );
+    if (!claimed) continue;
+    const channel = await client.channels.fetch(claimed.receiptDmChannelId).catch(() => null);
+    const message = await channel?.send?.({
+      content: formatCallWaitInterestEndNotificationContent(claimed),
+    }).catch(() => null);
+    if (message) {
+      await CallWaitInterest.updateOne(
+        { _id: claimed._id, status: "ended", endNotificationSentAt: null },
+        { $set: { endNotificationSentAt: new Date(), endNotificationStatus: "sent" } },
+      );
+    } else if (claimed.endNotificationAttemptCount >= 3) {
+      await CallWaitInterest.updateOne(
+        { _id: claimed._id, status: "ended", endNotificationSentAt: null },
+        { $set: { endNotificationStatus: "failed" } },
+      );
+    }
+  }
+}
+
+async function endOrphanedCallWaitInterests(guildId, promptMessageId) {
+  const activeRecruitments = promptMessageId ? [promptMessageId] : [];
+  const orphaned = await CallWaitInterest.find({
+    guildId,
+    status: { $in: ["pending", "active", "joining"] },
+    ...(activeRecruitments.length ? { recruitmentId: { $nin: activeRecruitments } } : {}),
+  }).distinct("recruitmentId");
+  for (const recruitmentId of orphaned) {
+    await endCallWaitInterestsForRecruitment(guildId, recruitmentId);
+  }
+}
+
+function isCallWaitDmFailure(error) {
+  return [50007, 50013, 10003, 10013].includes(Number(error?.code))
+    || /DM|direct message|cannot send messages/i.test(String(error?.message ?? ""));
+}
+
+async function editDeferredEphemeralReply(interaction, payload) {
+  const { flags: _flags, ...reply } = payload;
+  return interaction.editReply(reply);
+}
+
+// Acknowledge a component before touching MongoDB or Discord.  The adapted
+// interaction also keeps legacy reply/update call sites on the acknowledged
+// interaction path, where Discord requires editReply instead.
+async function deferComponentResponse(interaction, responseType) {
+  if (responseType === "update") {
+    await interaction.deferUpdate();
+  } else {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  }
+  const editReply = (payload = {}) => {
+    const { flags: _flags, ...reply } = payload;
+    return interaction.editReply(reply);
+  };
+  return new Proxy(interaction, {
+    get(target, property, receiver) {
+      if (["reply", "update", "editReply"].includes(property)) return editReply;
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+async function deferCommandResponse(interaction, flags) {
+  await interaction.deferReply({ flags });
+  const editReply = (payload = {}) => {
+    const { flags: _flags, ...reply } = payload;
+    return interaction.editReply(reply);
+  };
+  return new Proxy(interaction, {
+    get(target, property, receiver) {
+      if (["reply", "update", "editReply"].includes(property)) return editReply;
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+// Claims the unique interest row before any DM side effect.  A stale terminal
+// row is reusable, but active workflow states can never be overwritten.
+async function registerCallWaitInterestFromPublicButton(interaction) {
+  interaction = await deferComponentResponse(interaction, "reply");
+  if (!interaction.inGuild()) {
+    await editDeferredEphemeralReply(interaction, { content: "この操作はサーバー内の募集から行ってください。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const settings = await getGuildSettings(interaction.guildId);
+  const prompt = settings?.callWaitPrompt;
+  if (!prompt || prompt.mode !== CALL_WAIT_MODE_BUTTON || prompt.messageId !== interaction.message?.id || new Date(prompt.targetAt).getTime() <= Date.now()) {
+    await editDeferredEphemeralReply(interaction, { content: "この募集は現在受け付けていません。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  if (normalizeCallWaitMemberIds(prompt.memberIds).includes(interaction.user.id)) {
+    await editDeferredEphemeralReply(interaction, { content: "すでに参加予定として登録されています。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const identity = { guildId: interaction.guildId, recruitmentId: prompt.messageId, userId: interaction.user.id };
+  const now = new Date();
+  const cooldownCutoff = new Date(now.getTime() - 30_000);
+  const existing = await CallWaitInterest.findOne(identity).lean();
+  if (["pending", "active", "joining", "joined"].includes(existing?.status)) {
+    await editDeferredEphemeralReply(interaction, { content: "この募集にはすでに興味ありとして登録されています。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  if (existing?.status === "canceled") {
+    const seconds = getInterestCooldownSeconds(existing.canceledAt, now);
+    if (seconds > 0) {
+      await editDeferredEphemeralReply(interaction, { content: `興味ありを解除した直後です。あと${seconds}秒ほど待ってからもう一度お試しください。`, flags: MessageFlags.Ephemeral });
+      return;
+    }
+  }
+
+  const reset = {
+    status: "pending", notificationThreshold: 1, targetAt: new Date(prompt.targetAt), registeredAt: now,
+    canceledAt: null, endedAt: null, failedAt: null, thresholdNotificationSent: false,
+    thresholdNotificationStatus: "idle", thresholdSatisfiedInReceipt: false,
+    thresholdNotificationRetryCount: 0, thresholdNotificationLastTriedAt: null, thresholdNotificationLastError: null,
+    renotificationEnabled: false, hadOtherInterestAtRegistration: false,
+    receiptDmChannelId: null, receiptDmMessageId: null, latestThresholdDmChannelId: null, latestThresholdDmMessageId: null,
+  };
+  let claimed = await CallWaitInterest.findOneAndUpdate(
+    {
+      ...identity,
+      $or: [
+        { status: { $in: ["ended", "failed"] } },
+        { status: "canceled", canceledAt: { $lte: cooldownCutoff } },
+      ],
+    },
+    { $set: reset },
+    { returnDocument: "after", lean: true },
+  );
+  if (!claimed && !existing) {
+    try {
+      claimed = (await CallWaitInterest.create({ ...identity, ...reset })).toObject();
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+    }
+  }
+  if (!claimed) {
+    const winner = await CallWaitInterest.findOne(identity).lean();
+    const seconds = winner?.status === "canceled" ? getInterestCooldownSeconds(winner.canceledAt, now) : 0;
+    await editDeferredEphemeralReply(interaction, {
+      content: seconds > 0
+        ? `興味ありを解除した直後です。あと${seconds}秒ほど待ってからもう一度お試しください。`
+        : "この募集にはすでに興味ありとして登録されています。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  let receipt = null;
+  let activeInterest = null;
+  try {
+    const participantCount = normalizeCallWaitMemberIds(prompt.memberIds).length;
+    const hadOtherInterest = Boolean(await CallWaitInterest.exists({ ...identity, userId: { $ne: interaction.user.id }, status: "active" }));
+    const thresholdSatisfiedInReceipt = participantCount >= reset.notificationThreshold;
+    const dm = await interaction.user.createDM();
+    receipt = await dm.send({
+      content: buildCallWaitInterestReceiptContent({ targetAt: prompt.targetAt, participantCount, notificationThreshold: 1, hasOtherInterest: hadOtherInterest }),
+      components: getCallWaitInterestComponents(prompt.messageId, {
+        includeJoin: participantCount > 0, showThreshold: true, threshold: 1,
+        linkUrl: getCallWaitPromptUrl(interaction.guildId, prompt),
+      }),
+    });
+    const activated = await CallWaitInterest.updateOne(
+      { _id: claimed._id, status: "pending" },
+      { $set: { status: "active", receiptDmChannelId: dm.id, receiptDmMessageId: receipt.id, thresholdSatisfiedInReceipt, hadOtherInterestAtRegistration: hadOtherInterest } },
+    );
+    if (activated.matchedCount !== 1 || activated.modifiedCount !== 1) {
+      throw new Error("CALL_WAIT_INTEREST_ACTIVATION_FAILED");
+    }
+    activeInterest = {
+      ...claimed,
+      status: "active",
+      receiptDmChannelId: dm.id,
+      receiptDmMessageId: receipt.id,
+      thresholdSatisfiedInReceipt,
+      hadOtherInterestAtRegistration: hadOtherInterest,
+    };
+  } catch (error) {
+    await receipt?.edit({ content: "【登録失敗】\n\n興味ありの登録を完了できませんでした。", components: [] }).catch((error) => logRecoverableError("Failed to update failed call-wait interest receipt", error));
+    await CallWaitInterest.updateOne({ _id: claimed._id, status: "pending" }, { $set: { status: "failed", failedAt: new Date() } }).catch((error) => logRecoverableError("Failed to persist failed call-wait interest", error));
+    await editDeferredEphemeralReply(interaction, {
+      content: isCallWaitDmFailure(error)
+        ? "DMを送信できなかったため、興味ありとして登録できませんでした。"
+        : "興味ありの登録処理中にエラーが発生しました。時間を空けて、もう一度お試しください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // Stage 2: notification/log/reply failures must never revoke a confirmed
+  // interest registration or replace its successful receipt.
+  try {
+    if (!activeInterest.thresholdSatisfiedInReceipt) {
+      await notifyCallWaitInterests(interaction.guildId, prompt.messageId);
+    }
+  } catch (error) {
+    await sendOperationalLog({
+      guild: interaction.guild,
+      settings,
+      fallbackChannel: null,
+      content: `興味あり登録後の付随処理に失敗しました。募集ID: ${prompt.messageId}、ユーザーID: ${interaction.user.id}、エラー: ${error?.stack ?? error}`,
+    }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+  }
+  await interaction.editReply({
+    content: "興味ありとして登録しました。\n通知条件の確認や変更は、Botから届いたDMで行えます。",
+    flags: MessageFlags.Ephemeral,
+  }).catch((error) => sendOperationalLog({
+    guild: interaction.guild,
+    settings,
+    fallbackChannel: null,
+    content: `興味あり登録の成功応答に失敗しました。募集ID: ${prompt.messageId}、ユーザーID: ${interaction.user.id}、エラー: ${error?.stack ?? error}`,
+  }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error)));
+}
+
+async function cancelCallWaitInterestFromPublicButton(interaction) {
+  if (!interaction.inGuild()) return false;
+  const interest = await CallWaitInterest.findOne({ guildId: interaction.guildId, recruitmentId: interaction.message?.id, userId: interaction.user.id, status: "active" }).lean();
+  if (!interest) return false;
+  await endCallWaitInterest(interest, "canceled");
+  await interaction.reply({ content: "興味ありを解除しました。\nこの募集についてのDM通知は送信されません。", flags: MessageFlags.Ephemeral });
+  return true;
+}
+
+async function cancelCallWaitInterestFromDm(interaction) {
+  interaction = await deferComponentResponse(interaction, "update");
+  const recruitmentId = interaction.customId.slice("call_wait_interest_cancel:".length);
+  const interest = await CallWaitInterest.findOne({ recruitmentId, userId: interaction.user.id, status: "active" }).lean();
+  if (!interest) { await interaction.reply({ content: "この募集の興味あり登録は、すでに解除されています。", flags: MessageFlags.Ephemeral }); return; }
+  await endCallWaitInterest(interest, "canceled");
+  await interaction.update({ content: formatCallWaitInterestCanceledContent(interest), components: [] });
+}
+
+async function endCallWaitInterest(interest, status) {
+  const update = status === "joined" ? { status, joinedAt: new Date() } : status === "ended" ? { status, endedAt: new Date() } : { status, canceledAt: new Date() };
+  const changed = await CallWaitInterest.findOneAndUpdate(
+    { _id: interest._id, status: "active" },
+    { $set: update },
+    { returnDocument: "after", lean: true },
+  );
+  if (!changed) return;
+  if (status === "canceled") {
+    await editCallWaitInterestMessages(changed, { content: formatCallWaitInterestCanceledContent(changed), components: [] });
+  }
+  if (status === "joined") {
+    await editCallWaitInterestMessages(changed, { content: formatCallWaitInterestJoinedContent(changed), components: [] });
+  }
+}
+
+async function cancelJoinedCallWaitInterest({ guildId, recruitmentId, userId }) {
+  const canceledInterest = await CallWaitInterest.findOneAndUpdate(
+    {
+      guildId,
+      recruitmentId,
+      userId,
+      status: "joined",
+    },
+    {
+      $set: {
+        status: "canceled",
+        canceledAt: new Date(),
+      },
+      $unset: {
+        joinedAt: 1,
+      },
+    },
+    { returnDocument: "after", lean: true },
+  );
+  if (canceledInterest) {
+    await editCallWaitInterestMessages(canceledInterest, {
+      content: formatCallWaitInterestCanceledContent(canceledInterest),
+      components: [],
+    });
+  }
+  return canceledInterest;
+}
+
+async function editCallWaitInterestMessages(interest, payload) {
+  const refs = new Map();
+  for (const [channelId, messageId] of [
+    [interest.receiptDmChannelId, interest.receiptDmMessageId],
+    [interest.latestThresholdDmChannelId, interest.latestThresholdDmMessageId],
+  ]) {
+    if (channelId && messageId) refs.set(`${channelId}:${messageId}`, { channelId, messageId });
+  }
+  await Promise.all([...refs.values()].map(async ({ channelId, messageId }) => {
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    const message = await channel?.messages?.fetch?.(messageId).catch(() => null);
+    await message?.edit(payload).catch((error) => logRecoverableError("Failed to update call-wait interest receipt", error));
+  }));
+}
+
+async function handleCallWaitInterestThresholdSelect(interaction) {
+  interaction = await deferComponentResponse(interaction, "update");
+  const recruitmentId = interaction.customId.slice(`${CALL_WAIT_INTEREST_SELECT_CUSTOM_ID}:`.length);
+  const threshold = Number(interaction.values[0]);
+  if (![1, 2, 3].includes(threshold)) {
+    await interaction.reply({ content: "通知条件が不正です。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const current = await CallWaitInterest.findOne({ recruitmentId, userId: interaction.user.id, status: "active" }).lean();
+  if (!current) {
+    await interaction.reply({ content: "この募集の興味あり登録は、すでに終了しています。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  if (current.thresholdNotificationStatus === "processing") {
+    await interaction.reply({ content: "通知処理中のため、現在は通知条件を変更できません。少し待ってからもう一度お試しください。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const interest = await CallWaitInterest.findOneAndUpdate(
+    {
+      _id: current._id,
+      status: "active",
+      $or: [
+        { thresholdNotificationSent: false, thresholdNotificationStatus: { $in: [null, "idle", "failed"] } },
+        { thresholdSatisfiedInReceipt: true, thresholdNotificationStatus: { $ne: "processing" } },
+      ],
+    },
+    {
+      $set: {
+        notificationThreshold: threshold,
+        thresholdNotificationSent: false,
+        thresholdNotificationStatus: "idle",
+        thresholdSatisfiedInReceipt: false,
+        renotificationEnabled: false,
+      },
+    },
+    { returnDocument: "after", lean: true },
+  );
+  if (!interest) {
+    await interaction.reply({ content: "通知処理中のため、現在は通知条件を変更できません。少し待ってからもう一度お試しください。", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const settings = await getGuildSettings(interest.guildId);
+  const prompt = settings?.callWaitPrompt;
+  const count = prompt?.messageId === recruitmentId ? normalizeCallWaitMemberIds(prompt.memberIds).length : 0;
+  await interaction.editReply({
+    content: buildCallWaitInterestReceiptContent({
+      targetAt: prompt?.targetAt ?? interest.targetAt,
+      participantCount: count,
+      notificationThreshold: interest.notificationThreshold,
+      hasOtherInterest: interest.hadOtherInterestAtRegistration,
+    }),
+    components: getCallWaitInterestComponents(recruitmentId, {
+      includeJoin: count > 0,
+      showThreshold: true,
+      threshold: interest.notificationThreshold,
+      linkUrl: getCallWaitPromptUrl(interest.guildId, prompt),
+    }),
+  });
+  await notifyCallWaitInterests(interest.guildId, recruitmentId);
+}
+
+/**
+ * Registers a participant exactly once across the public prompt and an interest DM.
+ * The interest document is used as a short-lived, unique join lock before changing
+ * the recruitment document, so two simultaneous component clicks cannot both win.
+ */
+async function registerCallWaitParticipant({ guildId, recruitmentId, userId, source }) {
+  const settings = await getGuildSettings(guildId);
+  const prompt = settings?.callWaitPrompt;
+  if (!prompt || prompt.messageId !== recruitmentId || new Date(prompt.targetAt).getTime() <= Date.now()) {
+    return { ok: false, reason: "expired" };
+  }
+  if (normalizeCallWaitMemberIds(prompt.memberIds).includes(userId)) {
+    return { ok: false, reason: "already_joined" };
+  }
+
+  let lock = await CallWaitInterest.findOneAndUpdate(
+    { guildId, recruitmentId, userId, status: "active" },
+    { $set: { status: "joining" } },
+    { returnDocument: "before", lean: true },
+  );
+  let restoreStatus = lock ? "active" : "canceled";
+  if (!lock) {
+    try {
+      lock = await CallWaitInterest.findOneAndUpdate(
+        { guildId, recruitmentId, userId, status: { $nin: ["pending", "active", "joining", "joined"] } },
+        { $set: { status: "joining", registeredAt: new Date(), canceledAt: null, notificationThreshold: 1, thresholdNotificationSent: false, renotificationEnabled: false } },
+        { upsert: true, returnDocument: "before", setDefaultsOnInsert: true, lean: true },
+      );
+    } catch (error) {
+      if (error?.code === 11000) return { ok: false, reason: "in_progress" };
+      throw error;
+    }
+  }
+
+  const updatedSettings = await updateCallWaitPromptMember({
+    guildId,
+    messageId: recruitmentId,
+    userId,
+    operation: "add",
+  });
+  if (!updatedSettings) {
+    await CallWaitInterest.updateOne(
+      { guildId, recruitmentId, userId, status: "joining" },
+      { $set: { status: restoreStatus, ...(restoreStatus === "canceled" ? { canceledAt: new Date() } : {}) } },
+    ).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    return { ok: false, reason: "expired" };
+  }
+
+  const joined = await CallWaitInterest.findOneAndUpdate(
+    { guildId, recruitmentId, userId, status: "joining" },
+    { $set: { status: "joined", joinedAt: new Date() } },
+    { returnDocument: "before", lean: true },
+  );
+  if (!joined) {
+    // The participant list was already updated, so compensate before
+    // reporting failure; never treat a missing joining -> joined transition as
+    // a successful registration.
+    await updateCallWaitPromptMember({ guildId, messageId: recruitmentId, userId, operation: "remove" }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    await CallWaitInterest.updateOne(
+      { guildId, recruitmentId, userId, status: "joining" },
+      { $set: { status: restoreStatus, ...(restoreStatus === "canceled" ? { canceledAt: new Date() } : {}) } },
+    ).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    return { ok: false, reason: "finalization_failed" };
+  }
+  if (joined) {
+    await editCallWaitInterestMessages(joined ?? lock, {
+      content: formatCallWaitInterestJoinedContent(joined ?? lock),
+      components: [],
+    });
+  }
+  return { ok: true, settings: updatedSettings, interest: joined ?? lock, source };
+}
+
+/** Applies every externally visible consequence of a successful participant add.
+ * Both the public prompt and an interest DM call this so their state cannot
+ * diverge after the shared atomic registration succeeds. */
+async function finalizeCallWaitParticipantRegistration({ guild, settings, recruitmentId, userId, source }) {
+  const latestSettings = await getGuildSettings(guild.id);
+  const prompt = latestSettings?.callWaitPrompt;
+  if (!prompt || prompt.messageId !== recruitmentId) return latestSettings;
+  const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
+  await refreshCallWaitPromptMessage(guild, prompt);
+  await sendCallWaitApplicantLog({
+    guild,
+    settings: latestSettings ?? settings,
+    action: "join",
+    userId,
+    memberIds,
+    source,
+  });
+  await notifyCallWaitInterests(guild.id, recruitmentId);
+  return latestSettings;
+}
+
+async function joinCallWaitFromInterestDm(interaction) {
+  interaction = await deferComponentResponse(interaction, "update");
+  const recruitmentId = interaction.customId.slice("call_wait_interest_join:".length);
+  const interest = await CallWaitInterest.findOne({ recruitmentId, userId: interaction.user.id, status: "active" }).lean();
+  if (!interest) { await interaction.reply({ content: "この募集の興味あり登録は、すでに解除されています。", flags: MessageFlags.Ephemeral }); return; }
+  const guild = client.guilds.cache.get(interest.guildId) ?? await client.guilds.fetch(interest.guildId).catch(() => null);
+  const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
+  if (!member) { await interaction.reply({ content: "対象のサーバーに参加していないため、参加予定として登録できませんでした。", flags: MessageFlags.Ephemeral }); return; }
+  const result = await registerCallWaitParticipant({ guildId: interest.guildId, recruitmentId, userId: interaction.user.id, source: "interest_dm" });
+  if (!result.ok) { await interaction.reply({ content: result.reason === "already_joined" ? "すでに参加予定として登録されています。" : "募集がすでに終了または更新されているため、操作を受け付けることができませんでした。", flags: MessageFlags.Ephemeral }); return; }
+  await finalizeCallWaitParticipantRegistration({
+    guild,
+    settings: result.settings,
+    recruitmentId,
+    userId: interaction.user.id,
+    source: "interest_dm",
+  });
+  await interaction.update({ content: `【参加予定へ変更済み】\n\n${formatJstTime(new Date(result.settings.callWaitPrompt.targetAt))}からの定時募集に、参加予定として登録しました。\n\nこれにより興味あり登録が解除されました。`, components: [] });
+}
+
+async function reconcileCallWaitInterestThresholds(guildId, recruitmentId) {
+  const settings = await getGuildSettings(guildId); const prompt = settings?.callWaitPrompt;
+  if (!prompt || prompt.messageId !== recruitmentId) return;
+  const count = normalizeCallWaitMemberIds(prompt.memberIds).length;
+  const linkUrl = getCallWaitPromptUrl(guildId, prompt);
+  const interests = await CallWaitInterest.find({
+    guildId,
+    recruitmentId,
+    status: "active",
+    renotificationEnabled: false,
+    notificationThreshold: { $gt: count },
+    $or: [
+      { thresholdNotificationSent: true, thresholdNotificationStatus: "sent" },
+      { thresholdSatisfiedInReceipt: true, thresholdNotificationSent: false, thresholdNotificationStatus: "idle" },
+    ],
+  }).lean();
+  for (const interest of interests) {
+    let claimed = null;
+    try {
+    const receiptBacked = interest.thresholdSatisfiedInReceipt === true && interest.thresholdNotificationSent === false;
+    claimed = await CallWaitInterest.findOneAndUpdate(
+      receiptBacked
+        ? {
+          _id: interest._id,
+          status: "active",
+          thresholdSatisfiedInReceipt: true,
+          thresholdNotificationSent: false,
+          thresholdNotificationStatus: "idle",
+          renotificationEnabled: false,
+          notificationThreshold: { $gt: count },
+        }
+        : {
+          _id: interest._id,
+          status: "active",
+          thresholdNotificationSent: true,
+          thresholdNotificationStatus: "sent",
+          renotificationEnabled: false,
+          notificationThreshold: { $gt: count },
+        },
+      {
+        $set: {
+          thresholdSatisfiedInReceipt: false,
+          thresholdNotificationSent: true,
+          thresholdNotificationStatus: "processing",
+          thresholdNotificationLastTriedAt: new Date(),
+          thresholdNotificationLastError: null,
+        },
+        $inc: { thresholdNotificationRetryCount: 1 },
+      },
+      { returnDocument: "after", lean: true },
+    );
+    if (!claimed) continue;
+    const sourceChannelId = receiptBacked ? claimed.receiptDmChannelId : claimed.latestThresholdDmChannelId;
+    const sourceMessageId = receiptBacked ? claimed.receiptDmMessageId : claimed.latestThresholdDmMessageId;
+    const channel = await client.channels.fetch(sourceChannelId).catch(() => null);
+    const message = await channel?.messages?.fetch?.(sourceMessageId).catch(() => null);
+    const payload = {
+      content: `【参加予定者数が条件を下回りました】\n\n${formatJstTime(new Date(prompt.targetAt))}からの定時募集は、一度通知条件を満たしましたが、その後参加予定者が減少しました。\n\n現在の参加予定者数：${count}人\n\n再び通知条件を満たした際にお知らせを受け取りたい場合は、下の「再び集まったら通知する」を押してください。`,
+      components: getCallWaitInterestComponents(recruitmentId, { linkUrl, allowRenotification: true }),
+    };
+    let edited = false;
+    if (message) edited = await message.edit(payload).then(() => true).catch(() => false);
+    if (!edited) {
+      const replacement = channel?.send
+        ? await channel.send(payload).catch(() => null)
+        : null;
+      if (replacement) {
+        const persisted = await CallWaitInterest.updateOne({ _id: claimed._id, status: "active", thresholdNotificationStatus: "processing" }, {
+          $set: {
+            thresholdNotificationStatus: "sent",
+            ...(receiptBacked ? { receiptDmChannelId: replacement.channelId, receiptDmMessageId: replacement.id } : { latestThresholdDmChannelId: replacement.channelId, latestThresholdDmMessageId: replacement.id }),
+          },
+        });
+        if (persisted.matchedCount !== 1) {
+          throw new Error("CALL_WAIT_THRESHOLD_NOTIFICATION_STATE_CHANGED");
+        }
+      } else {
+        const failed = await CallWaitInterest.updateOne(
+          { _id: claimed._id, status: "active", thresholdNotificationStatus: "processing" },
+          {
+            $set: {
+              thresholdNotificationStatus: "failed",
+              thresholdNotificationLastTriedAt: new Date(),
+              thresholdNotificationLastError: "The threshold DM could not be edited or resent.",
+            },
+          },
+        );
+        if (failed.matchedCount !== 1) {
+          throw new Error("CALL_WAIT_THRESHOLD_NOTIFICATION_STATE_CHANGED");
+        }
+        const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId).catch(() => null);
+        await sendOperationalLog({
+          guild,
+          settings: await getGuildSettings(guildId).catch(() => null),
+          fallbackChannel: null,
+          content: `興味あり人数減少DMの再送に失敗しました。募集ID: ${recruitmentId}、ユーザーID: ${interest.userId}`,
+        }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      }
+    } else {
+      const persisted = await CallWaitInterest.updateOne(
+        { _id: claimed._id, status: "active", thresholdNotificationStatus: "processing" },
+        { $set: { thresholdNotificationStatus: "sent" } },
+      );
+      if (persisted.matchedCount !== 1) {
+        throw new Error("CALL_WAIT_THRESHOLD_NOTIFICATION_STATE_CHANGED");
+      }
+    }
+    } catch (error) {
+      if (claimed) {
+        await CallWaitInterest.updateOne(
+          { _id: claimed._id, status: "active", thresholdNotificationStatus: "processing" },
+          {
+            $set: {
+              thresholdNotificationStatus: "failed",
+              thresholdNotificationLastTriedAt: new Date(),
+              thresholdNotificationLastError: error?.message ?? String(error),
+            },
+          },
+        ).catch((markError) => console.error("Failed to mark threshold notification failure:", markError));
+      }
+      await sendOperationalLog({
+        guild: client.guilds.cache.get(guildId),
+        settings,
+        fallbackChannel: null,
+        content: `興味あり人数減少通知の処理に失敗しました。募集ID: ${recruitmentId}、ユーザーID: ${interest.userId}、エラー: ${error?.stack ?? error}`,
+      }).catch((logError) => console.error(logError));
+    }
+  }
+}
+
+async function enableCallWaitInterestRenotification(interaction) {
+  interaction = await deferComponentResponse(interaction, "update");
+  const recruitmentId = interaction.customId.slice("call_wait_interest_renotify:".length);
+  const interest = await CallWaitInterest.findOne({ recruitmentId, userId: interaction.user.id, status: "active", thresholdNotificationSent: true }).lean();
+  if (!interest) { await interaction.reply({ content: "この募集の興味あり登録は、すでに終了しています。", flags: MessageFlags.Ephemeral }); return; }
+  const settings = await getGuildSettings(interest.guildId); const prompt = settings?.callWaitPrompt;
+  const targetAt = new Date(prompt?.targetAt);
+  const recruitmentIsActive = Boolean(
+    prompt
+      && prompt.messageId === recruitmentId
+      && Number.isFinite(targetAt.getTime())
+      && targetAt.getTime() > Date.now(),
+  );
+  if (!recruitmentIsActive) {
+    await interaction.editReply({
+      content: "この募集はすでに終了しています。",
+      components: [],
+    });
+    return;
+  }
+  const count = prompt?.messageId === recruitmentId ? normalizeCallWaitMemberIds(prompt.memberIds).length : -1;
+  const enabled = await CallWaitInterest.findOneAndUpdate(
+    {
+      _id: interest._id,
+      recruitmentId,
+      status: "active",
+      thresholdNotificationSent: true,
+      renotificationEnabled: false,
+    },
+    { $set: { renotificationEnabled: true, thresholdNotificationStatus: "idle" } },
+    { returnDocument: "after", lean: true },
+  );
+  if (!enabled) { await interaction.reply({ content: "この再通知はすでに処理されています。", flags: MessageFlags.Ephemeral }); return; }
+  await interaction.update({
+    content: count >= enabled.notificationThreshold
+      ? "【再通知を受け付けました】\n\n新しい到達通知を送信します。"
+      : `【再通知を受け付けました】\n\n参加予定者が再び${enabled.notificationThreshold}人以上になった際に、DMでお知らせします。\n\n現在の参加予定者数：${Math.max(0, count)}人`,
+    components: getCallWaitInterestComponents(recruitmentId, {
+      includeJoin: false,
+      showThreshold: false,
+      allowRenotification: false,
+      linkUrl: getCallWaitPromptUrl(interest.guildId, prompt),
+    }),
+  });
+  await notifyCallWaitInterests(interest.guildId, recruitmentId);
+}
+
+async function refreshCallWaitPromptMessage(guild, prompt) {
+  const channel = await resolveConfiguredTextChannel(guild, prompt?.channelId);
+  const message = await channel?.messages?.fetch?.(prompt?.messageId).catch(() => null);
+  await message?.edit({ content: formatCallWaitPromptV2(new Date(prompt.targetAt), prompt.memberIds), components: [createCallWaitInterestRow()] }).catch((error) => logRecoverableError("Failed to update call-wait prompt after interest cancellation", error));
+}
+
+async function notifyCallWaitInterests(guildId, recruitmentId) {
+  const settings = await getGuildSettings(guildId); const prompt = settings?.callWaitPrompt;
+  if (!prompt || prompt.messageId !== recruitmentId) return;
+  const count = normalizeCallWaitMemberIds(prompt.memberIds).length;
+  const linkUrl = getCallWaitPromptUrl(guildId, prompt);
+  const interests = await CallWaitInterest.find({ guildId, recruitmentId, status: "active" }).lean();
+  for (const interest of interests) {
+    let claimed = null;
+    let notificationType = "initial";
+    try {
+    if (count < interest.notificationThreshold) continue;
+    // The receipt is the initial notification when the threshold was already
+    // satisfied at registration time.
+    if (!interest.renotificationEnabled && interest.thresholdSatisfiedInReceipt) continue;
+    notificationType = interest.renotificationEnabled ? "renotification" : "initial";
+    claimed = await CallWaitInterest.findOneAndUpdate(
+      notificationType === "renotification"
+        ? { _id: interest._id, status: "active", thresholdNotificationSent: true, renotificationEnabled: true, thresholdNotificationStatus: { $in: [null, "idle", "failed"] }, notificationThreshold: { $lte: count } }
+        : { _id: interest._id, status: "active", thresholdNotificationSent: false, thresholdNotificationStatus: { $in: [null, "idle", "failed"] }, notificationThreshold: { $lte: count } },
+      {
+        $set: {
+          thresholdNotificationStatus: "processing",
+          thresholdNotificationLastTriedAt: new Date(),
+          thresholdNotificationLastError: null,
+          ...(notificationType === "renotification" ? { renotificationEnabled: false } : {}),
+        },
+        $inc: { thresholdNotificationRetryCount: 1 },
+      },
+      { returnDocument: "after", lean: true },
+    );
+    if (!claimed) continue;
+    const channel = await client.channels.fetch(claimed.receiptDmChannelId).catch(() => null);
+    const title = notificationType === "renotification" ? "【参加予定者が再び集まりました】" : "【参加予定者が集まりました】";
+    const thresholdSentence = notificationType === "renotification"
+      ? `参加予定者数が再び通知条件の${claimed.notificationThreshold}人に達しました。`
+      : `参加予定者数が通知条件として設定した${claimed.notificationThreshold}人に達しました。`;
+    let sendError = null;
+    const message = await channel?.send?.({ content: `${title}\n\n${formatJstTime(new Date(prompt.targetAt))}からの定時募集で、${thresholdSentence}\n\n現在の参加予定者数：${count}人\n\n参加する場合は、下の「参加予定」を押してください。`, components: getCallWaitInterestComponents(recruitmentId, { includeJoin: true, linkUrl }) }).catch((error) => {
+      sendError = error;
+      return null;
+    });
+    if (message) {
+      const persisted = await CallWaitInterest.updateOne(
+        { _id: claimed._id, status: "active", thresholdNotificationStatus: "processing" },
+        { $set: { thresholdNotificationSent: true, thresholdNotificationStatus: "sent", thresholdSatisfiedInReceipt: false, renotificationEnabled: false, thresholdNotificationLastError: null, latestThresholdDmChannelId: message.channelId, latestThresholdDmMessageId: message.id } },
+      );
+      if (persisted.matchedCount !== 1 || persisted.modifiedCount !== 1) {
+        await message.edit({ content: "【操作できません】\n\nこの募集の状態が変更されたため、この通知からは操作できません。", components: [] }).catch((error) => logRecoverableError("Failed to disable stale call-wait interest message", error));
+        await sendOperationalLog({ guild: client.guilds.cache.get(guildId), settings, fallbackChannel: null, content: `興味あり到達DMの確定に失敗しました。募集ID: ${recruitmentId}、ユーザーID: ${claimed.userId}` }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+        continue;
+      }
+      const receipt = await channel?.messages?.fetch?.(interest.receiptDmMessageId).catch(() => null);
+      await receipt?.edit({
+        components: getCallWaitInterestComponents(recruitmentId, { includeJoin: true, linkUrl }),
+      }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    } else {
+      const failurePatch = notificationType === "renotification"
+        ? { thresholdNotificationStatus: "failed", renotificationEnabled: true, thresholdNotificationLastError: sendError?.message ?? "DM channel is unavailable" }
+        : { thresholdNotificationSent: false, thresholdNotificationStatus: "failed", thresholdNotificationLastError: sendError?.message ?? "DM channel is unavailable" };
+      await CallWaitInterest.updateOne({ _id: claimed._id, thresholdNotificationStatus: "processing" }, { $set: failurePatch });
+      await sendOperationalLog({
+        guild: client.guilds.cache.get(guildId),
+        settings,
+        fallbackChannel: null,
+        content: `興味あり到達DMの送信に失敗しました。募集ID: ${recruitmentId}、ユーザーID: ${claimed.userId}、種別: ${notificationType}、発生日時: ${new Date().toISOString()}、エラー: ${sendError?.stack ?? sendError?.message ?? "DMチャンネルを取得できませんでした"}`,
+      }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    }
+    } catch (error) {
+      if (claimed) {
+        const failurePatch = notificationType === "renotification"
+          ? { thresholdNotificationStatus: "failed", renotificationEnabled: true, thresholdNotificationLastError: error?.message ?? String(error) }
+          : { thresholdNotificationSent: false, thresholdNotificationStatus: "failed", thresholdNotificationLastError: error?.message ?? String(error) };
+        await CallWaitInterest.updateOne(
+          { _id: claimed._id, status: "active", thresholdNotificationStatus: "processing" },
+          { $set: failurePatch },
+        ).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      }
+      await sendOperationalLog({
+        guild: client.guilds.cache.get(guildId),
+        settings,
+        fallbackChannel: null,
+        content: `興味あり通知処理中にエラーが発生しました。\n募集ID: ${recruitmentId}\nユーザーID: ${interest.userId}\nエラー: ${error?.stack ?? error}`,
+      }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    }
+  }
+}
+
 async function handleCallWaitButton(interaction) {
+  if (interaction.customId.startsWith("call_wait_interest_renotify:")) {
+    await enableCallWaitInterestRenotification(interaction);
+    return;
+  }
+  if (interaction.customId === CALL_WAIT_INTEREST_CUSTOM_ID) {
+    await registerCallWaitInterestFromPublicButton(interaction);
+    return;
+  }
+  if (interaction.customId.startsWith("call_wait_interest_join:")) {
+    await joinCallWaitFromInterestDm(interaction);
+    return;
+  }
+  if (interaction.customId.startsWith("call_wait_interest_cancel:")) {
+    await cancelCallWaitInterestFromDm(interaction);
+    return;
+  }
   if (!interaction.inGuild()) {
     await interaction.reply({
       content: "このボタンはサーバー内で使ってください。",
@@ -3096,6 +4916,8 @@ async function handleCallWaitButton(interaction) {
     });
     return;
   }
+
+  interaction = await deferComponentResponse(interaction, "reply");
 
   const settings = await getGuildSettings(interaction.guildId);
   const prompt = settings?.callWaitPrompt;
@@ -3127,35 +4949,104 @@ async function handleCallWaitButton(interaction) {
 
   const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
   const userId = interaction.user.id;
+  const activeInterest = !isJoin
+    ? await CallWaitInterest.findOne({
+      guildId: interaction.guildId,
+      recruitmentId: prompt.messageId,
+      userId,
+      status: "active",
+    }).lean()
+    : null;
+  const joinedInterest = !isJoin
+    ? await CallWaitInterest.findOne({
+      guildId: interaction.guildId,
+      recruitmentId: prompt.messageId,
+      userId,
+      status: "joined",
+    }).lean()
+    : null;
 
   if (isJoin && memberIds.includes(userId)) {
     await interaction.reply({
-      content: "すでに参加予定になっています。キャンセルする場合は、下のキャンセルボタンを押してください。",
+      content: "すでに参加予定として登録されています。\n取り消す場合は、募集メッセージの「キャンセル」を押してください。",
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
   if (!isJoin && !memberIds.includes(userId)) {
+    if (activeInterest) {
+      await endCallWaitInterest(activeInterest, "canceled");
+      await interaction.reply({
+        content: "興味ありを解除しました。\nこの募集についてのDM通知は送信されません。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     await interaction.reply({
-      content: "この募集への参加の予定はありません。",
+      content: "この募集には、参加予定または興味ありとして登録されていません。",
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const updatedPrompt = await updateCallWaitPromptMember({
-    guildId: interaction.guildId,
-    messageId: prompt.messageId,
-    userId,
-    operation: isJoin ? "add" : "remove",
-  });
+  const participantResult = isJoin
+    ? await registerCallWaitParticipant({
+      guildId: interaction.guildId,
+      recruitmentId: prompt.messageId,
+      userId,
+      source: "public_prompt",
+    })
+    : null;
+  const updatedPrompt = isJoin
+    ? participantResult?.settings
+    : await updateCallWaitPromptMember({
+      guildId: interaction.guildId,
+      messageId: prompt.messageId,
+      userId,
+      operation: "remove",
+    });
   if (!updatedPrompt) {
     await interaction.reply({
-      content: "この募集はすでに更新されています。",
+      content: participantResult?.reason === "already_joined"
+        ? "すでに参加予定として登録されています。"
+        : "この募集はすでに更新されています。",
       flags: MessageFlags.Ephemeral,
     });
     return;
+  }
+  if (!isJoin && joinedInterest) {
+    const canceledInterest = await cancelJoinedCallWaitInterest({
+      guildId: interaction.guildId,
+      recruitmentId: prompt.messageId,
+      userId,
+    });
+    if (!canceledInterest) {
+      const restoredPrompt = await updateCallWaitPromptMember({
+        guildId: interaction.guildId,
+        messageId: prompt.messageId,
+        userId,
+        operation: "add",
+      });
+      const remainingJoinedInterest = await CallWaitInterest.exists({
+        guildId: interaction.guildId,
+        recruitmentId: prompt.messageId,
+        userId,
+        status: "joined",
+      });
+      if (!restoredPrompt || remainingJoinedInterest) {
+        await sendOperationalLog({
+          guild: interaction.guild,
+          settings,
+          fallbackChannel: null,
+          content: `参加予定キャンセルの整合性回復に失敗しました。募集ID: ${prompt.messageId}、ユーザーID: ${userId}`,
+        }).catch((error) => logRecoverableError("Failed to report call-wait cancellation inconsistency", error));
+      }
+      await interaction.editReply({
+        content: "参加予定のキャンセル状態を確定できませんでした。参加予定は維持されています。もう一度お試しください。",
+      });
+      return;
+    }
   }
   const nextMemberIds = normalizeCallWaitMemberIds(updatedPrompt.callWaitPrompt?.memberIds);
   const nextTargetAt = new Date(updatedPrompt.callWaitPrompt?.targetAt ?? prompt.targetAt);
@@ -3173,36 +5064,52 @@ async function handleCallWaitButton(interaction) {
   const displayedMemberIds = normalizeCallWaitMemberIds(promptForDisplay?.memberIds ?? nextMemberIds);
   const displayedTargetAt = new Date(promptForDisplay?.targetAt ?? nextTargetAt);
   if (
+    !isJoin &&
     promptForDisplay?.messageId === prompt.messageId &&
     interaction.message &&
     typeof interaction.message.edit === "function"
   ) {
     await interaction.message.edit({
-      content: formatCallWaitPrompt(displayedTargetAt, CALL_WAIT_MODE_BUTTON, displayedMemberIds),
-      components: [createCallWaitJoinRow(displayedTargetAt)],
+      content: formatCallWaitPromptV2(displayedTargetAt, displayedMemberIds),
+      components: [createCallWaitInterestRow()],
     }).catch((error) => {
       console.error(`Failed to update call wait prompt message: ${error.message}`);
     });
   }
 
-  await sendCallWaitApplicantLog({
-    guild: interaction.guild,
-    settings: latestSettings ?? settings,
-    action: isJoin ? "join" : "cancel",
-    userId,
-    memberIds: displayedMemberIds,
-  });
+  if (isJoin) {
+    await finalizeCallWaitParticipantRegistration({
+      guild: interaction.guild,
+      settings: latestSettings ?? settings,
+      recruitmentId: prompt.messageId,
+      userId,
+      source: "public_prompt",
+    });
+  } else {
+    await sendCallWaitApplicantLog({
+      guild: interaction.guild,
+      settings: latestSettings ?? settings,
+      action: "cancel",
+      userId,
+      memberIds: displayedMemberIds,
+    });
+  }
+
+  if (!isJoin) {
+    if (activeInterest) await endCallWaitInterest(activeInterest, "canceled");
+    await reconcileCallWaitInterestThresholds(interaction.guildId, prompt.messageId);
+  }
 
   if (isJoin) {
     await interaction.reply({
-      content: "通話参加希望を受け付けました。取り消す場合は下のボタンを押してください。",
+      content: "参加予定を受け付けました。\n取り消す場合は、募集メッセージの「キャンセル」を押してください。",
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
   await interaction.reply({
-    content: "通話参加希望をキャンセルしました。",
+    content: "参加予定を取り消しました。",
     flags: MessageFlags.Ephemeral,
   });
 }
@@ -3213,6 +5120,7 @@ async function sendCallWaitApplicantLog({
   action,
   userId = null,
   memberIds,
+  source = null,
 }) {
   const actionLabel =
     action === "join"
@@ -3224,6 +5132,7 @@ async function sendCallWaitApplicantLog({
   const lines = [
     `通話待機システム: ${actionLabel}`,
     `操作ユーザー: ${userId ? `<@${userId}>` : "システム"}`,
+    ...(action === "join" ? [`操作元: ${source === "interest_dm" ? "DM" : "公開募集メッセージ"}`] : []),
     "現在の通話希望者:",
     list,
   ];
@@ -3254,7 +5163,7 @@ async function formatCallWaitApplicantList(guild, memberIds) {
   return lines.join("\n");
 }
 
-async function grantCallWaitRoleAndQueueNotice({ guild, settings, memberIds }) {
+async function grantCallWaitRoleAndQueueNotice({ guild, settings, memberIds, sourceId }) {
   const uniqueMemberIds = [...new Set(memberIds)].filter(Boolean);
 
   if (uniqueMemberIds.length < CALL_WAIT_MIN_MEMBERS) {
@@ -3280,23 +5189,66 @@ async function grantCallWaitRoleAndQueueNotice({ guild, settings, memberIds }) {
       continue;
     }
 
-    eligibleMemberIds.push(member.id);
-
     if (member.roles.cache.has(settings.callWaitRoleId)) {
+      eligibleMemberIds.push(member.id);
       continue;
     }
 
     await member.roles.add(
       settings.callWaitRoleId,
       "通話待機システムの集合通知",
-    ).then(() => {
+    ).then(async () => {
+      try {
+        await VoiceParticipantRoleGrant.updateOne(
+          {
+            guildId: guild.id,
+            memberId: member.id,
+            roleId: settings.callWaitRoleId,
+            sourceType: "call_wait",
+            sourceId: sourceId ?? "unknown",
+          },
+          {
+            $set: {
+              grantedByBot: true,
+              grantedAt: new Date(),
+              status: "active",
+              removedAt: null,
+              cleanupAt: null,
+            },
+            $setOnInsert: {
+              guildId: guild.id,
+              memberId: member.id,
+              roleId: settings.callWaitRoleId,
+              sourceType: "call_wait",
+              sourceId: sourceId ?? "unknown",
+            },
+          },
+          { upsert: true },
+        );
+      } catch (error) {
+        await member.roles.remove(settings.callWaitRoleId, "Rollback untracked call-wait role").catch((rollbackError) => {
+          console.error(`Failed to roll back call-wait role for ${member.id}: ${rollbackError.message}`);
+        });
+        throw error;
+      }
       newlyAddedMemberIds.push(member.id);
+      eligibleMemberIds.push(member.id);
     }).catch((error) => {
       console.error(`Failed to add call wait role to ${member.id}: ${error.message}`);
     });
   }
 
   if (eligibleMemberIds.length < CALL_WAIT_MIN_MEMBERS) {
+    if (newlyAddedMemberIds.length > 0) {
+      await removeCallWaitRoleFromMembers(
+        guild,
+        settings.callWaitRoleId,
+        newlyAddedMemberIds,
+        { sourceType: "call_wait", sourceId: sourceId ?? "unknown" },
+      ).catch((rollbackError) => {
+        console.error(`Failed to roll back incomplete call-wait role grants: ${rollbackError.message}`);
+      });
+    }
     return false;
   }
 
@@ -3304,20 +5256,39 @@ async function grantCallWaitRoleAndQueueNotice({ guild, settings, memberIds }) {
     callWaitPendingNotice: {
       memberIds: eligibleMemberIds,
       createdAt: new Date().toISOString(),
+      status: "pending",
+      attemptCount: 0,
     },
   });
 
-  if (newlyAddedMemberIds.length > 0) {
+  if (eligibleMemberIds.length > 0) {
     try {
       await scheduleCallWaitRoleRemoval({
         guild,
         roleId: settings.callWaitRoleId,
-        memberIds: newlyAddedMemberIds,
+        // Removal is source-scoped in VoiceParticipantRoleGrant, so this can
+        // safely include members who already had the role.  It also repairs a
+        // crash after granting a role but before its first removal timer was
+        // persisted.
+        memberIds: eligibleMemberIds,
+        sourceId,
       });
     } catch (error) {
       // Do not leave temporary roles behind when their persistent removal
       // schedule could not be written.
-      await removeCallWaitRoleFromMembers(guild, settings.callWaitRoleId, newlyAddedMemberIds).catch(() => {});
+      await removeCallWaitRoleFromMembers(
+        guild,
+        settings.callWaitRoleId,
+        newlyAddedMemberIds,
+        { sourceType: "call_wait", sourceId: sourceId ?? "unknown" },
+      ).catch((rollbackError) => {
+        console.error(`Failed to roll back scheduled call-wait roles: ${rollbackError.message}`);
+      });
+      await saveGuildSettingsWithCurrent(guild.id, nextSettings, {
+        callWaitPendingNotice: null,
+      }).catch((cleanupError) => {
+        console.error(`Failed to clear unschedulable call-wait notice: ${cleanupError.message}`);
+      });
       throw error;
     }
   }
@@ -3338,14 +5309,17 @@ async function maybeSendPendingCallWaitStartNotice(guild, settings) {
     return false;
   }
 
-  const activeVoiceMemberIds = getCallWaitActiveVoiceMemberIds(
-    guild,
-    settings.callWaitVoiceCategoryId,
-  );
-
-  if (activeVoiceMemberIds.length < CALL_WAIT_MIN_MEMBERS) {
+  // Reaching the scheduled time with two confirmed participants is enough to
+  // announce immediately; waiting for a VC join delays the established call.
+  if ((pendingNotice.memberIds ?? []).length < CALL_WAIT_MIN_MEMBERS) {
     return false;
   }
+
+  const claimedSettings = await claimCallWaitPendingNotice({ guildId: guild.id });
+  if (!claimedSettings?.callWaitPendingNotice) {
+    return false;
+  }
+  settings = claimedSettings;
 
   const channel = await resolveConfiguredTextChannel(
     guild,
@@ -3353,42 +5327,42 @@ async function maybeSendPendingCallWaitStartNotice(guild, settings) {
   );
 
   if (!channel) {
+    await failCallWaitPendingNotice({
+      guildId: guild.id,
+      error: "Configured call-wait notice channel is unavailable",
+    });
     return false;
   }
 
+  try {
   await channel.send({
     content: `<@&${settings.callWaitRoleId}> 雑談希望者が複数人集まりました！VCへの参加お願いします！`,
     allowedMentions: { roles: [settings.callWaitRoleId] },
   });
+  } catch (error) {
+    await failCallWaitPendingNotice({ guildId: guild.id, error: error?.message ?? error });
+    throw error;
+  }
 
-  await sendCallWaitBosyuNotice(guild, settings, channel);
-
-  await saveGuildSettingsWithCurrent(guild.id, settings, {
-    callWaitPendingNotice: null,
-  });
+  try {
+    await saveGuildSettingsWithCurrent(guild.id, settings, {
+      callWaitPendingNotice: null,
+    });
+  } catch (error) {
+    await saveGuildSettingsWithCurrent(guild.id, settings, {
+      callWaitPendingNotice: {
+        ...settings.callWaitPendingNotice,
+        status: "sent_unconfirmed",
+        sentAt: new Date().toISOString(),
+        lastError: `Notice was sent but cleanup persistence failed: ${error.message}`,
+      },
+    }).catch((statusError) => {
+      console.error(`Failed to persist call-wait sent_unconfirmed state: ${statusError.message}`);
+    });
+    throw error;
+  }
 
   return true;
-}
-
-async function sendCallWaitBosyuNotice(guild, settings, fallbackChannel) {
-  if (settings.callWaitBosyuNoticeEnabled !== true || !settings.bosyuMentionRoleId) {
-    return;
-  }
-
-  const channel =
-    (await resolveConfiguredTextChannel(guild, getCallWaitNoticeChannelId(settings))) ??
-    fallbackChannel;
-
-  if (!channel || typeof channel.send !== "function") {
-    return;
-  }
-
-  await channel.send({
-    content: `<@&${settings.bosyuMentionRoleId}> VCが始まりました！お暇ならぜひ途中参加してみてください！`,
-    allowedMentions: { roles: [settings.bosyuMentionRoleId] },
-  }).catch((error) => {
-    console.error(`Failed to send call wait bosyu notice: ${error.message}`);
-  });
 }
 
 async function sendOteboBosyuFollowupNotice(guild, settings) {
@@ -3413,19 +5387,6 @@ async function sendOteboBosyuFollowupNotice(guild, settings) {
   });
 }
 
-function createCallWaitJoinRow(targetAt) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(CALL_WAIT_JOIN_CUSTOM_ID)
-      .setLabel(`${formatJstHourNumber(targetAt)}時から雑談希望`)
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(CALL_WAIT_CANCEL_CUSTOM_ID)
-      .setLabel("参加をキャンセル")
-      .setStyle(ButtonStyle.Secondary),
-  );
-}
-
 function normalizeCallWaitMode(mode) {
   return mode === CALL_WAIT_MODE_REACTION
     ? CALL_WAIT_MODE_REACTION
@@ -3446,7 +5407,7 @@ function getCallWaitNoticeChannelId(settings) {
   return settings?.callWaitNoticeChannelId ?? settings?.callWaitChannelId ?? null;
 }
 
-async function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds }) {
+async function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds, sourceId }) {
   const normalizedIds = normalizeCallWaitMemberIds(memberIds);
   const actionKey = `callwait-role-remove:${guild.id}:${createSessionId()}`;
   await schedulePersistentRoleRemoval({
@@ -3457,6 +5418,7 @@ async function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds }) {
     memberIds: normalizedIds,
     delayMs: CALL_WAIT_ROLE_REMOVE_MS,
     timers: callWaitRoleRemovalTimers,
+    payload: { sourceType: "call_wait", sourceId: sourceId ?? "unknown" },
   });
 }
 
@@ -3491,6 +5453,20 @@ async function executeWaitingVcCleanup({ actionKey, guild, channelId, sessionId 
   const claimed = await claimAction(actionKey);
   if (!claimed) return;
   try {
+    const session = sessionId ? await SplitProcessSession.findOne({ sessionId }).lean() : null;
+    if (session?.status === "active" && ["active", "extended"].includes(session.waitingMonitorStatus)) {
+      // The monitor owns this VC while it is active/extended.  A cleanup action
+      // must never delete a channel that can still receive transfers.
+      await scheduleWaitingVcCleanup({
+        actionKey: `${actionKey}:retry:${Date.now()}`,
+        guild,
+        channelId,
+        delayMs: WAITING_ROOM_POLL_MS,
+        sessionId,
+      });
+      await finishAction(actionKey);
+      return;
+    }
     const channel = await guild.channels.fetch(channelId).catch((error) => {
       if (error?.code === 10003) return null;
       throw error;
@@ -3498,10 +5474,13 @@ async function executeWaitingVcCleanup({ actionKey, guild, channelId, sessionId 
     if (channel) await channel.delete().catch((error) => {
       if (error?.code !== 10003) throw error;
     });
-    if (sessionId) await SplitProcessSession.updateOne({ sessionId }, { $set: { waitingVcCleanupCompleted: true } });
+    if (sessionId) await SplitProcessSession.updateOne(
+      { sessionId, waitingChannelId: channelId },
+      { $set: { waitingVcCleanupCompleted: true, waitingMonitorStatus: "closed", waitingMonitorClosedAt: new Date() } },
+    );
     await finishAction(actionKey);
   } catch (error) {
-    await failAction(actionKey, error.message).catch(() => {});
+    await failAction(actionKey, error.message).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     throw error;
   }
 }
@@ -3513,14 +5492,11 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
     const session = payload?.sessionId
       ? await SplitProcessSession.findOne({ sessionId: payload.sessionId }).lean()
       : null;
-    let targetMemberIds = memberIds;
-    if (payload?.sessionId) {
-      // Role membership can change during the feedback window.  At the actual
-      // removal time, remove it from everyone currently carrying this role.
-      await guild.members.fetch().catch(() => null);
-      const role = guild.roles.cache.get(roleId) ?? await guild.roles.fetch(roleId).catch(() => null);
-      targetMemberIds = [...(role?.members?.keys() ?? [])].filter((id) => id !== guild.client.user.id);
-    }
+    // A role can be shared by unrelated operations.  Only remove it from the
+    // members recorded by this session/action, never from every role holder.
+    const targetMemberIds = payload?.sessionId
+      ? normalizeCallWaitMemberIds(session?.participantRoleGrantedMemberIds)
+      : normalizeCallWaitMemberIds(memberIds);
 
     let removed = 0;
     let failed = 0;
@@ -3528,8 +5504,10 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
       for (const memberId of targetMemberIds) {
         try {
           const member = await guild.members.fetch(memberId);
-          if (!member.roles.cache.has(roleId)) continue;
-          await member.roles.remove(roleId, "会話練習会の感想受付終了による参加者ロール解除");
+          await removeVoiceParticipantRole(member, roleId, {
+            sourceType: "splitvc",
+            sourceId: payload.sessionId,
+          });
           removed += 1;
         } catch (error) {
           failed += 1;
@@ -3538,7 +5516,7 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
       }
       if (failed) throw new Error(`Failed to remove role from ${failed} member(s); removed ${removed} member(s)`);
     } else {
-      await removeCallWaitRoleFromMembers(guild, roleId, targetMemberIds);
+      await removeCallWaitRoleFromMembers(guild, roleId, targetMemberIds, payload);
     }
 
     if (payload?.sessionId) {
@@ -3563,11 +5541,11 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
           },
         },
       );
-      await SplitReviewDraft.deleteMany({ guildId: guild.id, splitSessionId: payload.sessionId }).catch(() => {});
+      await SplitReviewDraft.deleteMany({ guildId: guild.id, splitSessionId: payload.sessionId }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
       if (session?.reviewButtonShown && session?.finishNoticeChannelId && session?.finishNoticeMessageId) {
         const noticeChannel = await guild.channels.fetch(session.finishNoticeChannelId).catch(() => null);
         const notice = await noticeChannel?.messages?.fetch(session.finishNoticeMessageId).catch(() => null);
-        await notice?.edit({ components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`split_review_closed:${payload.sessionId}`).setLabel("感想受付は終了しました").setStyle(ButtonStyle.Secondary).setDisabled(true))] }).catch(() => {});
+        await notice?.edit({ components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`split_review_closed:${payload.sessionId}`).setLabel("感想受付は終了しました").setStyle(ButtonStyle.Secondary).setDisabled(true))] }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
       }
     }
     await finishAction(actionKey);
@@ -3576,9 +5554,9 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
       await SplitProcessSession.updateOne(
         { sessionId: payload.sessionId },
         { $set: { roleRemovalCompleted: false, phase: "role_remove_pending", status: "role_remove_pending", lastError: error.message } },
-      ).catch(() => {});
+      ).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     }
-    await failAction(actionKey, error.message).catch(() => {});
+    await failAction(actionKey, error.message).catch((persistError) => logRecoverableError(`Failed to persist waiting-VC cleanup failure for ${actionKey}`, persistError));
     throw error;
   }
 }
@@ -3591,7 +5569,7 @@ async function executeSplitFinishNotice({ actionKey, guild, payload }) {
     if (session && !session.finishNoticeSent) await sendSplitFinishNotice({ guild, session, channelId: payload?.channelId });
     await finishAction(actionKey);
   } catch (error) {
-    await failAction(actionKey, error.message).catch(() => {});
+    await failAction(actionKey, error.message).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     throw error;
   }
 }
@@ -3603,7 +5581,7 @@ async function restoreScheduledActions() {
   for (const action of actions) {
     const guild = client.guilds.cache.get(action.guildId) ?? await client.guilds.fetch(action.guildId).catch(() => null);
     if (!guild) {
-      await failAction(action.actionKey, "Guild not found").catch(() => {});
+      await failAction(action.actionKey, "Guild not found").catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
       continue;
     }
     if (action.type === "split_waiting_vc_cleanup") {
@@ -3655,7 +5633,7 @@ async function restoreBosyuEditSessions() {
     await invalidateBosyuEditMessage(session).catch((error) => {
       console.error(`Failed to invalidate expired /bosyu edit ${session.messageId}: ${error.message}`);
     });
-    await deleteBosyuEditSession(session.messageId).catch(() => {});
+    await deleteBosyuEditSession(session.messageId).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
   }
   const sessions = await getActiveBosyuEditSessions();
   let restored = 0;
@@ -3676,7 +5654,7 @@ async function restoreBosyuEditSessions() {
 async function invalidateBosyuEditMessage(session) {
   const channel = await client.channels.fetch(session.channelId).catch(() => null);
   const message = channel?.messages?.fetch ? await channel.messages.fetch(session.messageId).catch(() => null) : null;
-  await message?.edit({ components: [] }).catch(() => {});
+  await message?.edit({ components: [] }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
 }
 
 function scheduleBosyuEditExpiry(messageId, channelId, expiresAt) {
@@ -3684,7 +5662,7 @@ function scheduleBosyuEditExpiry(messageId, channelId, expiresAt) {
     bosyuEditSessions.delete(messageId);
     const channel = await client.channels.fetch(channelId).catch(() => null);
     const message = channel?.messages?.fetch ? await channel.messages.fetch(messageId).catch(() => null) : null;
-    await message?.edit({ components: [] }).catch(() => {});
+    await message?.edit({ components: [] }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     await deleteBosyuEditSession(messageId).catch((error) => {
       console.error(`Failed to delete expired /bosyu edit session ${messageId}: ${error.message}`);
     });
@@ -3708,6 +5686,23 @@ async function persistSplitProcessSession(sessionId, patch) {
   );
 }
 
+function createCallWaitInterestRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(CALL_WAIT_JOIN_CUSTOM_ID).setLabel("参加予定").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(CALL_WAIT_INTEREST_CUSTOM_ID).setLabel("興味あり").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(CALL_WAIT_CANCEL_CUSTOM_ID).setLabel("キャンセル").setStyle(ButtonStyle.Danger),
+  );
+}
+
+async function isKokuchiCallWaitPaused(settings, guildId, now) {
+  if (isKokuchiCallWaitPause(settings, now)) return true;
+  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  if (jst.getUTCHours() < 20 || jst.getUTCHours() >= 22) return false;
+  const start = new Date(Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth(), jst.getUTCDate() - 1, 15, 0, 0));
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  return Boolean(await KokuchiReservation.exists({ guildId, status: { $in: ["pending", "processing"] }, scheduledAt: { $gte: start, $lt: end } }));
+}
+
 async function sendSplitFinishNotice({ guild, session, channelId }) {
   const settings = await getGuildSettings(guild.id);
   const channel = await guild.channels.fetch(channelId ?? session.operationChannelId).catch(() => null);
@@ -3724,7 +5719,7 @@ async function sendSplitFinishNotice({ guild, session, channelId }) {
   const now = new Date(); const waitMs = minutesToMs(getNonNegativeInteger(settings?.roleRemoveWaitMinutes, DEFAULT_ROLE_REMOVE_WAIT_MINUTES));
   await guild.members.fetch().catch(() => null);
   const eligible = session.participantRoleId ? [...(guild.roles.cache.get(session.participantRoleId)?.members?.keys() ?? [])].filter((id) => id !== guild.client.user.id) : [];
-  const snapshots = await Promise.all((session.childChannelIds ?? []).map(async (id, index) => { const vc = await guild.channels.fetch(id).catch(() => null); const ids = vc?.members ? [...vc.members.keys()].filter((memberId) => memberId !== guild.client.user.id) : (session.groupSnapshots?.[index]?.memberIds ?? []); return { groupNumber: index + 1, memberIds: ids }; }));
+  const snapshots = await Promise.all((session.childChannelIds ?? []).map(async (id, index) => { const vc = await guild.channels.fetch(id).catch(() => null); const ids = vc?.members ? [...vc.members.keys()].filter((memberId) => memberId !== guild.client.user.id) : (session.groupSnapshots?.[index]?.memberIds ?? []); return { groupNumber: session.groupSnapshots?.[index]?.groupNumber ?? index + 1, channelId: id, memberIds: ids }; }));
   const finishContent = canReview
     ? `<@&${session.participantRoleId}> 30分が経過しました！各々のちょうどいいタイミングで解散してください\n\nお時間があれば下のボタンから今回の感想をお聞かせください！\n３０秒ほどで完了するので今後に活かすためにぜひお願いします 🙏`
     : `<@&${session.participantRoleId}> 30分が経過しました！各々のちょうどいいタイミングで解散してください`;
@@ -3733,7 +5728,7 @@ async function sendSplitFinishNotice({ guild, session, channelId }) {
     components: canReview ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`${SPLIT_REVIEW_OPEN}:${session.sessionId}`).setLabel("感想を送る").setStyle(ButtonStyle.Primary))] : [],
     allowedMentions: { roles: session.participantRoleId ? [session.participantRoleId] : [] },
   });
-  await sendSplitClosingThanks(guild, settings, session.participantMemberIds).catch(() => {});
+  await sendSplitClosingThanks(guild, settings, session.participantMemberIds).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
   const deadline = new Date(now.getTime() + waitMs);
   const conversationStarted = Boolean(session.conversationStartedAt && (session.groupSnapshots ?? []).some((group) => group.memberIds?.length));
   await SplitProcessSession.updateOne({ sessionId: session.sessionId }, { $set: { finishNoticeSent: true, finishNoticeAt: now, reviewDeadlineAt: deadline, roleRemoveAt: deadline, finishNoticeChannelId: channel.id, finishNoticeMessageId: message.id, reviewButtonShown: canReview, reviewEligibleMemberIds: eligible, groupSnapshots: snapshots, status: "feedback_open", phase: "feedback_open", reviewAggregationEligible: canReview && eligible.length > 0 && conversationStarted, conversationStartedAt: session.conversationStartedAt ?? null } });
@@ -3859,6 +5854,71 @@ async function handleSplitReviewModal(interaction) {
     interaction.fields.getTextInputValue("comment"),
   );
 }
+
+async function deliverSplitReview(guild, review) {
+  const claimed = await SplitReview.findOneAndUpdate(
+    { _id: review._id, deliveryStatus: { $in: ["pending", "failed"] } },
+    {
+      $set: { deliveryStatus: "processing", deliveryLastTriedAt: new Date() },
+      $inc: { deliveryRetryCount: 1 },
+      $unset: { deliveryLastError: 1 },
+    },
+    { returnDocument: "after", lean: true },
+  );
+  if (!claimed) return { delivered: false, error: "Review delivery is already being processed" };
+
+  try {
+    if (!claimed.reviewChannelId) throw new Error("感想送信先が設定されていません。");
+    const channel = await guild.channels.fetch(claimed.reviewChannelId);
+    if (!channel?.send) throw new Error("感想送信先チャンネルを使用できません。");
+    const members = claimed.groupMemberIds
+      .filter((id) => id !== claimed.userId)
+      .map((id, index) => `${index + 1}. <@${id}>`)
+      .join("\n") || "（他のメンバーはいません）";
+    const message = await channel.send({
+      content: `<@${claimed.userId}> さんの感想（${claimed.eventDate}分）\n\nどれくらい喋れた？：${TALK_AMOUNT_LABELS[claimed.talkAmount] ?? "不明"}\n時間はどうだった？：${DURATION_FEELING_LABELS[claimed.durationFeeling] ?? "不明"}\n会話の練習になった？：${PRACTICE_EFFECT_LABELS[claimed.practiceEffect] ?? "不明"}${claimed.comment ? `\n\nコメント：${claimed.comment}` : ""}\n\n<@${claimed.userId}>さんのグループメンバー\n${members}`,
+      allowedMentions: { parse: [] },
+    });
+    const completed = await SplitReview.updateOne(
+      { _id: claimed._id, deliveryStatus: "processing" },
+      { $set: { deliveryStatus: "delivered", reviewMessageId: message.id, reviewChannelId: channel.id }, $unset: { deliveryLastError: 1 } },
+    );
+    if (completed.matchedCount !== 1 || completed.modifiedCount !== 1) {
+      throw new Error("Review delivery succeeded but completion could not be persisted");
+    }
+    return { delivered: true };
+  } catch (error) {
+    const failed = await SplitReview.updateOne(
+      { _id: claimed._id, deliveryStatus: "processing" },
+      { $set: { deliveryStatus: "failed", deliveryLastError: error.message, deliveryLastTriedAt: new Date() } },
+    ).catch((statusError) => {
+      console.error("Failed to persist split review delivery failure:", statusError);
+      return null;
+    });
+    if (!failed || failed.matchedCount !== 1) {
+      console.error("Split review delivery failed and its retry state could not be confirmed:", error);
+    }
+    return { delivered: false, error: error.message };
+  }
+}
+
+async function restoreFailedSplitReviewDeliveries() {
+  const reviews = await SplitReview.find({ deliveryStatus: "failed" }).lean();
+  let retried = 0;
+  for (const review of reviews) {
+    try {
+      const guild = client.guilds.cache.get(review.guildId) ?? await client.guilds.fetch(review.guildId).catch(() => null);
+      if (!guild) throw new Error("Guild is unavailable");
+      const result = await deliverSplitReview(guild, review);
+      if (result.delivered) retried += 1;
+      else console.error(`Failed to retry split review delivery ${review._id}: ${result.error}`);
+    } catch (error) {
+      console.error(`Failed to restore split review delivery ${review._id}: ${error.message}`);
+    }
+  }
+  if (reviews.length) console.log(`Startup split review deliveries retried: ${retried}/${reviews.length}`);
+}
+
 async function submitSplitReview(interaction, session, draft, rawComment) {
   await deferSplitReviewReply(interaction);
   const finalCheck = await getEligibleReviewSession(interaction, session.sessionId);
@@ -3908,27 +5968,9 @@ async function submitSplitReview(interaction, session, draft, rawComment) {
     userId: interaction.user.id,
   }).catch((error) => console.error("Failed to delete split review draft:", error));
 
-  try {
-    if (!review.reviewChannelId) throw new Error("感想送信先が設定されていません。");
-    const channel = await interaction.guild.channels.fetch(review.reviewChannelId);
-    const members = group
-      ? group.memberIds
-        .filter((id) => id !== interaction.user.id)
-        .map((id, index) => `${index + 1}. <@${id}>`)
-        .join("\n") || "（他のメンバーはいません）"
-      : "グループ情報を取得できませんでした。";
-    const message = await channel.send({
-      content: `<@${interaction.user.id}> さんの感想（${review.eventDate}分）\n\nどれくらい喋れた？：${TALK_AMOUNT_LABELS[draft.talkAmount] ?? "不明"}\n時間はどうだった？：${DURATION_FEELING_LABELS[draft.durationFeeling] ?? "不明"}\n会話の練習になった？：${PRACTICE_EFFECT_LABELS[draft.practiceEffect] ?? "不明"}${comment ? `\n\nコメント：${comment}` : ""}\n\n<@${interaction.user.id}>さんのグループメンバー\n${members}`,
-      allowedMentions: { parse: [] },
-    });
-    await SplitReview.updateOne(
-      { _id: review._id },
-      { $set: { deliveryStatus: "delivered", reviewMessageId: message.id, reviewChannelId: channel.id } },
-    ).catch((error) => console.error("Review was delivered, but status update failed:", error));
-  } catch (error) {
-    await SplitReview.updateOne({ _id: review._id }, { $set: { deliveryStatus: "failed" } })
-      .catch((statusError) => console.error("Failed to update review delivery status:", statusError));
-    const failureLogContent = `【感想転送失敗】\nサーバー：${interaction.guild.name}（${interaction.guildId}）\nセッションID：${session.sessionId}\n回答者：${interaction.user.username}（${interaction.user.id}）\n感想送信先：${review.reviewChannelId}\nDB保存状態：保存済み\ndeliveryStatus：failed\nエラー内容：${error.message}\n発生日時：${new Date().toISOString()}`;
+  const delivery = await deliverSplitReview(interaction.guild, review);
+  if (!delivery.delivered) {
+    const failureLogContent = `【感想転送失敗】\nサーバー：${interaction.guild.name}（${interaction.guildId}）\nセッションID：${session.sessionId}\n回答者：${interaction.user.username}（${interaction.user.id}）\n感想送信先：${review.reviewChannelId}\nDB保存状態：保存済み\ndeliveryStatus：failed\nエラー内容：${delivery.error}\n発生日時：${new Date().toISOString()}`;
     const logSettings = settings ?? await getGuildSettings(interaction.guildId).catch((settingsError) => {
       console.error("Failed to load settings for review failure log:", settingsError);
       return null;
@@ -3942,8 +5984,13 @@ async function submitSplitReview(interaction, session, draft, rawComment) {
       content: failureLogContent,
       allowedMentions: { parse: [] },
     }).catch((logError) => {
-      console.error("Review delivery and operational log failed", failureLogContent, error, logError);
+      console.error("Review delivery and operational log failed", failureLogContent, delivery.error, logError);
     });
+    await interaction.editReply({
+      content: "回答内容は保存しましたが、運営チャンネルへの転送に失敗しました。\n運営側で再送処理を行います。",
+      components: [],
+    }).catch((error) => console.error("Failed to complete split review interaction:", error));
+    return;
   }
 
   await interaction.editReply({
@@ -3953,64 +6000,477 @@ async function submitSplitReview(interaction, session, draft, rawComment) {
 }
 function jstReviewDate(value) { const parts = new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric" }).formatToParts(new Date(value)); return `${parts.find((x) => x.type === "month")?.value}月${parts.find((x) => x.type === "day")?.value}日`; }
 
+function clearRestoredWaitingMonitor(sessionId) {
+  const timer = restoredWaitingMonitorTimers.get(sessionId);
+  if (timer) clearInterval(timer);
+  restoredWaitingMonitorTimers.delete(sessionId);
+}
+
+async function claimWaitingMonitorLease(sessionId) {
+  const now = new Date();
+  return SplitProcessSession.findOneAndUpdate(
+    {
+      sessionId,
+      status: "active",
+      waitingMonitorStatus: { $in: ["active", "extended"] },
+      $or: [
+        { waitingMonitorLeaseOwner: waitingMonitorLeaseOwner },
+        { waitingMonitorLeaseUntil: { $lte: now } },
+        { waitingMonitorLeaseUntil: { $exists: false } },
+      ],
+    },
+    {
+      $set: {
+        waitingMonitorLeaseOwner: waitingMonitorLeaseOwner,
+        waitingMonitorLeaseUntil: new Date(now.getTime() + WAITING_MONITOR_LEASE_MS),
+        waitingMonitorHeartbeatAt: now,
+      },
+    },
+    { returnDocument: "after", lean: true },
+  );
+}
+
+async function releaseWaitingMonitorLease(sessionId) {
+  await SplitProcessSession.updateOne(
+    { sessionId, waitingMonitorLeaseOwner: waitingMonitorLeaseOwner },
+    { $unset: { waitingMonitorLeaseOwner: 1, waitingMonitorLeaseUntil: 1 } },
+  );
+}
+
+async function recordWaitingMonitorFailure(sessionId, error) {
+  const session = await SplitProcessSession.findOneAndUpdate(
+    { sessionId, status: "active", waitingMonitorStatus: { $in: ["active", "extended"] } },
+    {
+      $set: {
+        waitingMonitorHeartbeatAt: new Date(),
+        lastError: `Waiting monitor iteration failed: ${error?.message ?? error}`,
+      },
+      $inc: { waitingMonitorFailureCount: 1 },
+    },
+    { returnDocument: "after", lean: true },
+  );
+  if (!session || session.waitingMonitorFailureCount < 3) return false;
+  await SplitProcessSession.updateOne(
+    { sessionId, status: "active", waitingMonitorStatus: { $in: ["active", "extended"] } },
+    { $set: { waitingMonitorStatus: "failed" } },
+  );
+  return true;
+}
+
+async function createRestoredWaitingGroup({ session, guild, waitingChannel, waitingMembers }) {
+  if (waitingMembers.length < 3 || !session.parentChannelId) return false;
+  const parentChannel = await guild.channels.fetch(session.parentChannelId).catch(() => null);
+  if (!parentChannel?.isVoiceBased?.()) return false;
+  const members = waitingMembers.slice(0, 3);
+  const addedRoleIds = new Set();
+  const addRoleIfNeeded = async (member) => {
+    if (!session.participantRoleId || member.roles.cache.has(session.participantRoleId)) return;
+    await member.roles.add(session.participantRoleId, "Restored split waiting-room group creation");
+    try {
+      await VoiceParticipantRoleGrant.updateOne(
+        {
+          guildId: guild.id,
+          memberId: member.id,
+          roleId: session.participantRoleId,
+          sourceType: "splitvc",
+          sourceId: session.sessionId,
+        },
+        {
+          $set: {
+            grantedByBot: true,
+            grantedAt: new Date(),
+            status: "active",
+            removedAt: null,
+            cleanupAt: null,
+          },
+          $setOnInsert: {
+            guildId: guild.id,
+            memberId: member.id,
+            roleId: session.participantRoleId,
+            sourceType: "splitvc",
+            sourceId: session.sessionId,
+          },
+        },
+        { upsert: true },
+      );
+    } catch (error) {
+      await member.roles.remove(session.participantRoleId, "Rollback untracked restored split role").catch((rollbackError) => {
+        console.error(`Failed to roll back untracked restored split role for ${member.id}: ${rollbackError.message}`);
+      });
+      throw error;
+    }
+    addedRoleIds.add(member.id);
+  };
+  const rollbackAddedRoles = async () => Promise.all(
+    [...addedRoleIds].map((memberId) => guild.members.fetch(memberId)
+      .then((member) => removeVoiceParticipantRole(member, session.participantRoleId, {
+        sourceType: "splitvc",
+        sourceId: session.sessionId,
+      }))
+      .catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error))),
+  );
+  let createdChildChannelId = null;
+
+  try {
+    const seedMember = members[0];
+    await addRoleIfNeeded(seedMember);
+    await seedMember.voice.setChannel(parentChannel, "Restored split waiting-room group seed");
+    const startedAt = Date.now();
+    let childChannel = null;
+    while (Date.now() - startedAt < PB_CHILD_WAIT_MS) {
+      const candidate = seedMember.voice.channel;
+      const expectedCategoryId = session.childCategoryId ?? parentChannel.parentId;
+      if (
+        candidate?.isVoiceBased?.()
+        && candidate.id !== parentChannel.id
+        && candidate.id !== waitingChannel.id
+        && (!expectedCategoryId || candidate.parentId === expectedCategoryId)
+      ) {
+        childChannel = candidate;
+        break;
+      }
+      await sleep(750);
+    }
+    if (!childChannel) {
+      await seedMember.voice.setChannel(waitingChannel, "Restore waiting-room after PB child detection failed").catch((error) => logRecoverableError("Failed to restore member to waiting VC", error));
+      await rollbackAddedRoles();
+      return false;
+    }
+    createdChildChannelId = childChannel.id;
+
+    const movedMemberIds = [seedMember.id];
+    for (const member of members.slice(1)) {
+      try {
+        await addRoleIfNeeded(member);
+        await member.voice.setChannel(childChannel, "Restored split waiting-room group member");
+        movedMemberIds.push(member.id);
+      } catch (error) {
+        if (addedRoleIds.has(member.id)) {
+          await removeVoiceParticipantRole(member, session.participantRoleId, {
+            sourceType: "splitvc",
+            sourceId: session.sessionId,
+          }).catch((rollbackError) => {
+            console.error(`Failed to roll back restored split role for ${member.id}: ${rollbackError.message}`);
+          });
+          addedRoleIds.delete(member.id);
+        }
+        waitingMemberRetryAfter.set(`${guild.id}:${member.id}`, Date.now() + 15_000);
+        console.error(`Failed to move restored split waiting member ${member.id}: ${error.message}`);
+      }
+    }
+    const persisted = await SplitProcessSession.updateOne(
+      { sessionId: session.sessionId, status: "active", waitingMonitorStatus: { $in: ["active", "extended"] }, waitingMonitorLeaseOwner: waitingMonitorLeaseOwner },
+      {
+        $addToSet: {
+          participantMemberIds: { $each: movedMemberIds },
+          participantRoleGrantedMemberIds: { $each: movedMemberIds.filter((memberId) => addedRoleIds.has(memberId)) },
+          childChannelIds: childChannel.id,
+        },
+        $push: {
+          groupSnapshots: {
+            groupNumber: (session.groupSnapshots?.length ?? 0) + 1,
+            channelId: childChannel.id,
+            memberIds: movedMemberIds,
+          },
+        },
+        $set: { waitingMonitorHeartbeatAt: new Date(), waitingMonitorFailureCount: 0 },
+      },
+    );
+    if (persisted.matchedCount !== 1 || persisted.modifiedCount !== 1) {
+      throw new Error("Restored waiting-group persistence did not update the active session.");
+    }
+    return true;
+  } catch (error) {
+    if (createdChildChannelId) {
+      await Promise.all(members.map(async (member) => {
+        if (member.voice.channelId === createdChildChannelId) {
+          await member.voice.setChannel(waitingChannel, "Rollback restored waiting group after persistence failure");
+        }
+      })).catch((rollbackError) => logRecoverableError("Failed to return restored waiting members", rollbackError));
+      await guild.channels.fetch(createdChildChannelId)
+        .then((channel) => channel?.delete("Rollback restored waiting child after persistence failure"))
+        .catch((rollbackError) => logRecoverableError("Failed to delete restored waiting child", rollbackError));
+    }
+    await rollbackAddedRoles();
+    await sendOperationalLog({
+      guild,
+      settings: await getGuildSettings(guild.id).catch(() => null),
+      fallbackChannel: null,
+      content: `復元した途中参加の新規グループ作成に失敗しました。セッション: ${session.sessionId}、エラー: ${error?.message ?? error}`,
+    }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    return false;
+  }
+}
+
+async function processRestoredWaitingMonitor(sessionId, guild) {
+  if (restoredWaitingMonitorLocks.has(sessionId)) return;
+  restoredWaitingMonitorLocks.add(sessionId);
+  try {
+    const session = await claimWaitingMonitorLease(sessionId);
+    if (!session) {
+      const current = await SplitProcessSession.findOne({
+        sessionId,
+        status: "active",
+        waitingMonitorStatus: { $in: ["active", "extended"] },
+      }).lean();
+      const leaseUntil = current?.waitingMonitorLeaseUntil
+        ? new Date(current.waitingMonitorLeaseUntil)
+        : null;
+      if (leaseUntil && Number.isFinite(leaseUntil.getTime()) && leaseUntil.getTime() > Date.now()) {
+        // Keep the interval alive while another process owns the old lease.
+        // The next interval after this timestamp acquires it if the owner is gone.
+        await SplitProcessSession.updateOne(
+          { sessionId, waitingMonitorLeaseUntil: current.waitingMonitorLeaseUntil },
+          { $set: { waitingMonitorLeaseRetryAt: leaseUntil } },
+        );
+        return;
+      }
+      if (current) {
+        // Another process may have renewed or released the lease between the
+        // claim and this read.  Keep monitoring and try again next interval.
+        return;
+      }
+      clearRestoredWaitingMonitor(sessionId);
+      return;
+    }
+    const waitingChannel = await guild.channels.fetch(session.waitingChannelId).catch(() => null);
+    if (!waitingChannel?.isVoiceBased?.()) {
+      await SplitProcessSession.updateOne({ sessionId }, { $set: { waitingMonitorStatus: "closed", waitingMonitorClosedAt: new Date(), waitingVcCleanupCompleted: true } });
+      clearRestoredWaitingMonitor(sessionId);
+      return;
+    }
+    const childChannels = (await Promise.all((session.childChannelIds ?? []).map((id) => guild.channels.fetch(id).catch(() => null))))
+      .filter((channel) => channel?.isVoiceBased?.());
+    const hasUnderfilledChildChannel = childChannels.some(
+      (channel) => [...channel.members.values()].filter((member) => !member.user.bot).length < 3,
+    );
+    const monitorEndsAt = new Date(session.waitingMonitorEndsAt).getTime();
+    if (Number.isFinite(monitorEndsAt) && Date.now() >= monitorEndsAt) {
+      if (hasUnderfilledChildChannel) {
+        await SplitProcessSession.updateOne(
+          { sessionId, waitingMonitorLeaseOwner: waitingMonitorLeaseOwner, waitingMonitorStatus: "active" },
+          { $set: { waitingMonitorStatus: "extended", waitingMonitorExtendedAt: new Date() } },
+        );
+      } else {
+        const closing = await SplitProcessSession.findOneAndUpdate(
+          { sessionId, status: "active", waitingMonitorStatus: { $in: ["active", "extended"] }, waitingMonitorLeaseOwner: waitingMonitorLeaseOwner },
+          { $set: { waitingMonitorStatus: "closing" }, $unset: { waitingMonitorLeaseOwner: 1, waitingMonitorLeaseUntil: 1 } },
+          { returnDocument: "after", lean: true },
+        );
+        if (closing) {
+          const operationChannel = await guild.channels.fetch(session.operationChannelId).catch(() => null);
+          await notifyWaitingVcClosure(operationChannel, waitingChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+          try {
+            await waitingChannel.delete();
+          } catch (error) {
+            await SplitProcessSession.updateOne(
+              { sessionId, waitingMonitorStatus: "closing" },
+              {
+                $set: {
+                  waitingMonitorStatus: "failed",
+                  waitingVcCleanupCompleted: false,
+                  lastError: `Restored waiting VC cleanup failed: ${error?.message ?? error}`,
+                },
+              },
+            );
+            await sendOperationalLog({
+              guild,
+              settings: await getGuildSettings(guild.id).catch(() => null),
+              fallbackChannel: operationChannel,
+              content: `再開した途中参加監視の待機VC削除に失敗しました: ${error?.message ?? error}`,
+            }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+            clearRestoredWaitingMonitor(sessionId);
+            return;
+          }
+          await SplitProcessSession.updateOne(
+            { sessionId, waitingMonitorStatus: "closing" },
+            { $set: { waitingMonitorStatus: "closed", waitingMonitorClosedAt: new Date(), waitingVcCleanupCompleted: true } },
+          );
+        }
+        clearRestoredWaitingMonitor(sessionId);
+        return;
+      }
+    }
+    const waitingMembers = [...waitingChannel.members.values()].filter((member) => !member.user.bot);
+    if (!hasUnderfilledChildChannel && waitingMembers.length >= 3) {
+      const created = await createRestoredWaitingGroup({ session, guild, waitingChannel, waitingMembers });
+      if (created) return;
+    }
+    for (const member of waitingMembers) {
+      const target = childChannels
+        .filter((channel) => [...channel.members.values()].filter((voiceMember) => !voiceMember.user.bot).length < 3)
+        .sort((left, right) => left.members.size - right.members.size)[0];
+      if (!target) break;
+      let roleAddedForTransfer = false;
+      try {
+        if (session.participantRoleId && !member.roles.cache.has(session.participantRoleId)) {
+          await member.roles.add(session.participantRoleId, "Restored split waiting-room transfer");
+          try {
+            await VoiceParticipantRoleGrant.updateOne(
+              {
+                guildId: guild.id,
+                memberId: member.id,
+                roleId: session.participantRoleId,
+                sourceType: "splitvc",
+                sourceId: session.sessionId,
+              },
+              {
+                $set: {
+                  grantedByBot: true,
+                  grantedAt: new Date(),
+                  status: "active",
+                  removedAt: null,
+                  cleanupAt: null,
+                },
+                $setOnInsert: {
+                  guildId: guild.id,
+                  memberId: member.id,
+                  roleId: session.participantRoleId,
+                  sourceType: "splitvc",
+                  sourceId: session.sessionId,
+                },
+              },
+              { upsert: true },
+            );
+          } catch (error) {
+            await member.roles.remove(session.participantRoleId, "Rollback untracked restored split role").catch((rollbackError) => {
+              console.error(`Failed to roll back untracked restored split role for ${member.id}: ${rollbackError.message}`);
+            });
+            throw error;
+          }
+          roleAddedForTransfer = true;
+        }
+        await member.voice.setChannel(target, "Restored split waiting-room transfer");
+        const snapshotIndex = (session.groupSnapshots ?? []).findIndex((group) => group.channelId === target.id);
+        const groupUpdate = snapshotIndex >= 0
+          ? { $addToSet: { participantMemberIds: member.id, [`groupSnapshots.${snapshotIndex}.memberIds`]: member.id } }
+          : {
+            $addToSet: { participantMemberIds: member.id, childChannelIds: target.id },
+            $push: {
+              groupSnapshots: {
+                groupNumber: (session.groupSnapshots?.length ?? 0) + 1,
+                channelId: target.id,
+                memberIds: [member.id],
+              },
+            },
+          };
+        if (roleAddedForTransfer) groupUpdate.$addToSet.participantRoleGrantedMemberIds = member.id;
+        const persisted = await SplitProcessSession.updateOne(
+          { sessionId, status: "active", waitingMonitorStatus: { $in: ["active", "extended"] }, waitingMonitorLeaseOwner: waitingMonitorLeaseOwner },
+          { ...groupUpdate, $set: { waitingMonitorHeartbeatAt: new Date(), waitingMonitorFailureCount: 0 } },
+        );
+        if (persisted.matchedCount !== 1 || persisted.modifiedCount !== 1) {
+          throw new Error("Restored waiting transfer persistence did not match the active session");
+        }
+      } catch (error) {
+        if (member.voice.channelId === target?.id) {
+          await member.voice.setChannel(waitingChannel, "Rollback restored waiting transfer after persistence failure").catch((rollbackError) => {
+            console.error(`Failed to return restored waiting member ${member.id}: ${rollbackError.message}`);
+          });
+        }
+        if (roleAddedForTransfer) {
+          await removeVoiceParticipantRole(member, session.participantRoleId, {
+            sourceType: "splitvc",
+            sourceId: session.sessionId,
+          }).catch((rollbackError) => {
+            console.error(`Failed to roll back restored split role for ${member.id}: ${rollbackError.message}`);
+          });
+        }
+        waitingMemberRetryAfter.set(`${guild.id}:${member.id}`, Date.now() + 15_000);
+        await recordWaitingMonitorFailure(sessionId, error).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+        await sendOperationalLog({ guild, settings: await getGuildSettings(guild.id).catch(() => null), fallbackChannel: null, content: `復元した途中参加転送に失敗しました。セッション: ${sessionId}、ユーザー: ${member.id}、エラー: ${error?.message ?? error}` }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      }
+    }
+    await SplitProcessSession.updateOne({ sessionId }, { $set: { waitingMonitorHeartbeatAt: new Date() } });
+  } finally {
+    restoredWaitingMonitorLocks.delete(sessionId);
+  }
+}
+
+function startRestoredWaitingMonitor(session, guild) {
+  clearRestoredWaitingMonitor(session.sessionId);
+  const timer = setInterval(() => {
+    void processRestoredWaitingMonitor(session.sessionId, guild).catch((error) => {
+      console.error(`Restored waiting monitor failed for ${session.sessionId}:`, error);
+    });
+  }, WAITING_ROOM_POLL_MS);
+  restoredWaitingMonitorTimers.set(session.sessionId, timer);
+  void processRestoredWaitingMonitor(session.sessionId, guild);
+}
+
 async function restoreSplitProcessSessions() {
   if (mongoose.connection.readyState !== 1) return;
   const sessions = await SplitProcessSession.find({ status: { $in: ["active", "finish_notice_pending", "role_remove_pending", "cleaning_up", "feedback_open"] } }).lean();
   let restored = 0;
   for (const session of sessions) {
-    const guild = client.guilds.cache.get(session.guildId) ?? await client.guilds.fetch(session.guildId).catch(() => null);
-    if (!guild) continue;
-    if (session.phase === "transfer_waiting" && !(session.childChannelIds?.length)) {
-      await SplitProcessSession.updateOne(
-        { sessionId: session.sessionId, status: "active" },
-        { $set: { status: "canceled", phase: "canceled", lastError: "Bot restarted before transfer completed" } },
-      );
-      continue;
+    try {
+      const guild = client.guilds.cache.get(session.guildId) ?? await client.guilds.fetch(session.guildId).catch(() => null);
+      if (!guild) continue;
+      if (session.phase === "transfer_waiting" && !(session.childChannelIds?.length)) {
+        await SplitProcessSession.updateOne(
+          { sessionId: session.sessionId, status: "active" },
+          { $set: { status: "canceled", phase: "canceled", lastError: "Bot restarted before transfer completed" } },
+        );
+        continue;
+      }
+      if (
+        session.status === "active"
+        && session.waitingChannelId
+        && ["active", "extended"].includes(session.waitingMonitorStatus)
+      ) {
+        startRestoredWaitingMonitor(session, guild);
+      }
+      if (session.status === "active" && !session.finishNoticeSent) { restored += 1; continue; }
+      const roleRemoveAt = session.roleRemoveAt ? new Date(session.roleRemoveAt).getTime() : Date.now();
+      const roleId = session.participantRoleId;
+      const memberIds = session.reviewEligibleMemberIds ?? session.participantMemberIds ?? [];
+      if (roleId && memberIds.length) {
+        await schedulePersistentRoleRemoval({
+          actionKey: `split-role-remove:${session.sessionId}`,
+          type: "split_role_remove",
+          guild,
+          roleId,
+          memberIds,
+          delayMs: Math.max(0, roleRemoveAt - Date.now()),
+          timers: callWaitRoleRemovalTimers,
+          payload: { sessionId: session.sessionId },
+        }).catch((error) => console.error(`Failed to restore split role removal: ${error.message}`));
+      }
+      restored += 1;
+    } catch (error) {
+      console.error(`Failed to restore split session ${session.sessionId}: ${error.message}`);
     }
-    if (session.status === "active" && !session.finishNoticeSent) { restored += 1; continue; }
-    const roleRemoveAt = session.roleRemoveAt ? new Date(session.roleRemoveAt).getTime() : Date.now();
-    const roleId = session.participantRoleId;
-    const memberIds = session.reviewEligibleMemberIds ?? session.participantMemberIds ?? [];
-    if (roleId && memberIds.length) {
-      await schedulePersistentRoleRemoval({
-        actionKey: `split-role-remove:${session.sessionId}`,
-        type: "split_role_remove",
-        guild,
-        roleId,
-        memberIds,
-        delayMs: Math.max(0, roleRemoveAt - Date.now()),
-        timers: callWaitRoleRemovalTimers,
-        payload: { sessionId: session.sessionId },
-      }).catch((error) => console.error(`Failed to restore split role removal: ${error.message}`));
-    }
-    restored += 1;
   }
   console.log(`Startup split sessions restored: ${restored}`);
 }
 
 async function scheduleCallWaitFollowupCheck(guild) {
   const actionKey = `callwait-followup:${guild.id}:${createSessionId()}`;
-  const existingTimer = callWaitFollowupTimers.get(actionKey);
-
-  if (existingTimer) {
-    clearTimeout(existingTimer);
-  }
-
   const executeAt = new Date(Date.now() + CALL_WAIT_FOLLOWUP_CHECK_MS);
-  await scheduleAction({
+  const result = await scheduleSingleGuildAction({
     actionKey,
     guildId: guild.id,
     type: "callwait_followup",
     executeAt,
   });
-  const timer = setTimeout(() => {
-    callWaitFollowupTimers.delete(actionKey);
-    void executeCallWaitFollowup({ actionKey, guild }).catch((error) => {
-      console.error(`Failed to run call wait follow-up check: ${error.message}`, error);
-    });
-  }, Math.max(0, executeAt.getTime() - Date.now()));
+  const scheduledAction = result.action;
+  if (!result.scheduled || scheduledAction.status !== "pending") return;
 
-  callWaitFollowupTimers.set(actionKey, timer);
+  const existingTimer = callWaitFollowupTimers.get(scheduledAction.actionKey);
+
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const delayMs = Math.max(0, new Date(scheduledAction.executeAt).getTime() - Date.now());
+  const timer = setTimeout(() => {
+    callWaitFollowupTimers.delete(scheduledAction.actionKey);
+    void executeCallWaitFollowup({ actionKey: scheduledAction.actionKey, guild }).catch((error) => {
+      console.error(`Failed to run call wait follow-up ${scheduledAction.actionKey}: ${error.message}`, error);
+    });
+  }, delayMs);
+
+  callWaitFollowupTimers.set(scheduledAction.actionKey, timer);
 }
 
 async function executeCallWaitFollowup({ actionKey, guild }) {
@@ -4020,7 +6480,28 @@ async function executeCallWaitFollowup({ actionKey, guild }) {
     await runCallWaitFollowupCheck(guild.id);
     await finishAction(actionKey);
   } catch (error) {
-    await failAction(actionKey, error.message).catch(() => {});
+    // A transient Discord or MongoDB outage must not permanently suppress
+    // future scheduled recruitment.  Put the follow-up back in the durable
+    // queue and install a local retry; startup restoration covers restarts.
+    const executeAt = new Date(Date.now() + CALL_WAIT_FOLLOWUP_RETRY_MS);
+    const retried = await retryAction(actionKey, {
+      executeAt,
+      lastError: error.message,
+    }).catch((retryError) => {
+      console.error(`Failed to reschedule call-wait follow-up ${actionKey}: ${retryError.message}`, retryError);
+      return null;
+    });
+    if (retried) {
+      const retryTimer = setTimeout(() => {
+        callWaitFollowupTimers.delete(actionKey);
+        void executeCallWaitFollowup({ actionKey, guild }).catch((retryError) => {
+          console.error(`Failed to retry call-wait follow-up ${actionKey}: ${retryError.message}`, retryError);
+        });
+      }, CALL_WAIT_FOLLOWUP_RETRY_MS);
+      callWaitFollowupTimers.set(actionKey, retryTimer);
+    } else {
+      await failAction(actionKey, error.message).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    }
     throw error;
   }
 }
@@ -4045,7 +6526,7 @@ async function runCallWaitFollowupCheck(guildId) {
   }
 
   // 希望者確認の30分後に行う再確認からも、停止時間中は募集を作らない。
-  if (isKokuchiCallWaitPause(settings, new Date())) {
+  if (await isKokuchiCallWaitPaused(settings, guild.id, new Date())) {
     return;
   }
 
@@ -4087,7 +6568,7 @@ async function sendCallWaitSkippedNotice({ guild, settings, channel, now }) {
   }
 
   const message = await channel.send({
-    content: `複数人が雑談中なので${formatJstHourNumber(getNextHourStart(now))}時の募集は出ません`,
+    content: `現在複数人が雑談中のため、${formatJstTime(getNextJstHalfHour(now))}からの定時募集は行いません。`,
     allowedMentions: { parse: [] },
   }).catch((error) => {
     console.error(`Failed to send skipped call wait notice: ${error.message}`);
@@ -4106,12 +6587,21 @@ async function sendCallWaitSkippedNotice({ guild, settings, channel, now }) {
   });
 }
 
-async function removeCallWaitRoleFromMembers(guild, roleId, memberIds) {
+async function removeCallWaitRoleFromMembers(guild, roleId, memberIds, source = null) {
   const errors = [];
   for (const memberId of memberIds) {
     const member = await guild.members.fetch(memberId).catch(() => null);
 
-    if (!member || !member.roles.cache.has(roleId)) {
+    if (!member) {
+      continue;
+    }
+
+    if (source?.sourceType) {
+      await removeVoiceParticipantRole(member, roleId, source);
+      continue;
+    }
+
+    if (!member.roles.cache.has(roleId)) {
       continue;
     }
 
@@ -4149,47 +6639,20 @@ function getCallWaitActiveVoiceMemberIds(guild, categoryId) {
   return [...memberIds];
 }
 
-function formatCallWaitPrompt(targetAt, mode = CALL_WAIT_MODE_BUTTON, memberIds = []) {
-  const targetHour = formatJstHour(targetAt);
-
-  if (mode === CALL_WAIT_MODE_BUTTON) {
-    return [
-      "【定時募集】",
-      `${formatJstHourNumber(targetAt)}時から雑談したい方は、下のボタンを押してください。`,
-      `${targetHour}時点で複数人が集まっていたらメンションでお知らせします！`,
-      "",
-      `現在の参加予定者数：${normalizeCallWaitMemberIds(memberIds).length}人`,
-    ].join("\n");
-  }
-
+function formatCallWaitPromptV2(targetAt, memberIds = []) {
+  const time = formatJstTime(targetAt);
   return [
-    `${targetHour}から雑談したい方はリアクション ${CALL_WAIT_REACTION} を押してください。`,
-    `複数人希望者が集まったら${targetHour}に参加希望者ロールを付与します。`,
-    "VCに2人以上集まったら、メンションでお知らせします。",
-    "もちろん普通の募集もしてOKです",
+    "【定時募集】",
+    "",
+    `${time}から雑談したい方を募集しています。`,
+    `${time}時点で参加予定者が2人以上集まっていたら、メンションでお知らせします！`,
+    "",
+    `現在の参加予定者数：${normalizeCallWaitMemberIds(memberIds).length}人`,
   ].join("\n");
 }
 
-function getMsUntilNextHour(date) {
-  const next = getNextHourStart(date);
-  return Math.max(1000, next.getTime() - date.getTime());
-}
-
-function getNextHourStart(date) {
-  const next = new Date(date);
-  next.setUTCMinutes(0, 0, 0);
-  next.setUTCHours(next.getUTCHours() + 1);
-  return next;
-}
-
-function formatJstHour(date) {
-  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
-  return `${String(jstDate.getUTCHours()).padStart(2, "0")}:00`;
-}
-
-function formatJstHourNumber(date) {
-  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000);
-  return String(jstDate.getUTCHours());
+function getMsUntilNextHalfHour(date) {
+  return Math.max(1000, getNextJstHalfHour(date).getTime() - date.getTime());
 }
 
 function formatJstTime(date) {
@@ -4774,9 +7237,50 @@ function getOteboVoiceStatusLabel(duration) {
 
 async function restoreOteboRecruitmentTimers() {
   for (const guild of client.guilds.cache.values()) {
+    try {
     const settings = await getGuildSettings(guild.id);
 
     for (const recruitment of Object.values(getOteboRecruitments(settings))) {
+      if (recruitment?.status === "publishing") {
+        const recoveredSettings = await transitionOteboRecruitment({
+          guildId: guild.id,
+          recruitmentId: recruitment.id,
+          fromStatuses: ["publishing"],
+          toStatus: "active",
+          patch: { lastError: "Bot restarted while otebo notice publication was processing" },
+        }).catch((error) => {
+          console.error(`Failed to recover otebo publishing state ${recruitment.id}: ${error.message}`);
+          return null;
+        });
+        const recovered = recoveredSettings && getOteboRecruitment(recoveredSettings, recruitment.id);
+        if (recovered?.status === "active") {
+          scheduleOteboRecruitmentTimers(guild, recovered);
+        }
+        continue;
+      }
+      if (["success_processing", "success_notified", "cleanup_pending"].includes(recruitment?.status)) {
+        const memberIds = normalizeCallWaitMemberIds(
+          recruitment.participantRoleGrantedMemberIds ?? recruitment.memberIds,
+        );
+        if (settings?.callWaitRoleId && memberIds.length) {
+          await scheduleOteboRoleRemoval({
+            guild,
+            roleId: settings.callWaitRoleId,
+            memberIds,
+            recruitmentId: recruitment.id,
+          });
+        }
+        if (recruitment.status !== "cleanup_pending") {
+          await transitionOteboRecruitment({
+            guildId: guild.id,
+            recruitmentId: recruitment.id,
+            fromStatuses: [recruitment.status],
+            toStatus: "cleanup_pending",
+            patch: { lastError: "Bot restarted during otebo success processing; notice replay is disabled" },
+          });
+        }
+        continue;
+      }
       if (recruitment?.status === "active") {
         scheduleOteboRecruitmentTimers(guild, recruitment);
       }
@@ -4791,6 +7295,9 @@ async function restoreOteboRecruitmentTimers() {
     }
 
     await processOteboVoiceStatusSessions(guild, settings);
+    } catch (error) {
+      console.error(`Failed to restore otebo state for guild ${guild.id}: ${error.message}`);
+    }
   }
 }
 
@@ -4877,38 +7384,95 @@ async function processOteboNoticePublish(guildId, recruitmentId) {
     return;
   }
 
-  const noticeChannel = await resolveConfiguredTextChannel(
-    guild,
-    recruitment.noticeChannelId ?? getCallWaitNoticeChannelId(settings),
-  );
-
-  if (!noticeChannel) {
+  const claimedSettings = await transitionOteboRecruitment({
+    guildId: guild.id,
+    recruitmentId,
+    fromStatuses: ["active"],
+    toStatus: "publishing",
+  });
+  if (!claimedSettings) {
+    return;
+  }
+  const claimedRecruitment = getOteboRecruitment(claimedSettings, recruitmentId);
+  if (!claimedRecruitment || claimedRecruitment.status !== "publishing") {
     return;
   }
 
-  await deleteOteboRecruitmentMessage(guild, recruitment);
+  const noticeChannel = await resolveConfiguredTextChannel(
+    guild,
+    claimedRecruitment.noticeChannelId ?? getCallWaitNoticeChannelId(claimedSettings),
+  );
+
+  if (!noticeChannel) {
+    await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId,
+      fromStatuses: ["publishing"],
+      toStatus: "active",
+      patch: { lastError: "Configured otebo notice channel is unavailable" },
+    });
+    return;
+  }
 
   const nextRecruitment = {
-    ...recruitment,
+    ...claimedRecruitment,
     channelId: noticeChannel.id,
     messageId: null,
     noticeChannelId: noticeChannel.id,
     publishedToNotice: true,
+    status: "active",
   };
-  const message = await noticeChannel.send({
-    content: formatOteboRecruitmentMessage(nextRecruitment, settings),
-    components: [createOteboJoinRow(nextRecruitment)],
-    allowedMentions: getOteboRecruitmentAllowedMentions(nextRecruitment, settings),
-  });
+  let message;
+  try {
+    message = await noticeChannel.send({
+      content: formatOteboRecruitmentMessage(nextRecruitment, claimedSettings),
+      components: [createOteboJoinRow(nextRecruitment)],
+      allowedMentions: getOteboRecruitmentAllowedMentions(nextRecruitment, claimedSettings),
+    });
+  } catch (error) {
+    await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId,
+      fromStatuses: ["publishing"],
+      toStatus: "active",
+      patch: { lastError: `Otebo notice send failed: ${error.message}` },
+    }).catch((statusError) => {
+      console.error(`Failed to restore otebo publication state: ${statusError.message}`);
+    });
+    throw error;
+  }
 
   nextRecruitment.messageId = message.id;
 
-  const nextSettings = await saveOteboRecruitmentState(
-    guild.id,
-    settings,
-    nextRecruitment,
-  );
+  let nextSettings;
+  try {
+    nextSettings = await saveOteboRecruitmentState(
+      guild.id,
+      claimedSettings,
+      nextRecruitment,
+    );
+  } catch (error) {
+    await message.edit({
+      content: "【操作できません】\n\n募集の保存に失敗したため、このメッセージは無効です。",
+      components: [],
+    }).catch((editError) => {
+      console.error(`Failed to disable unconfirmed otebo notice: ${editError.message}`);
+    });
+    await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId,
+      fromStatuses: ["publishing"],
+      toStatus: "published_unconfirmed",
+      patch: { lastError: `Otebo notice was sent but persistence failed: ${error.message}` },
+    }).catch((statusError) => {
+      console.error(`Failed to persist otebo published_unconfirmed state: ${statusError.message}`);
+    });
+    throw error;
+  }
 
+  await deleteOteboRecruitmentMessage(guild, recruitment).catch((error) => {
+    console.error(`Failed to delete obsolete otebo preview message: ${error.message}`);
+  });
   scheduleOteboRecruitmentTimers(guild, nextRecruitment);
   await sendOteboApplicantLog({
     guild,
@@ -5061,6 +7625,19 @@ async function processOteboDeadline(guildId, recruitmentId) {
   });
 }
 
+async function releaseOteboSuccessClaim(guild, recruitmentId, error) {
+  const restoredSettings = await transitionOteboRecruitment({
+    guildId: guild.id,
+    recruitmentId,
+    fromStatuses: ["success_processing"],
+    toStatus: "active",
+    patch: { lastError: error?.message ?? String(error) },
+  });
+  const restored = restoredSettings && getOteboRecruitment(restoredSettings, recruitmentId);
+  if (restored?.status === "active") scheduleOteboRecruitmentTimers(guild, restored);
+  return restoredSettings;
+}
+
 async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
   const memberIds = normalizeCallWaitMemberIds(recruitment.memberIds);
 
@@ -5068,45 +7645,116 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
     return false;
   }
 
-  const roleMemberIds = await addTemporaryRoleToMembers({
-    guild,
-    roleId: settings.callWaitRoleId,
-    memberIds,
-    reason: "お手軽募集の集合通知",
-  });
+  const successLease = await acquireMongoLease(`otebo-success:${guild.id}:${recruitment.id}`, { leaseMs: 2 * 60 * 1000 });
+  if (!successLease) return false;
 
-  if (roleMemberIds.length < CALL_WAIT_MIN_MEMBERS) {
-    return false;
-  }
+  try {
+  const claimedSettings = await transitionOteboRecruitment({
+    guildId: guild.id,
+    recruitmentId: recruitment.id,
+    fromStatuses: ["active"],
+    toStatus: "success_processing",
+  });
+  if (!claimedSettings) return false;
+  settings = claimedSettings;
+  recruitment = getOteboRecruitment(claimedSettings, recruitment.id);
+  if (!recruitment || recruitment.status !== "success_processing") return false;
 
   const channel = await resolveConfiguredTextChannel(
     guild,
     getCallWaitNoticeChannelId(settings),
   );
-  const notifiedAt = new Date();
+  if (!channel) {
+    await releaseOteboSuccessClaim(guild, recruitment.id, new Error("Configured otebo success notice channel is unavailable"));
+    return false;
+  }
 
-  if (channel) {
+  const { memberIds: roleMemberIds, grantedMemberIds } = await addTemporaryRoleToMembers({
+    guild,
+    roleId: settings.callWaitRoleId,
+    memberIds,
+    sourceType: "otebo",
+    sourceId: recruitment.id,
+    reason: "お手軽募集の集合通知",
+  });
+
+  if (roleMemberIds.length < CALL_WAIT_MIN_MEMBERS) {
+    await removeTemporaryRoleFromMembers({
+      guild,
+      roleId: settings.callWaitRoleId,
+      memberIds: grantedMemberIds,
+      sourceType: "otebo",
+      sourceId: recruitment.id,
+      reason: "Recruitment could not grant roles to enough members",
+    }).catch((error) => console.error(`Failed to roll back otebo roles: ${error.message}`, error));
+    await releaseOteboSuccessClaim(guild, recruitment.id, new Error("Could not grant the participant role to enough members"));
+    return false;
+  }
+
+  const notifiedAt = new Date();
+  try {
     await channel.send({
       content: formatOteboStartNoticeMessage(settings.callWaitRoleId, recruitment),
       allowedMentions: { roles: [settings.callWaitRoleId] },
-    });
-  }
-
-  try {
-    await scheduleOteboRoleRemoval({
-      guild,
-      roleId: settings.callWaitRoleId,
-      memberIds: roleMemberIds,
-      recruitmentId: recruitment.id,
     });
   } catch (error) {
     await removeTemporaryRoleFromMembers({
       guild,
       roleId: settings.callWaitRoleId,
-      memberIds: roleMemberIds,
+      memberIds: grantedMemberIds,
+      sourceType: "otebo",
+      sourceId: recruitment.id,
+      reason: "Recruitment success notice failed",
+    }).catch((rollbackError) => console.error(`Failed to roll back otebo roles: ${rollbackError.message}`, rollbackError));
+    await releaseOteboSuccessClaim(guild, recruitment.id, error);
+    return false;
+  }
+
+  const notifiedSettings = await transitionOteboRecruitment({
+    guildId: guild.id,
+    recruitmentId: recruitment.id,
+    fromStatuses: ["success_processing"],
+    toStatus: "success_notified",
+    patch: {
+      successNoticeSentAt: notifiedAt.toISOString(),
+      participantRoleGrantedMemberIds: grantedMemberIds,
+      lastError: null,
+    },
+  });
+  if (!notifiedSettings) {
+    // The Discord notice is already visible.  Do not retry it automatically.
+    console.error(`Otebo success notice was sent but its state could not be persisted: ${recruitment.id}`);
+    return false;
+  }
+  settings = notifiedSettings;
+  recruitment = getOteboRecruitment(notifiedSettings, recruitment.id);
+
+  try {
+    if (grantedMemberIds.length) {
+      await scheduleOteboRoleRemoval({
+        guild,
+        roleId: settings.callWaitRoleId,
+        memberIds: grantedMemberIds,
+        recruitmentId: recruitment.id,
+      });
+    }
+  } catch (error) {
+    await removeTemporaryRoleFromMembers({
+      guild,
+      roleId: settings.callWaitRoleId,
+      memberIds: grantedMemberIds,
+      sourceType: "otebo",
+      sourceId: recruitment.id,
       reason: "Persistent role removal schedule failed",
-    }).catch(() => {});
-    throw error;
+    }).catch((rollbackError) => console.error(`Failed to roll back otebo roles: ${rollbackError.message}`, rollbackError));
+    await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId: recruitment.id,
+      fromStatuses: ["success_notified"],
+      toStatus: "failed",
+      patch: { lastError: `Persistent role removal schedule failed: ${error.message}` },
+    }).catch((statusError) => console.error(`Failed to persist otebo failure state: ${statusError.message}`));
+    return false;
   }
   await deleteOteboRecruitmentMessage(guild, recruitment);
   const recruitments = { ...getOteboRecruitments(settings) };
@@ -5123,10 +7771,22 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
     voiceStatusSessions[voiceStatusSession.id] = voiceStatusSession;
   }
 
-  const nextSettings = await saveGuildSettingsWithCurrent(guild.id, settings, {
-    oteboRecruitments: recruitments,
-    oteboVoiceStatusSessions: voiceStatusSessions,
-  });
+  let nextSettings;
+  try {
+    nextSettings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+      oteboRecruitments: recruitments,
+      oteboVoiceStatusSessions: voiceStatusSessions,
+    });
+  } catch (error) {
+    await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId: recruitment.id,
+      fromStatuses: ["success_notified"],
+      toStatus: "cleanup_pending",
+      patch: { lastError: `Otebo completion persistence failed after notification: ${error.message}` },
+    }).catch((statusError) => console.error(`Failed to persist otebo cleanup-pending state: ${statusError.message}`));
+    throw error;
+  }
   clearOteboRecruitmentTimers(guild.id, recruitment.id);
   await sendOteboApplicantLog({
     guild,
@@ -5141,6 +7801,11 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
   }
 
   return true;
+  } finally {
+    await releaseMongoLease(successLease).catch((error) => {
+      console.error(`Failed to release otebo success lease for ${guild.id}:${recruitment.id}: ${error.message}`);
+    });
+  }
 }
 
 async function deleteOteboRecruitmentMessage(guild, recruitment) {
@@ -5150,8 +7815,9 @@ async function deleteOteboRecruitmentMessage(guild, recruitment) {
   });
 }
 
-async function addTemporaryRoleToMembers({ guild, roleId, memberIds, reason }) {
-  const eligibleMemberIds = [];
+async function addTemporaryRoleToMembers({ guild, roleId, memberIds, reason, sourceType = "otebo", sourceId }) {
+  const roleMemberIds = [];
+  const grantedMemberIds = [];
 
   for (const memberId of normalizeCallWaitMemberIds(memberIds)) {
     const member = await guild.members.fetch(memberId).catch(() => null);
@@ -5160,23 +7826,55 @@ async function addTemporaryRoleToMembers({ guild, roleId, memberIds, reason }) {
       continue;
     }
 
-    eligibleMemberIds.push(member.id);
-
     if (member.roles.cache.has(roleId)) {
+      roleMemberIds.push(member.id);
       continue;
     }
 
-    await member.roles.add(roleId, reason).catch((error) => {
+    try {
+      await member.roles.add(roleId, reason);
+      await VoiceParticipantRoleGrant.updateOne(
+        {
+          guildId: guild.id,
+          memberId: member.id,
+          roleId,
+          sourceType,
+          sourceId: sourceId ?? "unknown",
+        },
+        {
+          $set: {
+            grantedByBot: true,
+            grantedAt: new Date(),
+            status: "active",
+            removedAt: null,
+            cleanupAt: null,
+          },
+          $setOnInsert: {
+            guildId: guild.id,
+            memberId: member.id,
+            roleId,
+            sourceType,
+            sourceId: sourceId ?? "unknown",
+          },
+        },
+        { upsert: true },
+      );
+      roleMemberIds.push(member.id);
+      grantedMemberIds.push(member.id);
+    } catch (error) {
+      await member.roles.remove(roleId, "Rollback untracked temporary role").catch((rollbackError) => {
+        console.error(`Failed to roll back temporary role for ${member.id}: ${rollbackError.message}`);
+      });
       console.error(`Failed to add temporary call role to ${member.id}: ${error.message}`);
-    });
+    }
   }
 
-  return eligibleMemberIds;
+  return { memberIds: roleMemberIds, grantedMemberIds };
 }
 
 async function scheduleOteboRoleRemoval({ guild, roleId, memberIds, recruitmentId }) {
   const normalizedIds = normalizeCallWaitMemberIds(memberIds);
-  const actionKey = `otebo-role-remove:${guild.id}:${recruitmentId ?? createSessionId()}:${createSessionId()}`;
+  const actionKey = `otebo-role-remove:${guild.id}:${recruitmentId ?? roleId}`;
   await schedulePersistentRoleRemoval({
     actionKey,
     type: "otebo_role_remove",
@@ -5185,6 +7883,7 @@ async function scheduleOteboRoleRemoval({ guild, roleId, memberIds, recruitmentI
     memberIds: normalizedIds,
     delayMs: OTEBO_ROLE_REMOVE_MS,
     timers: oteboRecruitmentTimers,
+    payload: { sourceType: "otebo", sourceId: recruitmentId ?? "unknown" },
   });
   return;
   const key = getOteboRoleTimerKey(guild.id, roleId, Date.now());
@@ -5203,16 +7902,19 @@ async function scheduleOteboRoleRemoval({ guild, roleId, memberIds, recruitmentI
   oteboRecruitmentTimers.set(key, timer);
 }
 
-async function removeTemporaryRoleFromMembers({ guild, roleId, memberIds, reason }) {
+async function removeTemporaryRoleFromMembers({ guild, roleId, memberIds, reason, sourceType = "otebo", sourceId }) {
   const errors = [];
   for (const memberId of normalizeCallWaitMemberIds(memberIds)) {
     const member = await guild.members.fetch(memberId).catch(() => null);
 
-    if (!member || !member.roles.cache.has(roleId)) {
+    if (!member) {
       continue;
     }
 
-    await member.roles.remove(roleId, reason).catch((error) => {
+    await removeVoiceParticipantRole(member, roleId, {
+      sourceType,
+      sourceId: sourceId ?? "unknown",
+    }).catch((error) => {
       console.error(`Failed to remove temporary role from ${member.id}: ${error.message}`);
       errors.push(error);
     });
@@ -5993,6 +8695,15 @@ async function handleVoiceStateUpdate(oldState, newState) {
 
   if (newState.channelId) {
     changedChannelIds.add(newState.channelId);
+    const waitingSession = await SplitProcessSession.findOne({
+      guildId: guild.id,
+      status: "active",
+      waitingChannelId: newState.channelId,
+      waitingMonitorStatus: { $in: ["active", "extended"] },
+    }).lean().catch(() => null);
+    if (waitingSession && !localWaitingMonitorSessions.has(waitingSession.sessionId)) {
+      startRestoredWaitingMonitor(waitingSession, guild);
+    }
   }
 
   const monitoredChannelIds = [];
@@ -6035,7 +8746,10 @@ async function handleVoiceStateUpdate(oldState, newState) {
     if (!stillInActiveSession) {
       const member = await guild.members.fetch(oldState.member.id).catch(() => null);
       if (member) {
-        await removeVoiceParticipantRole(member, participantRoleId);
+        await removeVoiceParticipantRole(member, participantRoleId, {
+          sourceType: "voice_monitor",
+          sourceId: ignoredSessionKey,
+        });
       }
     }
   }
@@ -6440,7 +9154,7 @@ async function restoreVoiceMonitorSessions() {
 }
 
 async function reconcilePersistedVoiceParticipantRoleGrants(guild, settings) {
-  const grants = await VoiceParticipantRoleGrant.find({ guildId: guild.id }).lean();
+  const grants = await VoiceParticipantRoleGrant.find({ guildId: guild.id, status: { $in: [null, "active", "removing", "failed"] } }).lean();
 
   for (const grant of grants) {
     const member = await guild.members.fetch(grant.memberId).catch(() => null);
@@ -6460,7 +9174,10 @@ async function reconcilePersistedVoiceParticipantRoleGrants(guild, settings) {
       hasActiveVoiceMonitorSession;
 
     if (!shouldKeepGrant) {
-      await removeVoiceParticipantRole(member, grant.roleId);
+      await removeVoiceParticipantRole(member, grant.roleId, {
+        sourceType: grant.sourceType,
+        sourceId: grant.sourceId,
+      });
     }
   }
 }
@@ -6561,14 +9278,31 @@ async function ensureSessionMembersHaveRole(session, voiceChannel, members) {
         await member.roles.add(role, "VC参加者ロールを付与");
         try {
           await VoiceParticipantRoleGrant.updateOne(
-            { guildId: voiceChannel.guild.id, memberId: member.id, roleId: role.id },
-            { $setOnInsert: { guildId: voiceChannel.guild.id, memberId: member.id, roleId: role.id } },
+            {
+              guildId: voiceChannel.guild.id,
+              memberId: member.id,
+              roleId: role.id,
+              sourceType: "voice_monitor",
+              sourceId: getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId),
+            },
+            {
+              $set: {
+                sourceType: "voice_monitor",
+                sourceId: getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId),
+                grantedByBot: true,
+                grantedAt: new Date(),
+                status: "active",
+                removedAt: null,
+                cleanupAt: null,
+              },
+              $setOnInsert: { guildId: voiceChannel.guild.id, memberId: member.id, roleId: role.id },
+            },
             { upsert: true },
           );
         } catch (error) {
           // A grant without a durable ownership record cannot be reconciled
           // after a restart, so roll it back instead of leaving it untracked.
-          await member.roles.remove(role, "VC参加者ロール記録の保存失敗に伴うロール解除").catch(() => {});
+          await member.roles.remove(role, "VC参加者ロール記録の保存失敗に伴うロール解除").catch((error) => logRecoverableError(`Failed to roll back participant role for ${member.id}`, error));
           console.error(`Failed to persist voice participant role grant for ${member.id}: ${error.message}`);
         }
       } catch (error) {
@@ -6617,7 +9351,10 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
         continue;
       }
 
-      await removeVoiceParticipantRole(member, participantRoleId);
+      await removeVoiceParticipantRole(member, participantRoleId, {
+        sourceType: "voice_monitor",
+        sourceId: sessionKey,
+      });
     }
   }
 
@@ -6720,14 +9457,63 @@ const parentChannelId = settings?.voiceReminderParentChannelId;
     components: [],
   });
 
+  const autoSplitLockKey = `auto-split:${guild.id}:${voiceChannel.id}`;
+  if (autoSplitLocks.has(autoSplitLockKey)) {
+    await interaction.editReply({ content: "このVCでは、すでに自動分割を処理中です。", components: [] });
+    return;
+  }
+  autoSplitLocks.add(autoSplitLockKey);
+  const autoSplitLease = await acquireMongoLease(autoSplitLockKey, { leaseMs: 5 * 60 * 1000 })
+    .catch((error) => {
+      autoSplitLocks.delete(autoSplitLockKey);
+      throw error;
+    });
+  if (!autoSplitLease) {
+    autoSplitLocks.delete(autoSplitLockKey);
+    await interaction.editReply({ content: "このVCでは、別のBotプロセスが自動分割を処理中です。", components: [] });
+    return;
+  }
+
+  try {
   const [stayGroup, moveGroup] = splitIntoTwoRandomGroups(members);
+  const roleGrantSourceId = `auto-split:${createSessionId()}`;
 
   const transferResult = await transferMembersToPbChildChannel(moveGroup, {
+    guild,
     parentChannel,
     childCategoryId: settings.childCategoryId,
     participantRole,
     sourceChannelId: voiceChannel.id,
+    roleGrantSourceId,
   });
+
+  if (transferResult.participantRoleGrantedMemberIds.length > 0) {
+    try {
+      await schedulePersistentRoleRemoval({
+        actionKey: `auto-split-role-remove:${guild.id}:${roleGrantSourceId}`,
+        type: "auto_split_role_remove",
+        guild,
+        roleId: participantRole.id,
+        memberIds: transferResult.participantRoleGrantedMemberIds,
+        delayMs: minutesToMs(getNonNegativeInteger(
+          settings?.roleRemoveWaitMinutes,
+          DEFAULT_ROLE_REMOVE_WAIT_MINUTES,
+        )),
+        timers: callWaitRoleRemovalTimers,
+        payload: { sourceType: "auto_split", sourceId: roleGrantSourceId },
+      });
+    } catch (error) {
+      await removeCallWaitRoleFromMembers(
+        guild,
+        participantRole.id,
+        transferResult.participantRoleGrantedMemberIds,
+        { sourceType: "auto_split", sourceId: roleGrantSourceId },
+      ).catch((rollbackError) => {
+        console.error(`Failed to roll back auto-split participant roles: ${rollbackError.message}`);
+      });
+      throw error;
+    }
+  }
 
   const moved = moveGroup.length - transferResult.failed.length;
   const roleFailedText = transferResult.roleFailures.length
@@ -6745,6 +9531,12 @@ ${transferResult.childChannel ? `<#${transferResult.childChannel.id}>` : "PB子V
 
   autoSplitSuggestionMessages.delete(channelId);
   await clearAutoSplitSuggestion(interaction.guildId, channelId);
+  } finally {
+    autoSplitLocks.delete(autoSplitLockKey);
+    await releaseMongoLease(autoSplitLease).catch((error) => {
+      console.error(`Failed to release auto-split lease for ${autoSplitLockKey}: ${error.message}`);
+    });
+  }
 }
 
 function splitIntoTwoRandomGroups(members) {
@@ -6760,9 +9552,89 @@ async function transferMembersToPbChildChannel(members, config) {
   const failures = [];
   const roleFailures = [];
   const participantMemberIds = new Set();
+  const participantRoleGrantedMemberIds = new Set();
+
+  const addRoleForTransfer = async (member) => {
+    if (member.roles.cache.has(config.participantRole.id)) {
+      participantMemberIds.add(member.id);
+      return null;
+    }
+
+    try {
+      await member.roles.add(config.participantRole, "Participant role for automatic voice grouping");
+      try {
+        await VoiceParticipantRoleGrant.updateOne(
+          {
+            guildId: config.guild.id,
+            memberId: member.id,
+            roleId: config.participantRole.id,
+            sourceType: "auto_split",
+            sourceId: config.roleGrantSourceId,
+          },
+          {
+            $set: {
+              grantedByBot: true,
+              grantedAt: new Date(),
+              status: "active",
+              removedAt: null,
+              cleanupAt: null,
+            },
+            $setOnInsert: {
+              guildId: config.guild.id,
+              memberId: member.id,
+              roleId: config.participantRole.id,
+              sourceType: "auto_split",
+              sourceId: config.roleGrantSourceId,
+            },
+          },
+          { upsert: true },
+        );
+      } catch (error) {
+        await member.roles.remove(config.participantRole, "Rollback untracked automatic grouping role").catch((rollbackError) => {
+          console.error(`Failed to roll back untracked automatic grouping role for ${member.id}: ${rollbackError.message}`);
+        });
+        throw error;
+      }
+      participantMemberIds.add(member.id);
+      participantRoleGrantedMemberIds.add(member.id);
+      return null;
+    } catch (error) {
+      console.error(`Failed to add automatic grouping role to ${member.id}: ${error.message}`);
+      return member.displayName;
+    }
+  };
+
+  const waitForPbChildChannel = async (member) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < PB_CHILD_WAIT_MS) {
+      const channel = member.voice.channel;
+      const expectedCategoryId = config.childCategoryId ?? config.parentChannel.parentId;
+      if (
+        channel?.isVoiceBased?.()
+        && channel.id !== config.parentChannel.id
+        && channel.id !== config.sourceChannelId
+        && (!expectedCategoryId || channel.parentId === expectedCategoryId)
+      ) {
+        return channel;
+      }
+      await sleep(750);
+    }
+    return null;
+  };
+
+  const rollbackGrantedRoles = async () => Promise.all(
+    [...participantRoleGrantedMemberIds].map(async (memberId) => {
+      const member = await config.guild.members.fetch(memberId).catch(() => null);
+      if (!member) return;
+      await removeVoiceParticipantRole(member, config.participantRole.id, {
+        sourceType: "auto_split",
+        sourceId: config.roleGrantSourceId,
+      });
+    }),
+  );
 
   if (members.length === 0) {
-    return { childChannel: null, failed: [], roleFailures };
+    return { childChannel: null, failed: [], roleFailures, participantRoleGrantedMemberIds: [] };
   }
 
   const seedMember = members[0];
@@ -6778,22 +9650,17 @@ async function transferMembersToPbChildChannel(members, config) {
 
   const seedRoleFailure = await addRoleForTransfer(
     seedMember,
-    config.participantRole,
-    participantMemberIds,
   );
 
   if (seedRoleFailure) {
     roleFailures.push(seedRoleFailure);
   }
 
-  const childChannel = await waitForPbChildChannel(seedMember, {
-    parentChannel: config.parentChannel,
-    sourceChannelId: config.sourceChannelId,
-    childCategoryId: config.childCategoryId,
-  });
+  const childChannel = await waitForPbChildChannel(seedMember);
 
   if (!childChannel) {
-    return { childChannel: null, failed: [seedMember.displayName], roleFailures };
+    await rollbackGrantedRoles();
+    return { childChannel: null, failed: [seedMember.displayName], roleFailures, participantRoleGrantedMemberIds: [] };
   }
 
   let movedCount = failures.length === 0 ? 1 : 0;
@@ -6806,8 +9673,6 @@ async function transferMembersToPbChildChannel(members, config) {
       );
       const roleFailure = await addRoleForTransfer(
         member,
-        config.participantRole,
-        participantMemberIds,
       );
 
       if (roleFailure) {
@@ -6825,6 +9690,7 @@ async function transferMembersToPbChildChannel(members, config) {
     failed: failures,
     roleFailures,
     participantMemberIds: [...participantMemberIds],
+    participantRoleGrantedMemberIds: [...participantRoleGrantedMemberIds],
   };
 }
 
@@ -6908,15 +9774,17 @@ async function handleTopicFormModal(interaction) {
   });
 }
 
-async function removeVoiceParticipantRole(member, roleId) {
-  const grant = await VoiceParticipantRoleGrant.exists({
+async function removeVoiceParticipantRole(member, roleId, source = null) {
+  const activeGrantStatuses = [null, "active", "removing", "failed"];
+  const ownershipFilter = {
     guildId: member.guild.id,
     memberId: member.id,
     roleId,
-  }).catch((error) => {
-    console.error(`Failed to look up voice participant role grant for ${member.id}: ${error.message}`);
-    return null;
-  });
+    status: { $in: activeGrantStatuses },
+    ...(source?.sourceType ? { sourceType: source.sourceType } : {}),
+    ...(source?.sourceId != null ? { sourceId: source.sourceId } : {}),
+  };
+  const grant = await VoiceParticipantRoleGrant.exists(ownershipFilter);
 
   // Only revoke a role that this bot recorded as its own grant.  The same
   // role may also be assigned manually or by another feature.
@@ -6924,31 +9792,61 @@ async function removeVoiceParticipantRole(member, roleId) {
     return;
   }
 
-  if (!member.roles.cache.has(roleId)) {
-    await VoiceParticipantRoleGrant.deleteOne({
+  const marked = await VoiceParticipantRoleGrant.updateMany(ownershipFilter, {
+    $set: {
+      status: "removing",
+      removedAt: null,
+      cleanupAt: null,
+    },
+  });
+  if (!marked || marked.matchedCount < 1) return;
+
+  const otherActiveGrant = source?.sourceType
+    ? await VoiceParticipantRoleGrant.exists({
       guildId: member.guild.id,
       memberId: member.id,
       roleId,
-    }).catch((error) => {
-      console.error(`Failed to clear voice participant role grant for ${member.id}: ${error.message}`);
-    });
+      status: { $in: activeGrantStatuses },
+      $nor: [{
+        sourceType: source.sourceType,
+        ...(source.sourceId != null ? { sourceId: source.sourceId } : {}),
+      }],
+    })
+    : false;
+
+  const markRemoved = async () => {
+    const removedAt = new Date();
+    await VoiceParticipantRoleGrant.updateMany(
+      { ...ownershipFilter, status: "removing" },
+      {
+        $set: {
+          status: "removed",
+          removedAt,
+          cleanupAt: new Date(removedAt.getTime() + 30 * 24 * 60 * 60 * 1000),
+        },
+      },
+    );
+  };
+
+  if (otherActiveGrant || !member.roles.cache.has(roleId)) {
+    await markRemoved();
     return;
   }
 
   try {
     await member.roles.remove(roleId, "VC離脱に伴う参加者ロール解除");
   } catch (error) {
-    console.error(`Failed to remove voice participant role from ${member.id}: ${error.message}`);
-    return;
+    await VoiceParticipantRoleGrant.updateMany(
+      {
+        ...ownershipFilter,
+        status: "removing",
+      },
+      { $set: { status: "failed", cleanupAt: null } },
+    );
+    throw error;
   }
 
-  await VoiceParticipantRoleGrant.deleteOne({
-    guildId: member.guild.id,
-    memberId: member.id,
-    roleId,
-  }).catch((error) => {
-    console.error(`Failed to clear voice participant role grant for ${member.id}: ${error.message}`);
-  });
+  await markRemoved();
 }
 
 function scheduleBumpReminder(reminder) {
@@ -7004,13 +9902,18 @@ async function handleSplitVoice(interaction) {
     return;
   }
 
-  const botMember = await interaction.guild.members.fetch(interaction.client.user.id);
+  interaction = await deferCommandResponse(
+    interaction,
+    privateResult ? MessageFlags.Ephemeral : undefined,
+  );
+
+  const botMember = interaction.guild.members.me
+    ?? await interaction.guild.members.fetch(interaction.client.user.id);
   const sourcePermissions = sourceChannel.permissionsFor(botMember);
 
   if (!sourcePermissions?.has(PermissionsBitField.Flags.ViewChannel)) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "Botが対象のボイスチャンネルを見る権限を持っていません。",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -7024,11 +9927,37 @@ async function handleSplitVoice(interaction) {
   }
 
   splitVoiceGuildLocks.add(interaction.guildId);
-  const releaseSplitVoiceLock = () => splitVoiceGuildLocks.delete(interaction.guildId);
+  const splitLease = await acquireMongoLease(`splitvc:${interaction.guildId}`, {
+    leaseMs: 5 * 60 * 1000,
+  }).catch((error) => {
+    splitVoiceGuildLocks.delete(interaction.guildId);
+    throw error;
+  });
+  if (!splitLease) {
+    splitVoiceGuildLocks.delete(interaction.guildId);
+    await interaction.reply({
+      content: "このサーバーでは、別のBotプロセスが /splitvc を処理中です。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  activeSplitVoiceLeases.set(interaction.guildId, splitLease);
+  let splitLeaseReleased = false;
+  const releaseSplitVoiceLock = () => {
+    splitVoiceGuildLocks.delete(interaction.guildId);
+    if (splitLeaseReleased) return;
+    splitLeaseReleased = true;
+    if (activeSplitVoiceLeases.get(interaction.guildId) === splitLease) {
+      activeSplitVoiceLeases.delete(interaction.guildId);
+    }
+    void releaseMongoLease(splitLease).catch((error) => {
+      console.error(`Failed to release splitvc lease for ${interaction.guildId}: ${error.message}`);
+    });
+  };
 
   const activeSplitSession = await SplitProcessSession.exists({
     guildId: interaction.guildId,
-    status: "active",
+    status: { $in: ["active", "finish_notice_pending", "feedback_open", "role_remove_pending", "cleaning_up"] },
   });
   if (activeSplitSession) {
     releaseSplitVoiceLock();
@@ -7069,9 +9998,8 @@ async function handleSplitVoice(interaction) {
 
   if (targetMembers.length === 0) {
     releaseSplitVoiceLock();
-    await interaction.reply({
+    await interaction.editReply({
       content: `${sourceChannel} に対象メンバーがいません。`,
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -7144,24 +10072,18 @@ async function handleSplitVoice(interaction) {
     ].join("\n"),
   });
 
-  const transferCanceled = await runCountdown({
-    channel: operationChannel,
-    ownerId: interaction.user.id,
-    totalMs: transferWaitMs,
-    updateEveryMs: COUNTDOWN_UPDATE_MS,
-    buttonLabel: "転送キャンセル",
-    cancelText: "転送はキャンセルされました。終了通知の待機は続行します。",
-    render: (remainingMs) =>
-      `PB親チャンネルへの転送開始まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
-  });
-
   const childChannelIds = new Set();
   const participantMemberIds = new Set();
+  const participantRoleGrantedMemberIds = new Set();
   const processState = { ended: false };
   let temporaryWaitingVc = null;
   let temporaryWaitingVcDeleteTimer = null;
   let splitStartMessage = null;
+  const transferAt = new Date(Date.now() + transferWaitMs);
 
+  // Persist the intent before displaying the cancellable countdown.  A
+  // restart during this window can now restore or cancel the same session
+  // instead of losing the planned transfer entirely.
   await persistSplitProcessSession(splitSessionId, {
     guildId: interaction.guildId,
     ownerId: interaction.user.id,
@@ -7172,8 +10094,20 @@ async function handleSplitVoice(interaction) {
     participantRoleId: config.tempRole.id,
     phase: "transfer_waiting",
     status: "active",
-    transferAt: new Date(Date.now() + transferWaitMs),
+    transferAt,
+    plannedMemberIds: targetMembers.map((member) => member.id),
     finishMessage: settings?.finishMessage || DEFAULT_FINISH_MESSAGE,
+  });
+
+  const transferCanceled = await runCountdown({
+    channel: operationChannel,
+    ownerId: interaction.user.id,
+    totalMs: transferWaitMs,
+    updateEveryMs: COUNTDOWN_UPDATE_MS,
+    buttonLabel: "転送キャンセル",
+    cancelText: "転送はキャンセルされました。終了通知の待機は続行します。",
+    render: (remainingMs) =>
+      `PB親チャンネルへの転送開始まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
   });
 
   if (transferCanceled) {
@@ -7195,6 +10129,64 @@ async function handleSplitVoice(interaction) {
     });
     addMany(childChannelIds, transferResult.childChannelIds);
     addMany(participantMemberIds, transferResult.participantMemberIds);
+    addMany(participantRoleGrantedMemberIds, transferResult.participantRoleGrantedMemberIds);
+
+    if (transferResult.groupSummaries.length === 0) {
+      const cleanupErrors = [];
+      const source = await interaction.guild.channels.fetch(sourceChannel.id).catch((error) => {
+        cleanupErrors.push(`source VC lookup: ${error.message}`);
+        return null;
+      });
+      for (const memberId of participantMemberIds) {
+        try {
+          const member = await interaction.guild.members.fetch(memberId);
+          if (source?.isVoiceBased?.() && member.voice.channelId !== source.id) {
+            await member.voice.setChannel(source, "Rollback splitvc after every group transfer failed");
+          }
+        } catch (error) {
+          cleanupErrors.push(`member ${memberId} rollback: ${error.message}`);
+        }
+      }
+      try {
+        const roleRemoval = await removeRoleFromMembers(
+          interaction.guild,
+          config.tempRole.id,
+          [...participantRoleGrantedMemberIds],
+          { sourceType: "splitvc", sourceId: splitSessionId },
+        );
+        if (roleRemoval.failed > 0) {
+          cleanupErrors.push(`participant role rollback failed for ${roleRemoval.failed} member(s)`);
+        }
+      } catch (error) {
+        cleanupErrors.push(`participant role rollback: ${error.message}`);
+      }
+      for (const channelId of childChannelIds) {
+        try {
+          const channel = await interaction.guild.channels.fetch(channelId);
+          await channel.delete("Remove empty splitvc child after all transfers failed");
+        } catch (error) {
+          cleanupErrors.push(`child VC ${channelId} cleanup: ${error.message}`);
+        }
+      }
+      const lastError = cleanupErrors.length > 0
+        ? `No group was transferred successfully. Cleanup required: ${cleanupErrors.join(" | ")}`
+        : "No group was transferred successfully.";
+      await persistSplitProcessSession(splitSessionId, {
+        status: cleanupErrors.length > 0 ? "cleanup_required" : "failed",
+        phase: "failed",
+        completedAt: new Date(),
+        lastError,
+      });
+      releaseSplitVoiceLock();
+      await operationChannel.send("グループ転送に成功したグループがないため、処理を終了しました。参加者ロールと作成済みVCは回収しました。");
+      await sendOperationalLog({
+        guild: interaction.guild,
+        settings,
+        fallbackChannel: operationChannel,
+        content: `splitvcを失敗として終了しました。セッション: ${splitSessionId}。${lastError}`,
+      });
+      return;
+    }
 
     if (transferResult.groupSummaries.length > 0) {
       try {
@@ -7226,8 +10218,13 @@ async function handleSplitVoice(interaction) {
         phase: "active",
         status: "active",
         participantMemberIds: [...participantMemberIds],
+        participantRoleGrantedMemberIds: [...participantRoleGrantedMemberIds],
         childChannelIds: [...childChannelIds],
-        groupSnapshots: transferResult.groupSummaries.map((summary, index) => ({ groupNumber: index + 1, memberIds: summary.memberIds })),
+        groupSnapshots: transferResult.groupSummaries.map((summary, index) => ({
+          groupNumber: summary.groupNumber ?? index + 1,
+          channelId: summary.channelId,
+          memberIds: summary.memberIds,
+        })),
         conversationStartedAt: new Date(),
         finishNoticeAt,
         roleRemoveAt,
@@ -7242,10 +10239,17 @@ async function handleSplitVoice(interaction) {
         payload: { sessionId: splitSessionId, channelId: operationChannel.id, finishMessage: settings?.finishMessage || DEFAULT_FINISH_MESSAGE },
       });
     } catch (error) {
-      await removeRoleFromMembers(interaction.guild, config.tempRole.id, [...participantMemberIds]).catch(() => {});
+      await removeRoleFromMembers(
+        interaction.guild,
+        config.tempRole.id,
+        [...participantRoleGrantedMemberIds],
+        { sourceType: "splitvc", sourceId: splitSessionId },
+      ).catch((rollbackError) => {
+        console.error(`Failed to roll back splitvc participant roles: ${rollbackError.message}`);
+      });
       for (const channelId of childChannelIds) {
         const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
-        await channel?.delete().catch(() => {});
+        await channel?.delete().catch((cleanupError) => logRecoverableError(`Failed to delete rolled-back splitvc child ${channelId}`, cleanupError));
       }
       throw error;
     }
@@ -7309,9 +10313,12 @@ async function handleSplitVoice(interaction) {
       });
       await persistSplitProcessSession(splitSessionId, {
         waitingChannelId: temporaryWaitingVc.id,
+        waitingMonitorStatus: "active",
+        waitingMonitorStartedAt: new Date(),
         splitStartMessageChannelId: splitStartMessage?.channel?.id ?? operationChannel.id,
         splitStartMessageId: splitStartMessage?.id,
         waitingMonitorEndsAt: new Date(Date.now() + WAITING_ROOM_MONITOR_MS),
+        waitingMonitorHeartbeatAt: new Date(),
         finishNoticeAt: new Date(Date.now() + noticeWaitMs),
         phase: "active",
       });
@@ -7326,6 +10333,10 @@ async function handleSplitVoice(interaction) {
       temporaryWaitingVcDeleteTimer = setTimeout(async () => {
 
         try {
+          const session = await SplitProcessSession.findOne({ sessionId: splitSessionId }).lean().catch(() => null);
+          if (session?.status === "active" && ["active", "extended"].includes(session.waitingMonitorStatus)) {
+            return;
+          }
 
           const fetchedChannel =
             await operationChannel.guild.channels.fetch(
@@ -7380,10 +10391,11 @@ async function handleSplitVoice(interaction) {
         childCategoryId: config.childCategoryId,
         childChannelIds,
         participantMemberIds,
+        participantRoleGrantedMemberIds,
         state: processState,
         settings,
         previousPairKeys: getPairKeysFromGroups(previousGroups),
-        groupingSessionId: splitSessionId,
+        splitSessionId,
         currentGroupMembers: new Map(
           transferResult.groupSummaries.map((summary) => [summary.channelId, new Set(summary.memberIds)]),
         ),
@@ -7399,12 +10411,13 @@ async function handleSplitVoice(interaction) {
       ownerId: interaction.user.id,
       roleId: config.tempRole.id,
       memberIds: participantMemberIds,
+      roleGrantedMemberIds: participantRoleGrantedMemberIds,
       finishMessage: settings?.finishMessage || DEFAULT_FINISH_MESSAGE,
       noticeWaitMs,
       roleRemoveWaitMs,
       childChannelIds,
       state: processState,
-      sessionId: splitSessionId,
+      splitSessionId,
       temporaryWaitingVc,
       temporaryWaitingVcDeleteTimer,
       splitStartMessage,
@@ -7550,7 +10563,9 @@ async function handleBosyuButton(interaction) {
     return;
   }
 
-  const session = bosyuEditSessions.get(interaction.message.id) ?? await getBosyuEditSession(interaction.message.id);
+  // A modal is the initial interaction response.  Do not wait for MongoDB
+  // here; startup restoration populates the short-lived edit-session cache.
+  const session = bosyuEditSessions.get(interaction.message.id);
 
   if (!session || Date.now() > session.expiresAt) {
     await replyOrFollowUp(interaction, {
@@ -7892,60 +10907,65 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     };
   }
 
-  async function addRoleToMembers(members, role) {
-    const failed = [];
-
-    for (const member of members) {
-      try {
-        await member.roles.add(role, "Participant role for voice grouping session");
-      } catch {
-        failed.push(member.displayName);
-      }
-    }
-
-    return { failed };
-  }
-
-    async function addRoleForTransfer(member, role, participantMemberIds) {
-      if (member.roles.cache.has(role.id)) {
-        participantMemberIds.add(member.id);
-        return null;
-    }
-
-    try {
-      await member.roles.add(role, "Participant role for voice grouping session");
-      participantMemberIds.add(member.id);
-      return null;
-    } catch {
-      return member.displayName;
-    }
-  }
-
   async function moveMemberWithParticipantRole(
     member,
     targetChannel,
     reason,
     participantRole,
     participantMemberIds,
+    participantRoleGrantedMemberIds = null,
   ) {
     const alreadyHasRole = member.roles.cache.has(participantRole.id);
-    let roleFailure = null;
-
     if (!alreadyHasRole) {
       try {
         await member.roles.add(
           participantRole,
           "Participant role for voice grouping session",
         );
-      } catch {
-        roleFailure = member.displayName;
+        await VoiceParticipantRoleGrant.updateOne(
+          {
+            guildId: member.guild.id,
+            memberId: member.id,
+            roleId: participantRole.id,
+            sourceType: "splitvc",
+            sourceId: splitSessionId,
+          },
+          {
+            $set: {
+              sourceType: "splitvc",
+              sourceId: splitSessionId,
+              grantedByBot: true,
+              grantedAt: new Date(),
+              status: "active",
+              removedAt: null,
+              cleanupAt: null,
+            },
+            $setOnInsert: {
+              guildId: member.guild.id,
+              memberId: member.id,
+              roleId: participantRole.id,
+            },
+          },
+          { upsert: true },
+        );
+        participantRoleGrantedMemberIds?.add(member.id);
+      } catch (error) {
+        await member.roles.remove(
+          participantRole,
+          "Rollback untracked participant role grant",
+        ).catch((rollbackError) => {
+          console.error(`Failed to rollback participant role for ${member.id}: ${rollbackError.message}`);
+        });
+        participantRoleGrantedMemberIds?.delete(member.id);
+        console.error(`Failed to persist split participant role grant for ${member.id}: ${error.message}`);
+        return { moved: false, reason: "role_grant_failed", memberName: member.displayName };
       }
     }
 
     try {
       await member.voice.setChannel(targetChannel, reason);
     } catch (error) {
-      if (!alreadyHasRole && !roleFailure) {
+      if (!alreadyHasRole) {
         await member.roles.remove(
           participantRole,
           "Revert participant role because voice transfer failed",
@@ -7954,21 +10974,33 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
             `Failed to revert participant role for ${member.id}: ${rollbackError.message}`,
           );
         });
+        await VoiceParticipantRoleGrant.updateOne(
+          {
+            guildId: member.guild.id,
+            memberId: member.id,
+            roleId: participantRole.id,
+            sourceType: "splitvc",
+            sourceId: splitSessionId,
+            status: "active",
+          },
+          { $set: { status: "removed", removedAt: new Date(), cleanupAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } },
+        ).catch((rollbackError) => {
+          console.error(`Failed to record split participant role rollback for ${member.id}: ${rollbackError.message}`);
+        });
+        participantRoleGrantedMemberIds?.delete(member.id);
       }
       throw error;
     }
 
-    if (!roleFailure) {
-      participantMemberIds.add(member.id);
-    }
-
-    return roleFailure;
+    participantMemberIds.add(member.id);
+    return { moved: true, reason: null, memberName: member.displayName, roleGranted: !alreadyHasRole };
   }
 
   async function transferGroups(groups, config) {
     const lines = [];
     const childChannelIds = new Set();
     const participantMemberIds = new Set();
+    const participantRoleGrantedMemberIds = new Set();
     const groupSummaries = [];
 
     for (const [index, group] of groups.entries()) {
@@ -7982,21 +11014,36 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
       try {
         const roleFailures = [];
-        const seedRoleFailure = await moveMemberWithParticipantRole(
+        const seedHadParticipantRole = seedMember.roles.cache.has(config.participantRole.id);
+        const seedTransfer = await moveMemberWithParticipantRole(
           seedMember,
           config.parentChannel,
           "Move one group member to PB parent channel",
           config.participantRole,
           participantMemberIds,
+          participantRoleGrantedMemberIds,
         );
 
-        if (seedRoleFailure) {
-          roleFailures.push(seedRoleFailure);
+        if (!seedTransfer.moved) {
+          lines.push(`グループ ${groupNumber}: ${seedTransfer.memberName} の参加者ロール付与に失敗しました。`);
+          continue;
         }
 
         const childChannel = await waitForPbChildChannel(seedMember, config);
 
         if (!childChannel) {
+          const sourceChannel = await config.guild.channels.fetch(config.sourceChannelId).catch(() => null);
+          if (sourceChannel?.isVoiceBased?.()) await seedMember.voice.setChannel(sourceChannel, "Rollback PB child channel creation failure").catch((error) => logRecoverableError(`Failed to return ${seedMember.id} to the source VC`, error));
+          if (!seedHadParticipantRole) {
+            await removeVoiceParticipantRole(seedMember, config.participantRole.id, {
+              sourceType: "splitvc",
+              sourceId: splitSessionId,
+            }).catch((rollbackError) => {
+              console.error(`Failed to roll back split participant role for ${seedMember.id}: ${rollbackError.message}`);
+            });
+            participantMemberIds.delete(seedMember.id);
+            participantRoleGrantedMemberIds.delete(seedMember.id);
+          }
           lines.push(`グループ ${groupNumber}: PBの子VCを検出できませんでした。`);
           continue;
         }
@@ -8018,16 +11065,19 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           }
 
           try {
-            const roleFailure = await moveMemberWithParticipantRole(
+            const transfer = await moveMemberWithParticipantRole(
               member,
               childChannel,
               "Move remaining group members to PB child channel",
               config.participantRole,
               participantMemberIds,
+              participantRoleGrantedMemberIds,
             );
 
-            if (roleFailure) {
-              roleFailures.push(roleFailure);
+            if (!transfer.moved) {
+              roleFailures.push(transfer.memberName);
+              failed.push(member.displayName);
+              continue;
             }
 
             movedCount += 1;
@@ -8064,6 +11114,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       childChannelIds: [...childChannelIds],
       groupSummaries,
       participantMemberIds: [...participantMemberIds],
+      participantRoleGrantedMemberIds: [...participantRoleGrantedMemberIds],
     };
   }
 
@@ -8104,6 +11155,19 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   }
 
   async function runWaitingRoomMonitor(options) {
+    localWaitingMonitorSessions.add(options.splitSessionId);
+    clearRestoredWaitingMonitor(options.splitSessionId);
+    try {
+    const initialLease = await claimWaitingMonitorLease(options.splitSessionId);
+    if (!initialLease) {
+      localWaitingMonitorSessions.delete(options.splitSessionId);
+      return;
+    }
+    await persistSplitProcessSession(options.splitSessionId, {
+      waitingMonitorStatus: "active",
+      waitingMonitorStartedAt: new Date(),
+      waitingMonitorHeartbeatAt: new Date(),
+    }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     await sendOperationalLog({
       guild: options.guild,
       settings: options.settings,
@@ -8114,13 +11178,36 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     const endsAt = Date.now() + WAITING_ROOM_MONITOR_MS;
 
     while (Date.now() < endsAt && !options.state.ended) {
-      await processWaitingRoom(options);
+      try {
+        if (!await claimWaitingMonitorLease(options.splitSessionId)) {
+          options.state.ended = true;
+          break;
+        }
+        await processWaitingRoom(options);
+        await persistSplitProcessSession(options.splitSessionId, {
+          waitingMonitorHeartbeatAt: new Date(),
+          waitingMonitorFailureCount: 0,
+        });
+      } catch (error) {
+        await recordWaitingMonitorFailure(options.splitSessionId, error).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+        await sendOperationalLog({ guild: options.guild, settings: options.settings, fallbackChannel: options.channel, content: `途中参加監視でエラーが発生しました: ${error?.message ?? error}` }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      }
       await sleep(WAITING_ROOM_POLL_MS);
+    }
+
+    if (options.state.ended) {
+      localWaitingMonitorSessions.delete(options.splitSessionId);
+      return;
     }
 
     const shouldExtendMonitoring = await shouldKeepWaitingRoomAlive(options);
 
     if (shouldExtendMonitoring) {
+      await persistSplitProcessSession(options.splitSessionId, {
+        waitingMonitorStatus: "extended",
+        waitingMonitorExtendedAt: new Date(),
+        waitingMonitorHeartbeatAt: new Date(),
+      }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
       await sendOperationalLog({
         guild: options.guild,
         settings: options.settings,
@@ -8129,17 +11216,73 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       });
 
       while (!options.state.ended && (await shouldKeepWaitingRoomAlive(options))) {
-        await processWaitingRoom(options);
+        try {
+          if (!await claimWaitingMonitorLease(options.splitSessionId)) {
+            options.state.ended = true;
+            break;
+          }
+          await processWaitingRoom(options);
+          await persistSplitProcessSession(options.splitSessionId, { waitingMonitorHeartbeatAt: new Date(), waitingMonitorFailureCount: 0 });
+        } catch (error) {
+          await recordWaitingMonitorFailure(options.splitSessionId, error).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+          await sendOperationalLog({ guild: options.guild, settings: options.settings, fallbackChannel: options.channel, content: `延長中の途中参加監視でエラーが発生しました: ${error?.message ?? error}` }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+        }
         await sleep(WAITING_ROOM_POLL_MS);
       }
     }
 
     if (!options.state.ended) {
+      const closing = await SplitProcessSession.findOneAndUpdate(
+        {
+          sessionId: options.splitSessionId,
+          status: "active",
+          waitingMonitorStatus: { $in: ["active", "extended"] },
+          waitingMonitorLeaseOwner: waitingMonitorLeaseOwner,
+        },
+        { $set: { waitingMonitorStatus: "closing" }, $unset: { waitingMonitorLeaseOwner: 1, waitingMonitorLeaseUntil: 1 } },
+        { returnDocument: "after", lean: true },
+      ).catch(() => null);
+      if (closing) {
+        await notifyWaitingVcClosure(options.channel, options.waitingChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+        try {
+          await options.waitingChannel.delete();
+        } catch (error) {
+          await SplitProcessSession.updateOne(
+            { sessionId: options.splitSessionId, waitingMonitorStatus: "closing" },
+            {
+              $set: {
+                waitingMonitorStatus: "failed",
+                waitingVcCleanupCompleted: false,
+                lastError: `Waiting VC cleanup failed: ${error?.message ?? error}`,
+              },
+            },
+          );
+          await sendOperationalLog({
+            guild: options.guild,
+            settings: options.settings,
+            fallbackChannel: options.channel,
+            content: `途中参加監視終了時の待機VC削除に失敗しました: ${error?.message ?? error}`,
+          }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+          return;
+        }
+        await persistSplitProcessSession(options.splitSessionId, {
+          waitingMonitorStatus: "closed",
+          waitingMonitorClosedAt: new Date(),
+          waitingVcCleanupCompleted: true,
+        }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      }
       await sendOperationalLog({
         guild: options.guild,
         settings: options.settings,
         fallbackChannel: options.channel,
         content: "途中参加監視を終了しました。",
+      });
+    }
+    localWaitingMonitorSessions.delete(options.splitSessionId);
+    } finally {
+      localWaitingMonitorSessions.delete(options.splitSessionId);
+      await releaseWaitingMonitorLease(options.splitSessionId).catch((error) => {
+        console.error(`Failed to release waiting monitor lease for ${options.splitSessionId}: ${error.message}`);
       });
     }
   }
@@ -8151,21 +11294,22 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       return;
     }
 
-    const underfilledChildChannel = await findUnderfilledChildChannel(
-      options.guild,
-      options.childChannelIds,
-      waitingMembers[0].id,
-      options.previousPairKeys,
-      options.currentGroupMembers,
-    );
-
-    if (underfilledChildChannel) {
-      const member = waitingMembers[0];
-      const currentMembers = options.currentGroupMembers.get(underfilledChildChannel.id) ??
-        [...underfilledChildChannel.members.values()]
-          .filter((voiceMember) => !voiceMember.user.bot)
-          .map((voiceMember) => voiceMember.id);
-      const repeatedPairCount = currentMembers.reduce(
+    let movedToExistingGroup = false;
+    for (const member of waitingMembers) {
+      const underfilledChildChannel = await findUnderfilledChildChannel(
+        options.guild,
+        options.childChannelIds,
+        member.id,
+        options.previousPairKeys,
+        options.currentGroupMembers,
+      );
+      if (!underfilledChildChannel) break;
+      const currentMemberIds = toCurrentGroupMemberIds(
+        options.currentGroupMembers,
+        underfilledChildChannel.id,
+        underfilledChildChannel,
+      );
+      const repeatedPairCount = currentMemberIds.reduce(
         (count, currentMemberId) =>
           count + (options.previousPairKeys.has(createPairKey(member.id, currentMemberId)) ? 1 : 0),
         0,
@@ -8173,37 +11317,46 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       await sendSplitGroupingLog({
         guild: options.guild,
         settings: options.settings,
-        content: `[splitvc-history] waiting placement guild=${options.guild.id} session=${options.groupingSessionId} user=${member.id} channel=${underfilledChildChannel.id} process=existing-group repeatedPairCount=${repeatedPairCount} memberCount=${currentMembers.length}`,
+        content: `[splitvc-history] waiting placement guild=${options.guild.id} session=${options.splitSessionId} user=${member.id} channel=${underfilledChildChannel.id} process=existing-group repeatedPairCount=${repeatedPairCount} memberCount=${currentMemberIds.length}`,
       });
-      let roleFailure = null;
       try {
-        roleFailure = await moveMemberToChildChannel(
+        const transfer = await moveMemberToChildChannel(
           member,
           underfilledChildChannel,
           options.participantRole,
           options.participantMemberIds,
+          options.participantRoleGrantedMemberIds,
         );
-        await persistWaitingGroupMembers(options, underfilledChildChannel.id, [member.id], "existing-group");
+        if (!transfer.moved) {
+          throw new Error(`Participant role grant failed for ${transfer.memberName}`);
+        }
+        const persistence = await persistWaitingGroupMembers(
+          options,
+          underfilledChildChannel.id,
+          [member.id],
+          "existing-group",
+          transfer.roleGranted ? [member.id] : [],
+        );
+        if (!persistence.persisted) continue;
       } catch (error) {
+        waitingMemberRetryAfter.set(`${options.guild.id}:${member.id}`, Date.now() + 15_000);
         await sendSplitGroupingLog({
           guild: options.guild,
           settings: options.settings,
-          content: `[splitvc-history] waiting transfer failed guild=${options.guild.id} session=${options.groupingSessionId} user=${member.id} channel=${underfilledChildChannel.id} process=existing-group error=${error.name ?? "Error"}: ${error.message ?? error}`,
+          content: `[splitvc-history] waiting transfer failed guild=${options.guild.id} session=${options.splitSessionId} user=${member.id} channel=${underfilledChildChannel.id} process=existing-group error=${error.name ?? "Error"}: ${error.message ?? error}`,
         });
-        return;
+        continue;
       }
-      const roleFailureText = roleFailure
-        ? ` 参加者ロール付与失敗: ${roleFailure}`
-        : "";
-
       await sendOperationalLog({
         guild: options.guild,
         settings: options.settings,
         fallbackChannel: options.channel,
-        content: `途中参加: ${member.displayName} を ${underfilledChildChannel.name} へ転送しました。${roleFailureText}`,
+        content: `途中参加: ${member.displayName} を ${underfilledChildChannel.name} へ転送しました。`,
       });
-      return;
+      movedToExistingGroup = true;
     }
+
+    if (movedToExistingGroup) return;
 
     if (waitingMembers.length >= 3) {
       const newGroupMembers = chooseBestMemberSubset(
@@ -8214,7 +11367,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       await sendSplitGroupingLog({
         guild: options.guild,
         settings: options.settings,
-        content: `[splitvc-history] waiting placement guild=${options.guild.id} session=${options.groupingSessionId} users=${newGroupMembers.map((member) => member.id).join(",")} process=new-group repeatedPairCount=${countRepeatedPairs([newGroupMembers], options.previousPairKeys)} candidateCount=100`,
+        content: `[splitvc-history] waiting placement guild=${options.guild.id} session=${options.splitSessionId} users=${newGroupMembers.map((member) => member.id).join(",")} process=new-group repeatedPairCount=${countRepeatedPairs([newGroupMembers], options.previousPairKeys)} candidateCount=100`,
       });
       const result = await transferWaitingGroupToNewChild(newGroupMembers, {
         parentChannel: options.parentChannel,
@@ -8222,6 +11375,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         sourceChannelId: options.waitingChannel.id,
         childCategoryId: options.childCategoryId,
         participantMemberIds: options.participantMemberIds,
+        participantRoleGrantedMemberIds: options.participantRoleGrantedMemberIds,
         guild: options.guild,
         settings: options.settings,
       });
@@ -8229,12 +11383,14 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       if (result.childChannelId) {
         options.childChannelIds.add(result.childChannelId);
         options.currentGroupMembers.set(result.childChannelId, new Set(result.movedMemberIds));
-        await persistWaitingGroupMembers(
+        const persistence = await persistWaitingGroupMembers(
           options,
           result.childChannelId,
           result.movedMemberIds,
           "new-group",
+          result.newlyGrantedRoleMemberIds,
         );
+        if (!persistence.persisted) return;
       }
 
       await sendOperationalLog({
@@ -8249,6 +11405,10 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   function getWaitingMembers(waitingChannel) {
     return [...waitingChannel.members.values()]
       .filter((member) => !member.user.bot)
+      .filter((member) => {
+        const retryAt = waitingMemberRetryAfter.get(`${waitingChannel.guild.id}:${member.id}`);
+        return !retryAt || retryAt <= Date.now();
+      })
       .sort((left, right) =>
         left.displayName.localeCompare(right.displayName, "ja"),
       );
@@ -8278,7 +11438,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         (member) => !member.user.bot,
       ).length;
 
-      if (memberCount <= 3) {
+      if (memberCount < 3) {
         candidates.push({
           channel,
           memberIds: currentGroupMembers?.get(channel.id)
@@ -8313,6 +11473,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     childChannel,
     participantRole,
     participantMemberIds,
+    participantRoleGrantedMemberIds,
   ) {
     return moveMemberWithParticipantRole(
       member,
@@ -8320,6 +11481,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "Move waiting participant to PB child channel",
       participantRole,
       participantMemberIds,
+      participantRoleGrantedMemberIds,
     );
   }
 
@@ -8329,21 +11491,38 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
     try {
       const roleFailures = [];
-      const seedRoleFailure = await moveMemberWithParticipantRole(
+      const seedHadParticipantRole = seedMember.roles.cache.has(config.participantRole.id);
+      const seedTransfer = await moveMemberWithParticipantRole(
         seedMember,
         config.parentChannel,
         "Move waiting group seed to PB parent channel",
         config.participantRole,
         config.participantMemberIds,
+        config.participantRoleGrantedMemberIds,
       );
 
-      if (seedRoleFailure) {
-        roleFailures.push(seedRoleFailure);
+      if (!seedTransfer.moved) {
+        return {
+          childChannelId: null,
+          lines: [`${seedTransfer.memberName} の参加者ロール付与に失敗しました。`],
+        };
       }
 
       const childChannel = await waitForPbChildChannel(seedMember, config);
 
       if (!childChannel) {
+        const sourceChannel = await config.guild.channels.fetch(config.sourceChannelId).catch(() => null);
+        if (sourceChannel?.isVoiceBased?.()) await seedMember.voice.setChannel(sourceChannel, "Rollback waiting PB child channel creation failure").catch((error) => logRecoverableError(`Failed to return ${seedMember.id} to the source VC`, error));
+        if (!seedHadParticipantRole) {
+          await removeVoiceParticipantRole(seedMember, config.participantRole.id, {
+            sourceType: "splitvc",
+            sourceId: splitSessionId,
+          }).catch((rollbackError) => {
+            console.error(`Failed to roll back waiting split participant role for ${seedMember.id}: ${rollbackError.message}`);
+          });
+          config.participantMemberIds.delete(seedMember.id);
+          config.participantRoleGrantedMemberIds?.delete(seedMember.id);
+        }
         return {
           childChannelId: null,
           lines: ["PBの子VCを検出できませんでした。"],
@@ -8358,24 +11537,29 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
       let movedCount = 1;
       const movedMemberIds = [seedMember.id];
+      const newlyGrantedRoleMemberIds = seedTransfer.roleGranted ? [seedMember.id] : [];
       const failed = [];
 
       for (const member of members.slice(1)) {
         try {
-          const roleFailure = await moveMemberWithParticipantRole(
+          const transfer = await moveMemberWithParticipantRole(
             member,
             childChannel,
             "Move waiting group members to PB child channel",
             config.participantRole,
             config.participantMemberIds,
+            config.participantRoleGrantedMemberIds,
           );
 
-          if (roleFailure) {
-            roleFailures.push(roleFailure);
+          if (!transfer.moved) {
+            roleFailures.push(transfer.memberName);
+            failed.push(member.displayName);
+            continue;
           }
 
           movedCount += 1;
           movedMemberIds.push(member.id);
+          if (transfer.roleGranted) newlyGrantedRoleMemberIds.push(member.id);
         } catch {
           failed.push(member.displayName);
         }
@@ -8394,6 +11578,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       return {
         childChannelId: childChannel.id,
         movedMemberIds,
+        newlyGrantedRoleMemberIds,
         lines,
       };
     } catch (error) {
@@ -8405,43 +11590,46 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   }
 
   async function closeSplitWithoutFeedback(options, reason) {
-    const finishActionKey = `split-finish-notice:${options.sessionId}`;
+    const finishActionKey = `split-finish-notice:${options.splitSessionId}`;
     const finishClaimed = await claimAction(finishActionKey);
     if (finishClaimed) {
       await finishAction(finishActionKey, "completed", "Feedback window canceled");
     }
-    const actionKey = `split-role-remove:${options.sessionId}`;
+    const actionKey = `split-role-remove:${options.splitSessionId}`;
     const claimed = await claimAction(actionKey);
-    const members = await collectRoleCleanupMemberIds(options.guild, options.roleId);
-    const result = await removeRoleFromMembers(options.guild, options.roleId, members);
+    const members = normalizeCallWaitMemberIds(options.roleGrantedMemberIds);
+    const result = await removeRoleFromMembers(options.guild, options.roleId, members, {
+      sourceType: "splitvc",
+      sourceId: options.splitSessionId,
+    });
     if (result.failed) {
-      if (claimed) await failAction(actionKey, `Failed to remove role from ${result.failed} member(s)`).catch(() => {});
-      await persistSplitProcessSession(options.sessionId, { status: "role_remove_pending", phase: "role_remove_pending", roleRemovalCompleted: false, lastError: `Failed to remove role from ${result.failed} member(s)` });
+      if (claimed) await failAction(actionKey, `Failed to remove role from ${result.failed} member(s)`).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      await persistSplitProcessSession(options.splitSessionId, { status: "role_remove_pending", phase: "role_remove_pending", roleRemovalCompleted: false, lastError: `Failed to remove role from ${result.failed} member(s)` });
       throw new Error(`Failed to remove role from ${result.failed} member(s)`);
     }
     if (claimed) await finishAction(actionKey);
     if (options.temporaryWaitingVcDeleteTimer) clearTimeout(options.temporaryWaitingVcDeleteTimer);
     const waiting = options.temporaryWaitingVc && await options.guild.channels.fetch(options.temporaryWaitingVc.id).catch(() => null);
     if (waiting) {
-      await notifyWaitingVcClosure(options.channel, waiting).catch(() => {});
-      await waiting.delete().catch(() => {});
-      await editSplitStartAnnouncementClosed(options.splitStartMessage).catch(() => {});
+      await notifyWaitingVcClosure(options.channel, waiting).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      await waiting.delete().catch((error) => logRecoverableError("Failed to delete temporary waiting VC", error));
+      await editSplitStartAnnouncementClosed(options.splitStartMessage).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     }
-    await persistSplitProcessSession(options.sessionId, { status: "canceled", phase: "canceled", roleRemovalCompleted: true, waitingVcCleanupCompleted: true, reviewAggregationEligible: false, completedAt: new Date(), lastError: reason });
+    await persistSplitProcessSession(options.splitSessionId, { status: "canceled", phase: "canceled", roleRemovalCompleted: true, waitingVcCleanupCompleted: true, reviewAggregationEligible: false, completedAt: new Date(), lastError: reason });
     options.state.ended = true;
   }
 
   async function sendClaimedSplitFinishNotice(options) {
-    const actionKey = `split-finish-notice:${options.sessionId}`;
+    const actionKey = `split-finish-notice:${options.splitSessionId}`;
     const claimed = await claimAction(actionKey);
     if (!claimed) return false;
     try {
-      const session = await SplitProcessSession.findOne({ sessionId: options.sessionId }).lean();
+      const session = await SplitProcessSession.findOne({ sessionId: options.splitSessionId }).lean();
       if (session && !session.finishNoticeSent) await sendSplitFinishNotice({ guild: options.guild, session, channelId: options.channel.id });
       await finishAction(actionKey);
       return true;
     } catch (error) {
-      await failAction(actionKey, error.message).catch(() => {});
+      await failAction(actionKey, error.message).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
       throw error;
     }
   }
@@ -8458,7 +11646,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       options.state.ended = true;
       return;
     }
-    const session = await SplitProcessSession.findOne({ sessionId: options.sessionId }).lean();
+    const session = await SplitProcessSession.findOne({ sessionId: options.splitSessionId }).lean();
     const conversationStarted = Boolean(session?.conversationStartedAt && (session.groupSnapshots ?? []).some((group) => group.memberIds?.length));
     if (notificationCanceled === "auto" && conversationStarted) {
       await sendClaimedSplitFinishNotice(options);
@@ -8468,9 +11656,9 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           ? await options.guild.channels.fetch(options.temporaryWaitingVc.id).catch(() => null)
           : null;
         if (waiting) {
-          await notifyWaitingVcClosure(options.channel, waiting).catch(() => {});
+          await notifyWaitingVcClosure(options.channel, waiting).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
           await waiting.delete();
-          await editSplitStartAnnouncementClosed(options.splitStartMessage).catch(() => {});
+          await editSplitStartAnnouncementClosed(options.splitStartMessage).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
         }
       } catch (error) {
         await sendOperationalLog({
@@ -8478,7 +11666,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
           settings: options.settings,
           fallbackChannel: options.channel,
           content: `早期終了時の待機VC削除に失敗しました: ${error.message}`,
-        }).catch(() => {});
+        }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
       }
       options.state.ended = true;
       return;
@@ -8486,7 +11674,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     await closeSplitWithoutFeedback(options, notificationCanceled === "auto" ? "All child channels disappeared before conversation started" : "Finish notification canceled manually");
   }
 
-  async function persistWaitingGroupMembers(options, channelId, memberIds, processName) {
+  async function persistWaitingGroupMembers(options, channelId, memberIds, processName, newlyGrantedRoleMemberIds = []) {
     const groupMembers = options.currentGroupMembers.get(channelId) ?? new Set();
     for (const memberId of memberIds) {
       groupMembers.add(memberId);
@@ -8494,62 +11682,117 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     options.currentGroupMembers.set(channelId, groupMembers);
 
     try {
-      await addMembersToCurrentGroup({
-        guildId: options.guild.id,
-        sessionId: options.groupingSessionId,
-        channelId,
-        memberIds,
-      });
-      await persistSplitParticipantMemberIds(
-        options.sessionId,
-        options.participantMemberIds,
-      );
-      const session = await SplitProcessSession.findOne({ sessionId: options.sessionId }).lean();
-      const groupIndex = (session?.childChannelIds ?? []).indexOf(channelId);
-      if (groupIndex >= 0) {
-        await SplitProcessSession.updateOne({ sessionId: options.sessionId }, { $addToSet: { [`groupSnapshots.${groupIndex}.memberIds`]: { $each: memberIds } } });
+      const session = await SplitProcessSession.findOne({ sessionId: options.splitSessionId }).lean();
+      const existingGroupIndex = (session?.groupSnapshots ?? []).findIndex((group) => group.channelId === channelId);
+      const groupNumber = existingGroupIndex >= 0
+        ? session.groupSnapshots[existingGroupIndex].groupNumber
+        : (session?.groupSnapshots?.length ?? 0) + 1;
+      const update = {
+        $addToSet: {
+          childChannelIds: channelId,
+          participantMemberIds: { $each: memberIds },
+          participantRoleGrantedMemberIds: { $each: newlyGrantedRoleMemberIds },
+        },
+        $set: {
+          waitingMonitorHeartbeatAt: new Date(),
+          waitingMonitorFailureCount: 0,
+        },
+      };
+      if (existingGroupIndex >= 0) {
+        update.$addToSet[`groupSnapshots.${existingGroupIndex}.memberIds`] = { $each: memberIds };
+      } else {
+        update.$push = {
+          groupSnapshots: { groupNumber, channelId, memberIds },
+        };
       }
+      const persisted = await SplitProcessSession.updateOne(
+        {
+          sessionId: options.splitSessionId,
+          status: "active",
+          waitingMonitorStatus: { $in: ["active", "extended"] },
+        },
+        update,
+      );
+      if (persisted.matchedCount !== 1 || persisted.modifiedCount !== 1) {
+        const error = new Error("Split waiting-session persistence did not update the active session.");
+        error.persistenceReason = persisted.matchedCount !== 1 ? "session_not_found" : "persistence_not_modified";
+        throw error;
+      }
+      return { persisted: true, groupCreated: existingGroupIndex < 0 };
     } catch (error) {
+      const rollbackErrors = [];
+      for (const memberId of memberIds) {
+        try {
+          const member = await options.guild.members.fetch(memberId);
+          if (member.voice.channelId === channelId && options.waitingChannel?.isVoiceBased?.()) {
+            await member.voice.setChannel(options.waitingChannel, "Rollback waiting transfer after persistence failure");
+          }
+          if (newlyGrantedRoleMemberIds.includes(memberId) && options.participantRole?.id) {
+            await removeVoiceParticipantRole(member, options.participantRole.id, {
+              sourceType: "splitvc",
+              sourceId: options.splitSessionId,
+            });
+            options.participantRoleGrantedMemberIds?.delete(memberId);
+          }
+          options.participantMemberIds?.delete(memberId);
+          groupMembers.delete(memberId);
+        } catch (rollbackError) {
+          rollbackErrors.push(`${memberId}: ${rollbackError.message}`);
+        }
+      }
+      if (processName === "new-group") {
+        options.childChannelIds?.delete(channelId);
+        options.currentGroupMembers.delete(channelId);
+        try {
+          const childChannel = await options.guild.channels.fetch(channelId);
+          await childChannel?.delete("Rollback split waiting child after persistence failure");
+        } catch (rollbackError) {
+          rollbackErrors.push(`child channel ${channelId}: ${rollbackError.message}`);
+        }
+      }
+      const statePatch = {
+        status: rollbackErrors.length ? "cleanup_required" : "failed",
+        phase: rollbackErrors.length ? "cleanup_required" : "failed",
+        lastError: `Waiting transfer persistence failed: ${error.message}${rollbackErrors.length ? `; rollback failures: ${rollbackErrors.join(" | ")}` : ""}`,
+      };
+      const marked = await SplitProcessSession.updateOne(
+        { sessionId: options.splitSessionId },
+        { $set: statePatch },
+      ).catch((stateError) => {
+        console.error(`Failed to mark split waiting persistence failure: ${stateError.message}`);
+        return null;
+      });
+      if (!marked || marked.matchedCount !== 1) {
+        console.error(`Split waiting persistence failure state could not be confirmed for ${options.splitSessionId}`);
+      }
       await sendSplitGroupingLog({
         guild: options.guild,
         settings: options.settings,
-        content: `[splitvc-history] current update failed guild=${options.guild.id} session=${options.groupingSessionId} users=${memberIds.join(",")} channel=${channelId} process=${processName} error=${error.name ?? "Error"}: ${error.message ?? error}`,
+        content: `[splitvc-history] current update failed guild=${options.guild.id} session=${options.splitSessionId} users=${memberIds.join(",")} channel=${channelId} process=${processName} error=${error.name ?? "Error"}: ${error.message ?? error}`,
       });
+      return {
+        persisted: false,
+        reason: error.persistenceReason ?? "persistence_failed",
+      };
     }
   }
 
-  async function removeRoleFromMembers(guild, roleId, memberIds) {
+  async function removeRoleFromMembers(guild, roleId, memberIds, source) {
     let removed = 0;
     let failed = 0;
 
     for (const memberId of memberIds) {
       try {
         const member = await guild.members.fetch(memberId);
-
-        if (member.roles.cache.has(roleId)) {
-          await member.roles.remove(roleId, "Remove participant voice grouping role");
-          removed += 1;
-        }
-      } catch {
+        await removeVoiceParticipantRole(member, roleId, source);
+        removed += 1;
+      } catch (error) {
+        console.error(`Failed to remove split participant role from ${memberId}: ${error.message}`);
         failed += 1;
       }
     }
 
     return { removed, failed };
-  }
-
-  async function collectRoleCleanupMemberIds(guild, roleId) {
-    const memberIds = new Set();
-    await guild.members.fetch().catch(() => null);
-    const role =
-      guild.roles.cache.get(roleId) ??
-      (await guild.roles.fetch(roleId).catch(() => null));
-
-    for (const member of role?.members.values() ?? []) {
-      memberIds.add(member.id);
-    }
-
-    return memberIds;
   }
 
   async function areAllChannelsGone(guild, channelIds) {
@@ -8708,6 +11951,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "【おすすめ話題・案内】",
       `/kokuchi告知・スタート案内送信先: ${getKokuchiAnnouncementChannelId(settings) ? `<#${getKokuchiAnnouncementChannelId(settings)}>` : "未設定"}`,
       `集合VC: ${settings.gatheringVoiceChannelId ? `<#${settings.gatheringVoiceChannelId}>` : "未設定"}`,
+      `20:55集合通知メンションロール: ${Array.isArray(settings.kokuchiGatheringReminderRoleIds) && settings.kokuchiGatheringReminderRoleIds.length > 0 ? settings.kokuchiGatheringReminderRoleIds.map((roleId) => `<@&${roleId}>`).join(" ") : "未設定"}`,
       `終了後意見・苦情チャンネル: ${settings.splitFeedbackChannelId ? `<#${settings.splitFeedbackChannelId}>` : `<#${DEFAULT_SPLIT_FEEDBACK_CHANNEL_ID}>`}`,
       "",
       "【意見・相談フォーム】",
@@ -8812,10 +12056,11 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     const chunks = splitMessage(content);
     const [firstChunk, ...restChunks] = chunks;
 
-    await interaction.reply({
-      ...options,
-      content: firstChunk,
-    });
+    if (interaction.deferred) {
+      await interaction.editReply({ content: firstChunk, allowedMentions: options.allowedMentions, components: options.components });
+    } else {
+      await interaction.reply({ ...options, content: firstChunk });
+    }
 
     for (const chunk of restChunks) {
       await interaction.followUp({
@@ -8852,10 +12097,27 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       payload = { content: String(payload ?? ""), flags: MessageFlags.Ephemeral };
     }
 
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(payload).catch(() => null);
-    } else {
-      await interaction.reply(payload).catch(() => null);
+    try {
+      if (interaction.deferred && !interaction.__initialResponseSent) {
+        await interaction.editReply(payload);
+        interaction.__initialResponseSent = true;
+      } else if (interaction.replied || interaction.deferred) {
+        await interaction.followUp(payload);
+      } else {
+        await interaction.reply(payload);
+      }
+    } catch (error) {
+      console.error("Interaction response failed", {
+        guildId: interaction.guildId ?? null,
+        channelId: interaction.channelId ?? null,
+        userId: interaction.user?.id ?? null,
+        interactionId: interaction.id ?? null,
+        commandName: interaction.commandName ?? interaction.customId ?? null,
+        deferred: Boolean(interaction.deferred),
+        replied: Boolean(interaction.replied),
+        discordErrorCode: error?.code ?? null,
+        error: error?.stack ?? error?.message ?? String(error),
+      });
     }
   }
 
@@ -8949,15 +12211,21 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       const path = request.url?.split("?")[0] ?? "/";
 
       if (request.method === "GET" && (path === "/" || path === "/health")) {
+        const discordReady = client.isReady();
+        const mongoReady = mongoose.connection.readyState === 1;
+        const ok = discordReady && mongoReady && startupRestoreCompleted && !startupRestoreFailed && !shuttingDown;
         const body = JSON.stringify({
-          ok: true,
-          ready: client.isReady(),
+          ok,
+          discordReady,
+          mongoReady,
+          startupRestoreCompleted,
+          shuttingDown,
           bot: client.user?.tag ?? null,
           uptimeSeconds: Math.round(process.uptime()),
           startedAt: startedAt.toISOString(),
         });
 
-        response.writeHead(200, {
+        response.writeHead(ok ? 200 : 503, {
           "cache-control": "no-store",
           "content-type": "application/json; charset=utf-8",
         });
@@ -9146,6 +12414,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
     try {
       await connectToMongoDB();
+      await ensureCoreMongoIndexes();
       shouldSendMongoSuccessLog = true;
     } catch (error) {
       console.error("Failed to connect to MongoDB Atlas.", error);
@@ -9177,5 +12446,95 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
     await loginDiscordClient();
   }
+
+  async function ensureCoreMongoIndexes() {
+    // A partial unique index was added after the first deployment.  Normalize
+    // old duplicate active follow-ups before creating it so startup remains
+    // deterministic instead of failing partway through a recruitment cycle.
+    const activeFollowups = await ScheduledAction.find({
+      type: "callwait_followup",
+      status: { $in: ["pending", "running"] },
+    }).sort({ guildId: 1, executeAt: 1, createdAt: 1, _id: 1 }).lean();
+    const staleIds = [];
+    const seenGuildIds = new Set();
+    for (const action of activeFollowups) {
+      if (seenGuildIds.has(action.guildId)) staleIds.push(action._id);
+      else seenGuildIds.add(action.guildId);
+    }
+    if (staleIds.length > 0) {
+      const result = await ScheduledAction.updateMany(
+        { _id: { $in: staleIds }, status: { $in: ["pending", "running"] } },
+        {
+          $set: {
+            status: "failed",
+            lastError: "Superseded by the startup migration enforcing one active call-wait follow-up per guild",
+          },
+        },
+      );
+      if (result.modifiedCount !== staleIds.length) {
+        throw new Error("Could not normalize duplicate active call-wait follow-up actions before index creation.");
+      }
+      console.warn(`Marked ${staleIds.length} duplicate active call-wait follow-up action(s) as failed during index migration.`);
+    }
+    await Promise.all([
+      ensureVoiceParticipantRoleGrantIndexes(),
+      ScheduledAction.createIndexes(),
+      CallWaitInterest.createIndexes(),
+      KokuchiReservation.createIndexes(),
+      MongoLeaseLock.createIndexes(),
+      SplitProcessSession.createIndexes(),
+      SplitReview.createIndexes(),
+      SplitReviewDraft.createIndexes(),
+    ]);
+  }
+
+  async function gracefulShutdown({ signal, exitCode }) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Graceful shutdown started${signal ? ` (${signal})` : ""}.`);
+
+    if (callWaitTimer) clearTimeout(callWaitTimer);
+    if (discordReadyWatchdog) clearTimeout(discordReadyWatchdog);
+    for (const timers of [
+      bumpReminderTimers,
+      callWaitRoleRemovalTimers,
+      callWaitFollowupTimers,
+      gatheringVcUnlockTimers,
+      kokuchiPreNoticeTimers,
+      kokuchiGatheringReminderTimers,
+      kokuchiReservationTimers,
+      oteboRecruitmentTimers,
+      restoredWaitingMonitorTimers,
+    ]) {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    }
+
+    // Claimed scheduled actions are intentionally left durable.  Startup
+    // recovery returns running actions to pending, so interrupting a process
+    // cannot erase a follow-up or role-removal workflow.
+    try {
+      client.destroy();
+    } catch (error) {
+      console.error("Failed to destroy Discord client during shutdown:", error);
+    }
+    try {
+      await disconnectFromMongoDB();
+    } catch (error) {
+      console.error("Failed to close MongoDB during shutdown:", error);
+    }
+    if (Number.isInteger(exitCode)) process.exit(exitCode);
+  }
+
+  process.once("SIGTERM", () => { void gracefulShutdown({ signal: "SIGTERM", exitCode: 0 }); });
+  process.once("SIGINT", () => { void gracefulShutdown({ signal: "SIGINT", exitCode: 0 }); });
+  process.once("unhandledRejection", (reason) => {
+    console.error("Unhandled promise rejection:", reason);
+    void gracefulShutdown({ signal: "unhandledRejection", exitCode: 1 });
+  });
+  process.once("uncaughtException", (error) => {
+    console.error("Uncaught exception:", error);
+    void gracefulShutdown({ signal: "uncaughtException", exitCode: 1 });
+  });
 
   await startBot();

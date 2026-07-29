@@ -19,6 +19,19 @@ const schema = new mongoose.Schema(
 );
 
 schema.index({ status: 1, executeAt: 1 });
+// At most one pending/running follow-up is allowed per guild.  Completed
+// actions remain as history, while a later successful recruitment can create
+// the next follow-up action.
+schema.index(
+  { guildId: 1, type: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      type: "callwait_followup",
+      status: { $in: ["pending", "running"] },
+    },
+  },
+);
 schema.index({ completedAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60, partialFilterExpression: { status: "completed" } });
 
 export const ScheduledAction = mongoose.models.ScheduledAction ?? mongoose.model("ScheduledAction", schema);

@@ -10,6 +10,50 @@ export async function scheduleAction(action) {
   );
 }
 
+/**
+ * Schedule a single durable action for a guild/type pair.  A pending action
+ * is moved to the new time; a running one is left alone because its owner is
+ * already evaluating the same follow-up.  The partial unique index makes the
+ * create branch safe across bot processes.
+ */
+export async function scheduleSingleGuildAction(action) {
+  if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is required to schedule persistent actions.");
+
+  const pending = await ScheduledAction.findOneAndUpdate(
+    { guildId: action.guildId, type: action.type, status: "pending" },
+    { $set: { executeAt: action.executeAt, payload: action.payload ?? {} } },
+    { returnDocument: "after", lean: true },
+  );
+  if (pending) return { action: pending, scheduled: true };
+
+  const running = await ScheduledAction.findOne({
+    guildId: action.guildId,
+    type: action.type,
+    status: "running",
+  }).lean();
+  if (running) return { action: running, scheduled: false };
+
+  try {
+    const created = await ScheduledAction.create({
+      ...action,
+      status: "pending",
+      attempts: 0,
+    });
+    return { action: created.toObject(), scheduled: true };
+  } catch (error) {
+    // A competing process may have created the partial-unique action between
+    // the query and create.  Re-read it instead of creating a second timer.
+    if (error?.code !== 11000) throw error;
+    const existing = await ScheduledAction.findOne({
+      guildId: action.guildId,
+      type: action.type,
+      status: { $in: ["pending", "running"] },
+    }).lean();
+    if (!existing) throw error;
+    return { action: existing, scheduled: existing.status === "pending" };
+  }
+}
+
 export async function reschedulePendingAction(actionKey, executeAt) {
   if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is required to reschedule persistent actions.");
   return ScheduledAction.findOneAndUpdate(
@@ -42,6 +86,23 @@ export async function failAction(actionKey, lastError) {
   return ScheduledAction.findOneAndUpdate(
     { actionKey, status: { $in: ["pending", "running"] } },
     { $set: { status: "failed", lastError } },
+    { returnDocument: "after", lean: true },
+  );
+}
+
+/**
+ * Return a claimed action to the durable queue after a transient failure.
+ * Keeping it pending, rather than failed, lets startup restoration and the
+ * caller's retry timer continue the workflow after a Discord/Mongo outage.
+ */
+export async function retryAction(actionKey, { executeAt, lastError }) {
+  if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is required to retry persistent actions.");
+  return ScheduledAction.findOneAndUpdate(
+    { actionKey, status: "running" },
+    {
+      $set: { status: "pending", executeAt, lastError },
+      $unset: { startedAt: 1 },
+    },
     { returnDocument: "after", lean: true },
   );
 }

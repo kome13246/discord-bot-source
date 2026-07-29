@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { commands } from "../src/commands.js";
 import { SplitReview } from "../src/models/split-review.js";
 import { SplitReviewDraft } from "../src/models/split-review-draft.js";
+import { SplitProcessSession } from "../src/models/split-process-session.js";
 
 test("感想コマンドと送信先オプションが登録されている", () => {
   const show = commands.find((command) => command.name === "show");
@@ -29,9 +30,9 @@ test("感想の表示ラベルは質問ごとに分離され、未知の値は�
   assert.match(source, /const TALK_AMOUNT_LABELS = \{/);
   assert.match(source, /const DURATION_FEELING_LABELS = \{/);
   assert.match(source, /const PRACTICE_EFFECT_LABELS = \{/);
-  assert.match(source, /TALK_AMOUNT_LABELS\[draft\.talkAmount\] \?\? "不明"/);
-  assert.match(source, /DURATION_FEELING_LABELS\[draft\.durationFeeling\] \?\? "不明"/);
-  assert.match(source, /PRACTICE_EFFECT_LABELS\[draft\.practiceEffect\] \?\? "不明"/);
+  assert.match(source, /TALK_AMOUNT_LABELS\[claimed\.talkAmount\] \?\? "不明"/);
+  assert.match(source, /DURATION_FEELING_LABELS\[claimed\.durationFeeling\] \?\? "不明"/);
+  assert.match(source, /PRACTICE_EFFECT_LABELS\[claimed\.practiceEffect\] \?\? "不明"/);
 });
 
 test("全質問集計と終了通知は感想可否を安全に分岐する", async () => {
@@ -45,4 +46,58 @@ test("全質問集計と終了通知は感想可否を安全に分岐する", as
 test("感想フォームは下書きが null でも未選択状態を表示できる", async () => {
   const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
   assert.match(source, /function splitReviewRows\(sessionId, draft = \{\}\) \{\s*draft \?\?= \{\};/);
+});
+
+test("/splitvc はカウントダウン開始前に転送予定セッションを保存する", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const persistAt = source.indexOf("await persistSplitProcessSession(splitSessionId, {");
+  const countdownAt = source.indexOf("const transferCanceled = await runCountdown({");
+
+  assert.ok(persistAt >= 0 && persistAt < countdownAt);
+  assert.match(source.slice(persistAt, countdownAt), /plannedMemberIds: targetMembers\.map\(\(member\) => member\.id\)/);
+  assert.ok(SplitProcessSession.schema.path("plannedMemberIds"));
+});
+
+test("/splitvc は成功グループが0件なら後続処理を予約せず回収して失敗終了する", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const start = source.indexOf("const transferResult = await transferGroups(groups");
+  const end = source.indexOf("if (transferResult.groupSummaries.length > 0)", start);
+  const failurePath = source.slice(start, end);
+
+  assert.match(failurePath, /if \(transferResult\.groupSummaries\.length === 0\)/);
+  assert.match(failurePath, /status: cleanupErrors\.length > 0 \? "cleanup_required" : "failed"/);
+  assert.match(failurePath, /await removeRoleFromMembers\(/);
+  assert.match(failurePath, /await channel\.delete\(/);
+});
+
+test("splitvc snapshots always retain their child channel identity", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const start = source.indexOf("groupSnapshots: transferResult.groupSummaries.map");
+  const end = source.indexOf("await scheduleAction", start);
+  assert.ok(start >= 0 && end > start);
+  const initialPersistence = source.slice(start, end);
+  assert.match(initialPersistence, /groupNumber: summary\.groupNumber \?\? index \+ 1/);
+  assert.match(initialPersistence, /channelId: summary\.channelId/);
+  assert.match(initialPersistence, /memberIds: summary\.memberIds/);
+});
+
+test("splitvc acknowledges before taking its MongoDB lease", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const start = source.indexOf("async function handleSplitVoice");
+  const end = source.indexOf("\nasync function ", start + 1);
+  assert.ok(start >= 0 && end > start);
+  const handler = source.slice(start, end);
+  const deferredAt = handler.indexOf("await deferCommandResponse");
+  const leaseAt = handler.indexOf("await acquireMongoLease");
+  const sessionCheckAt = handler.indexOf("await SplitProcessSession.exists");
+  assert.ok(deferredAt >= 0 && deferredAt < leaseAt && deferredAt < sessionCheckAt);
+});
+
+test("splitvc acknowledges before fetching the bot member and keeps cancellation terminal", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const start = source.indexOf("async function handleSplitVoice");
+  const end = source.indexOf("\nasync function ", start + 1);
+  const handler = source.slice(start, end);
+  assert.ok(handler.indexOf("await deferCommandResponse") < handler.indexOf("members.fetch(interaction.client.user.id)"));
+  assert.match(source, /cancelText: "転送はキャンセルされました。終了通知の待機は続行します。"/);
 });
