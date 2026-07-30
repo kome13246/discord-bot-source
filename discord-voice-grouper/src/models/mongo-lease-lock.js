@@ -5,7 +5,7 @@ import mongoose from "mongoose";
 // once its lease expires.
 const schema = new mongoose.Schema(
   {
-    lockKey: { type: String, required: true, unique: true },
+    lockKey: { type: String, required: true },
     ownerId: { type: String, default: null },
     acquiredAt: { type: Date, default: null },
     leaseUntil: { type: Date, default: null },
