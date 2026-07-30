@@ -16,6 +16,9 @@ const schema = new mongoose.Schema(
     status: { type: String, enum: ["active", "removing", "removed", "failed"], default: "active" },
     removedAt: { type: Date, default: null },
     cleanupAt: { type: Date, default: null },
+    retryCount: { type: Number, default: 0 },
+    nextRetryAt: { type: Date, default: null },
+    lastError: { type: String, default: null },
   },
   { timestamps: true },
 );
