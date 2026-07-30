@@ -169,6 +169,13 @@ const lastBosyuTimestamps = new Map();
 const bosyuEditSessions = new Map();
 const voiceMonitorSessions = new Map();
 const voiceMonitorPendingFormDeletions = new Map();
+// Serialize only each member's voice-monitor role reconciliation. Discord can
+// deliver overlapping VoiceStateUpdate events for the same member.
+const voiceParticipantRoleQueues = new Map();
+const voiceParticipantRoleRetryTimers = new Map();
+const voiceParticipantRoleFinalFailureLogs = new Set();
+const VOICE_PARTICIPANT_ROLE_MAX_RETRIES = 3;
+const VOICE_PARTICIPANT_ROLE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 const topicFormSessions = new Map();
 const autoSplitSuggestionMessages = new Map();
 const callWaitRoleRemovalTimers = new Map();
@@ -372,11 +379,16 @@ client.on(Events.MessageCreate, async (message) => {
 
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   if (shuttingDown) return;
+  // Keep the participant-role flow independent from unrelated voice features.
   try {
     await handleProfileVoiceState(oldState, newState, { client, sendOperationalLog, getGuildSettings });
+  } catch (error) {
+    logRecoverableError("Profile voice-state processing failed", error);
+  }
+  try {
     await handleVoiceStateUpdate(oldState, newState);
   } catch (error) {
-    console.error(error);
+    logRecoverableError("Voice participant role processing failed", error);
   }
 });
 client.on(Events.ChannelCreate, async (channel) => {
@@ -1091,7 +1103,6 @@ async function handleSetting(interaction) {
     currentSettings,
     patch,
   );
-
   await replyOrFollowUp(interaction, {
     content: `設定を保存しました。\n\n${formatSettings(settings)}`,
     flags: MessageFlags.Ephemeral,
@@ -1398,6 +1409,11 @@ async function handleShugoSetting(interaction) {
   const patch = {};
 
   if (voiceParticipantRole) {
+    const roleValidationError = await validateVoiceParticipantRole(interaction.guild, voiceParticipantRole);
+    if (roleValidationError) {
+      await replyOrFollowUp(interaction, { content: roleValidationError, flags: MessageFlags.Ephemeral });
+      return;
+    }
     patch.voiceParticipantRoleId = voiceParticipantRole.id;
   }
 
@@ -1427,12 +1443,45 @@ async function handleShugoSetting(interaction) {
     currentSettings,
     patch,
   );
+  const roleChangedWithActiveSession = Boolean(
+    voiceParticipantRole
+      && currentSettings?.voiceParticipantRoleId
+      && currentSettings.voiceParticipantRoleId !== voiceParticipantRole.id
+      && [...voiceMonitorSessions.values()].some((session) => session.guildId === interaction.guildId),
+  );
+
+  if (patch.voiceReminderEnabled === false) {
+    const sessions = [...voiceMonitorSessions.values()]
+      .filter((session) => session.guildId === interaction.guildId);
+    for (const session of sessions) {
+      const voiceChannel = await interaction.guild.channels.fetch(session.voiceChannelId).catch(() => null);
+      await stopVoiceMonitorSession(session, interaction.guild, voiceChannel, settings).catch((error) => {
+        logRecoverableError("Failed to clean up disabled voice monitor session", error);
+      });
+    }
+    await reconcilePersistedVoiceParticipantRoleGrants(interaction.guild, settings).catch((error) => {
+      logRecoverableError("Failed to reconcile disabled voice monitor grants", error);
+    });
+  }
 
   await replyOrFollowUp(interaction, {
-    content: `VC集合フォーム設定を保存しました。\n\n${formatSettings(settings)}`,
+    content: `VC集合フォーム設定を保存しました。\n\n${formatSettings(settings)}${roleChangedWithActiveSession ? "\n\n現在進行中の雑談VCセッションでは、セッション開始時の旧ロールが終了まで使用されます。新しいロールは新規セッションから使用されます。" : ""}`,
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
+}
+
+async function validateVoiceParticipantRole(guild, role) {
+  const botMember = guild?.members?.me ?? (guild?.members?.fetchMe
+    ? await guild.members.fetchMe().catch(() => null)
+    : null);
+  if (!botMember?.permissions?.has(PermissionFlagsBits.ManageRoles)) {
+    return "Botにロールの管理権限がありません。";
+  }
+  if (!role || role.id === guild.id || role.managed || !role.editable) {
+    return "@everyone、連携管理ロール、またはBotより上位のロールは参加者ロールに設定できません。";
+  }
+  return null;
 }
 
 async function handleAddWadai(interaction) {
@@ -9142,10 +9191,13 @@ async function handleVoiceStateUpdate(oldState, newState) {
   }
 
   const settings = await getGuildSettings(guild.id);
+  const channelChanged = oldState.channelId !== newState.channelId;
+  // Mute/deafen/stream/camera changes are not joins or leaves.
+  if (!channelChanged) return;
   const changedChannelIds = new Set();
 
-  await maybeSendPendingCallWaitStartNotice(guild, settings);
-  await processOteboVoiceStatusSessions(guild, settings);
+  await maybeSendPendingCallWaitStartNotice(guild, settings).catch((error) => logRecoverableError("Pending call-wait notice failed", error));
+  await processOteboVoiceStatusSessions(guild, settings).catch((error) => logRecoverableError("Otebo voice status processing failed", error));
 
   if (oldState.channelId) {
     changedChannelIds.add(oldState.channelId);
@@ -9171,10 +9223,12 @@ async function handleVoiceStateUpdate(oldState, newState) {
       monitoredChannelIds.push(channelId);
     }
 
-    await maybeSendAutoSplitSuggestion(guild, settings, channelId);
+    await maybeSendAutoSplitSuggestion(guild, settings, channelId).catch((error) => {
+      logRecoverableError("Auto split suggestion processing failed", error);
+    });
   }
 
-  if (monitoredChannelIds.length > 0) {
+  if (monitoredChannelIds.length > 0 && settings?.voiceReminderEnabled !== false) {
     await Promise.all(
       monitoredChannelIds.map((channelId) =>
         updateVoiceMonitorSession(guild, settings, channelId),
@@ -9190,26 +9244,303 @@ async function handleVoiceStateUpdate(oldState, newState) {
     settings?.voiceParticipantRoleId &&
     (await isVoiceChannelMonitored(guild, settings, oldState.channelId))
   ) {
-    const ignoredSessionKey = getVoiceMonitorSessionKey(guild.id, oldState.channelId);
-    const participantRoleId =
-      voiceMonitorSessions.get(ignoredSessionKey)?.participantRoleId ??
-      settings.voiceParticipantRoleId;
-    const stillInActiveSession = await isMemberInActiveVoiceMonitorContext(
-      guild,
-      settings,
-      oldState.member.id,
-      ignoredSessionKey,
-    );
-
-    if (!stillInActiveSession) {
-      const member = await guild.members.fetch(oldState.member.id).catch(() => null);
-      if (member) {
+    const memberId = oldState.member.id;
+    await queueVoiceParticipantRoleUpdate(guild.id, memberId, async () => {
+      const member = await guild.members.fetch(memberId).catch(() => null);
+      if (!member) return;
+      const ignoredSessionKey = getVoiceMonitorSessionKey(guild.id, oldState.channelId);
+      const participantRoleId = voiceMonitorSessions.get(ignoredSessionKey)?.participantRoleId ?? settings.voiceParticipantRoleId;
         await removeVoiceParticipantRole(member, participantRoleId, {
           sourceType: "voice_monitor",
           sourceId: ignoredSessionKey,
         });
+    });
+  }
+}
+
+function queueVoiceParticipantRoleUpdate(guildId, memberId, task) {
+  const key = `${guildId}:${memberId}`;
+  const previous = voiceParticipantRoleQueues.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(task);
+  voiceParticipantRoleQueues.set(key, next);
+  return next.finally(() => {
+    if (voiceParticipantRoleQueues.get(key) === next) voiceParticipantRoleQueues.delete(key);
+  });
+}
+
+async function isMemberCurrentlyInMonitoredVoiceChannel(guild, settings, member) {
+  const channelId = member?.voice?.channelId;
+  if (!channelId || settings?.voiceReminderEnabled === false) return false;
+  const channel = member.voice.channel ?? await guild.channels.fetch(channelId).catch(() => null);
+  return Boolean(channel?.isVoiceBased() && getNonBotVoiceMembers(channel).length >= VOICE_MONITOR_MIN_MEMBERS && await isVoiceChannelMonitored(guild, settings, channelId));
+}
+
+function getVoiceMonitorRoleRetryKey({ guildId, memberId, roleId, sourceId }) {
+  return `${guildId}:${memberId}:${roleId}:${sourceId}`;
+}
+
+function clearVoiceMonitorRoleRetryState({ guildId, memberId, roleId, sourceId }) {
+  const key = getVoiceMonitorRoleRetryKey({ guildId, memberId, roleId, sourceId });
+  const timer = voiceParticipantRoleRetryTimers.get(key);
+  if (timer) clearTimeout(timer);
+  voiceParticipantRoleRetryTimers.delete(key);
+  clearVoiceMonitorFinalFailureLogs({ guildId, memberId, roleId, sourceId });
+}
+
+function isDiscordUnknownMemberError(error) {
+  return error?.code === 10007 || error?.rawError?.code === 10007;
+}
+
+function getVoiceMonitorRetryOperation(grant) {
+  return grant?.status === "removing" ? "解除" : "付与";
+}
+
+async function markExactVoiceMonitorGrantRemoved({ guildId, memberId, roleId, sourceId }) {
+  const removedAt = new Date();
+  await VoiceParticipantRoleGrant.updateOne(
+    { guildId, memberId, roleId, sourceType: "voice_monitor", sourceId },
+    {
+      $set: {
+        status: "removed",
+        removedAt,
+        cleanupAt: new Date(removedAt.getTime() + 30 * 24 * 60 * 60 * 1000),
+        retryCount: 0,
+        nextRetryAt: null,
+        lastError: null,
+      },
+    },
+  );
+  clearVoiceMonitorRoleRetryState({ guildId, memberId, roleId, sourceId });
+}
+
+async function recordVoiceMonitorRoleFailure({ guild, memberId, roleId, sourceId, operation, error, isRetryAttempt = false, ownershipConfirmed }) {
+  const now = new Date();
+  const filter = { guildId: guild.id, memberId, roleId, sourceType: "voice_monitor", sourceId };
+  const existing = await VoiceParticipantRoleGrant.findOne(filter).lean().catch((persistenceError) => {
+    logRecoverableError("Failed to read voice participant role failure state", persistenceError);
+    return null;
+  });
+  const isRetryFailure = isRetryAttempt
+    && existing?.status === "failed"
+    && Number.isInteger(existing?.retryCount);
+  // retryCount represents the number of failed retry attempts.  A normal
+  // first failure is 0, then retry failures are 1, 2, and the final 3.
+  const retryCount = isRetryFailure
+    ? Math.min(existing.retryCount + 1, VOICE_PARTICIPANT_ROLE_MAX_RETRIES)
+    : 0;
+  if (!isRetryFailure) {
+    clearVoiceMonitorFinalFailureLogs({ guildId: guild.id, memberId, roleId, sourceId });
+    const retryTimerKey = getVoiceMonitorRoleRetryKey({ guildId: guild.id, memberId, roleId, sourceId });
+    const pendingTimer = voiceParticipantRoleRetryTimers.get(retryTimerKey);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      voiceParticipantRoleRetryTimers.delete(retryTimerKey);
+    }
+  }
+  const failureState = {
+    status: "failed",
+    lastError: error?.message ?? String(error),
+    removedAt: null,
+    cleanupAt: null,
+    retryCount,
+    nextRetryAt: null,
+  };
+  // Never downgrade an already-confirmed bot ownership record merely because
+  // this caller could not determine ownership.  A false value is only used
+  // for a newly-created failure record.
+  if (ownershipConfirmed === true) failureState.grantedByBot = true;
+  const result = await VoiceParticipantRoleGrant.findOneAndUpdate(
+    filter,
+    {
+      $set: failureState,
+      $setOnInsert: { guildId: guild.id, memberId, roleId, grantedByBot: ownershipConfirmed === true, sourceType: "voice_monitor", sourceId },
+    },
+    { upsert: true, new: true },
+  ).catch((persistenceError) => {
+    logRecoverableError("Failed to persist voice participant role failure", persistenceError);
+    return null;
+  });
+  if (!result) return;
+  if (result.retryCount >= VOICE_PARTICIPANT_ROLE_MAX_RETRIES) {
+    await sendVoiceMonitorFinalFailureLog({ guild, memberId, roleId, sourceId, operation, retryCount: VOICE_PARTICIPANT_ROLE_MAX_RETRIES, error: result.lastError });
+    return;
+  }
+  const delayMs = VOICE_PARTICIPANT_ROLE_RETRY_DELAYS_MS[result.retryCount];
+  const retryAt = new Date(now.getTime() + delayMs);
+  await VoiceParticipantRoleGrant.updateOne({ _id: result._id }, { $set: { nextRetryAt: retryAt } }).catch(() => {});
+  const key = getVoiceMonitorRoleRetryKey({ guildId: guild.id, memberId, roleId, sourceId });
+  if (voiceParticipantRoleRetryTimers.has(key)) return;
+  const timer = setTimeout(() => {
+    voiceParticipantRoleRetryTimers.delete(key);
+    void queueVoiceParticipantRoleUpdate(guild.id, memberId, () => retryVoiceMonitorRoleGrant({ guildId: guild.id, memberId, roleId, sourceId })).catch((retryError) => {
+      logRecoverableError("Voice participant role retry failed", retryError);
+    });
+  }, delayMs);
+  voiceParticipantRoleRetryTimers.set(key, timer);
+}
+
+function getVoiceMonitorFinalFailureLogKey({ guildId, memberId, roleId, sourceId, operation, retryCount }) {
+  return `${guildId}:${memberId}:${roleId}:${sourceId}:${operation}:${retryCount}`;
+}
+
+function clearVoiceMonitorFinalFailureLogs({ guildId, memberId, roleId, sourceId }) {
+  const prefix = `${guildId}:${memberId}:${roleId}:${sourceId}:`;
+  for (const key of voiceParticipantRoleFinalFailureLogs) {
+    if (key.startsWith(prefix)) voiceParticipantRoleFinalFailureLogs.delete(key);
+  }
+}
+
+async function sendVoiceMonitorFinalFailureLog({ guild, memberId, roleId, sourceId, operation, retryCount, error }) {
+  if (retryCount < VOICE_PARTICIPANT_ROLE_MAX_RETRIES) return;
+  const key = getVoiceMonitorFinalFailureLogKey({ guildId: guild.id, memberId, roleId, sourceId, operation, retryCount });
+  if (voiceParticipantRoleFinalFailureLogs.has(key)) return;
+  const settings = await getGuildSettings(guild.id).catch(() => null);
+  const sent = await sendOperationalLog({
+    guild,
+    settings,
+    fallbackChannel: null,
+    content: `雑談中ロールの${retryCount >= VOICE_PARTICIPANT_ROLE_MAX_RETRIES ? "最終失敗" : "処理不能"}: guildId=${guild.id} memberId=${memberId} roleId=${roleId} sourceId=${sourceId} 操作=${operation ?? "不明"} retryCount=${retryCount} error=${error ?? "不明"}`,
+  }).catch((logError) => logRecoverableError("Failed to send voice monitor final failure log", logError));
+  if (sent) voiceParticipantRoleFinalFailureLogs.add(key);
+}
+
+async function sendVoiceMonitorOperationalFailureLog({ guild, memberId, roleId, sourceId, operation, stage = null, error }) {
+  const settings = await getGuildSettings(guild.id).catch(() => null);
+  await sendOperationalLog({
+    guild,
+    settings,
+    fallbackChannel: null,
+    content: `雑談中ロールの処理失敗: guildId=${guild.id} memberId=${memberId} roleId=${roleId} sourceId=${sourceId} 操作=${operation}${stage ? ` stage=${stage}` : ""} error=${error ?? "不明"}`,
+  }).catch((logError) => logRecoverableError("Failed to send voice monitor operational failure log", logError));
+}
+
+async function retryVoiceMonitorRoleGrant({ guildId, memberId, roleId, sourceId }) {
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return;
+  const grant = await VoiceParticipantRoleGrant.findOne({ guildId, memberId, roleId, sourceType: "voice_monitor", sourceId }).lean().catch(() => null);
+  if (!grant) {
+    clearVoiceMonitorRoleRetryState({ guildId, memberId, roleId, sourceId });
+    return;
+  }
+  let settings;
+  try {
+    settings = await getGuildSettings(guildId);
+  } catch (error) {
+    await recordVoiceMonitorRoleFailure({
+      guild,
+      memberId,
+      roleId,
+      sourceId,
+      operation: "状態取得",
+      error,
+      isRetryAttempt: true,
+      ownershipConfirmed: grant.grantedByBot === true,
+    });
+    return;
+  }
+  let member;
+  try {
+    member = await guild.members.fetch(memberId);
+  } catch (error) {
+    if (isDiscordUnknownMemberError(error)) {
+      await markExactVoiceMonitorGrantRemoved({ guildId, memberId, roleId, sourceId }).catch((persistenceError) => {
+        logRecoverableError("Failed to retire departed member voice participant role grant", persistenceError);
+      });
+      return;
+    }
+    await recordVoiceMonitorRoleFailure({
+      guild,
+      memberId,
+      roleId,
+      sourceId,
+      operation: getVoiceMonitorRetryOperation(grant),
+      error,
+      isRetryAttempt: true,
+      ownershipConfirmed: grant.grantedByBot === true,
+    });
+    return;
+  }
+  const channelId = sourceId.split(":").at(-1);
+  let shouldHaveRole;
+  try {
+    shouldHaveRole = settings?.voiceReminderEnabled !== false
+      && member.voice?.channelId === channelId
+      && await isMemberCurrentlyInMonitoredVoiceChannel(guild, settings, member);
+  } catch (error) {
+    await recordVoiceMonitorRoleFailure({
+      guild,
+      memberId,
+      roleId,
+      sourceId,
+      operation: "状態取得",
+      error,
+      isRetryAttempt: true,
+      ownershipConfirmed: grant.grantedByBot === true,
+    });
+    return;
+  }
+  if (!shouldHaveRole) {
+    // A failed add that was rolled back never established bot ownership, so
+    // an inactive source can be retired without a Discord role API call.
+    if (grant.grantedByBot !== true) {
+      await markExactVoiceMonitorGrantRemoved({ guildId, memberId, roleId, sourceId }).catch((error) => {
+        logRecoverableError("Failed to retire unowned voice participant role failure", error);
+      });
+      return;
+    }
+    await removeVoiceParticipantRole(member, roleId, { sourceType: "voice_monitor", sourceId, isRetryAttempt: true });
+    return;
+  }
+
+  const role = await guild.roles.fetch(roleId).catch(() => null);
+  if (!role) {
+    await recordVoiceMonitorRoleFailure({ guild, memberId, roleId, sourceId, operation: "付与", error: new Error("参加者ロールが見つかりません"), isRetryAttempt: true, ownershipConfirmed: grant.grantedByBot === true });
+    return;
+  }
+  const roleValidationError = await validateVoiceParticipantRole(guild, role);
+  if (roleValidationError) {
+    await recordVoiceMonitorRoleFailure({ guild, memberId, roleId, sourceId, operation: "付与", error: new Error(roleValidationError), isRetryAttempt: true, ownershipConfirmed: grant.grantedByBot === true });
+    return;
+  }
+
+  const hadRole = member.roles.cache.has(role.id);
+  // A retry record created by a failed add does not establish ownership of a
+  // role that someone assigned manually while the retry was waiting.
+  if (hadRole && grant?.grantedByBot !== true) {
+    await markExactVoiceMonitorGrantRemoved({ guildId, memberId, roleId, sourceId }).catch((error) => logRecoverableError("Failed to clear manual participant role retry", error));
+    return;
+  }
+  try {
+    if (!hadRole) await member.roles.add(role, "VC参加者ロールの再試行付与");
+    await VoiceParticipantRoleGrant.updateOne(
+      { guildId, memberId, roleId, sourceType: "voice_monitor", sourceId },
+      {
+        $set: {
+          grantedByBot: true,
+          grantedAt: new Date(),
+          status: "active",
+          removedAt: null,
+          cleanupAt: null,
+          retryCount: 0,
+          nextRetryAt: null,
+          lastError: null,
+        },
+        $setOnInsert: { guildId, memberId, roleId, sourceType: "voice_monitor", sourceId },
+      },
+      { upsert: true },
+    );
+    clearVoiceMonitorRoleRetryState({ guildId, memberId, roleId, sourceId });
+  } catch (error) {
+    let rollbackFailed = false;
+    if (!hadRole) {
+      try {
+        await member.roles.remove(role, "VC参加者ロール再試行の記録失敗に伴うロール解除");
+      } catch (rollbackError) {
+        rollbackFailed = true;
+        logRecoverableError(`Failed to roll back retried participant role for ${memberId}`, rollbackError);
       }
     }
+    await recordVoiceMonitorRoleFailure({ guild, memberId, roleId, sourceId, operation: "付与", error, isRetryAttempt: true, ownershipConfirmed: hadRole || rollbackFailed });
   }
 }
 
@@ -9372,14 +9703,16 @@ async function isVoiceChannelMonitored(guild, settings, channelId) {
     return false;
   }
 
-  if (await isPbChildVoiceChannel(guild, settings, voiceChannel)) {
+  if (Array.isArray(settings?.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.includes(channelId)) {
     return true;
   }
-
-  return (
-    Array.isArray(settings?.voiceMonitorVoiceChannelIds) &&
-    settings.voiceMonitorVoiceChannelIds.includes(channelId)
-  );
+  // Do not treat every VC in a category as monitored. PB child channels are
+  // eligible only while they are recorded by an active split session.
+  return Boolean(await SplitProcessSession.exists({
+    guildId: guild.id,
+    status: "active",
+    childChannelIds: channelId,
+  }).catch(() => null));
 }
 
 async function isPbChildVoiceChannel(guild, settings, voiceChannel) {
@@ -9563,7 +9896,9 @@ async function stopVoiceMonitorSessionIfStillUnderfilled(
 async function startVoiceMonitorSession(session, voiceChannel, members, settings, options = {}) {
   await ensureSessionMembersHaveRole(session, voiceChannel, members);
   if (!options.suppressStartNotice) {
-    await sendVoiceMonitorStartNotice(voiceChannel, settings);
+    await sendVoiceMonitorStartNotice(voiceChannel, settings).catch((error) => {
+      logRecoverableError("Voice monitor start notice failed", error);
+    });
   }
 }
 
@@ -9592,6 +9927,12 @@ async function restoreVoiceMonitorSessions() {
       for (const [channelId, suggestion] of Object.entries(settings.autoSplitSuggestions ?? {})) {
         if (suggestion?.messageId) autoSplitSuggestionMessages.set(channelId, suggestion.messageId);
       }
+      // Disabling the feature stops new sessions but still cleans up the
+      // voice_monitor grants the bot already owns.
+      if (settings.voiceReminderEnabled === false) {
+        await reconcilePersistedVoiceParticipantRoleGrants(guild, settings);
+        continue;
+      }
       const candidates = [...guild.channels.cache.values()].filter((channel) => channel.isVoiceBased());
       for (const channel of candidates) {
         try {
@@ -9611,31 +9952,140 @@ async function restoreVoiceMonitorSessions() {
   console.log(`Startup voice monitor sessions rebuilt: ${rebuilt}`);
 }
 
-async function reconcilePersistedVoiceParticipantRoleGrants(guild, settings) {
-  const grants = await VoiceParticipantRoleGrant.find({ guildId: guild.id, status: { $in: [null, "active", "removing", "failed"] } }).lean();
+async function isPersistedVoiceMonitorGrantInCurrentContext(guild, settings, member, grant) {
+  if (
+    grant.guildId !== guild.id ||
+    grant.sourceType !== "voice_monitor" ||
+    settings?.voiceReminderEnabled === false ||
+    grant.roleId !== settings?.voiceParticipantRoleId ||
+    member?.guild?.id !== guild.id
+  ) {
+    return false;
+  }
 
-  for (const grant of grants) {
-    const member = await guild.members.fetch(grant.memberId).catch(() => null);
+  const sourcePrefix = `${guild.id}:`;
+  if (typeof grant.sourceId !== "string" || !grant.sourceId.startsWith(sourcePrefix)) {
+    return false;
+  }
 
-    if (!member || !member.roles.cache.has(grant.roleId)) {
-      await VoiceParticipantRoleGrant.deleteOne({ _id: grant._id });
-      continue;
+  const channelId = grant.sourceId.slice(sourcePrefix.length);
+  if (
+    !channelId ||
+    channelId.includes(":") ||
+    grant.sourceId !== getVoiceMonitorSessionKey(guild.id, channelId) ||
+    member.voice?.channelId !== channelId
+  ) {
+    return false;
+  }
+
+  try {
+    const voiceChannel =
+      guild.channels.cache.get(channelId) ??
+      (await guild.channels.fetch(channelId).catch(() => null));
+    if (!voiceChannel?.isVoiceBased()) {
+      return false;
     }
 
-    const hasActiveVoiceMonitorSession = await isMemberInActiveVoiceMonitorContext(
-      guild,
-      settings,
-      grant.memberId,
-    );
-    const shouldKeepGrant =
-      grant.roleId === settings?.voiceParticipantRoleId &&
-      hasActiveVoiceMonitorSession;
+    return (
+      await isVoiceChannelMonitored(guild, settings, channelId)
+    ) && getNonBotVoiceMembers(voiceChannel).length >= VOICE_MONITOR_MIN_MEMBERS;
+  } catch {
+    return false;
+  }
+}
 
-    if (!shouldKeepGrant) {
-      await removeVoiceParticipantRole(member, grant.roleId, {
-        sourceType: grant.sourceType,
-        sourceId: grant.sourceId,
-      });
+async function reconcilePersistedVoiceParticipantRoleGrants(guild, settings) {
+  const grants = await VoiceParticipantRoleGrant.find({ guildId: guild.id, sourceType: "voice_monitor", status: { $in: [null, "active", "removing", "failed"] } }).lean();
+
+  for (const grant of grants) {
+    const logStartupFailure = async (stage, error) => sendVoiceMonitorOperationalFailureLog({
+      guild,
+      memberId: grant.memberId,
+      roleId: grant.roleId,
+      sourceId: grant.sourceId,
+      operation: "起動時整合",
+      stage,
+      error: error?.message ?? String(error),
+    });
+
+    try {
+      let member;
+      try {
+        member = await guild.members.fetch(grant.memberId);
+      } catch (error) {
+        if (isDiscordUnknownMemberError(error)) {
+          try {
+            await markExactVoiceMonitorGrantRemoved({ guildId: guild.id, memberId: grant.memberId, roleId: grant.roleId, sourceId: grant.sourceId });
+          } catch (persistenceError) {
+            await logStartupFailure("DB不明メンバー解除", persistenceError);
+          }
+          continue;
+        }
+        await recordVoiceMonitorRoleFailure({
+          guild,
+          memberId: grant.memberId,
+          roleId: grant.roleId,
+          sourceId: grant.sourceId,
+          operation: getVoiceMonitorRetryOperation(grant),
+          error,
+          isRetryAttempt: grant.status === "failed",
+          ownershipConfirmed: true,
+        });
+        await logStartupFailure("メンバー取得", error);
+        continue;
+      }
+
+      const shouldKeepGrant = await isPersistedVoiceMonitorGrantInCurrentContext(
+        guild,
+        settings,
+        member,
+        grant,
+      );
+
+      if (grant.grantedByBot !== true) {
+        try {
+          if (shouldKeepGrant) {
+            await recordVoiceMonitorRoleFailure({
+              guild,
+              memberId: grant.memberId,
+              roleId: grant.roleId,
+              sourceId: grant.sourceId,
+              operation: "付与",
+              error: new Error("起動時整合で未所有の付与失敗記録を再試行"),
+              ownershipConfirmed: false,
+            });
+          } else {
+            await markExactVoiceMonitorGrantRemoved({ guildId: guild.id, memberId: grant.memberId, roleId: grant.roleId, sourceId: grant.sourceId });
+          }
+        } catch (error) {
+          await logStartupFailure(shouldKeepGrant ? "未所有記録再試行登録" : "DB未所有記録解除", error);
+        }
+        continue;
+      }
+
+      if (!shouldKeepGrant) {
+        try {
+          await removeVoiceParticipantRole(member, grant.roleId, {
+            sourceType: grant.sourceType,
+            sourceId: grant.sourceId,
+          });
+        } catch (error) {
+          await logStartupFailure("ロール解除", error);
+        }
+        continue;
+      }
+
+      try {
+        await VoiceParticipantRoleGrant.updateOne(
+          { _id: grant._id },
+          { $set: { status: "active", removedAt: null, cleanupAt: null, retryCount: 0, nextRetryAt: null, lastError: null } },
+        );
+        clearVoiceMonitorRoleRetryState({ guildId: guild.id, memberId: grant.memberId, roleId: grant.roleId, sourceId: grant.sourceId });
+      } catch (error) {
+        await logStartupFailure("DB有効化", error);
+      }
+    } catch (error) {
+      await logStartupFailure("予期しない整合処理", error);
     }
   }
 }
@@ -9727,11 +10177,45 @@ async function ensureSessionMembersHaveRole(session, voiceChannel, members) {
     .catch(() => null);
 
   if (!role) {
+    console.warn(`Voice participant role is missing guild=${voiceChannel.guild.id} role=${session.participantRoleId}`);
+    await sendVoiceMonitorOperationalFailureLog({ guild: voiceChannel.guild, memberId: "-", roleId: session.participantRoleId, sourceId: getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId), operation: "設定検証", error: "参加者ロールが見つかりません" });
+    return;
+  }
+
+  const roleValidationError = await validateVoiceParticipantRole(voiceChannel.guild, role);
+  if (roleValidationError) {
+    console.warn(`Voice participant role is not usable guild=${voiceChannel.guild.id}: ${roleValidationError}`);
+    await sendVoiceMonitorOperationalFailureLog({ guild: voiceChannel.guild, memberId: "-", roleId: role.id, sourceId: getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId), operation: "設定検証", error: roleValidationError });
     return;
   }
 
   for (const member of members) {
-    if (!member.roles.cache.has(role.id)) {
+    await queueVoiceParticipantRoleUpdate(voiceChannel.guild.id, member.id, async () => {
+      const currentMember = await voiceChannel.guild.members.fetch(member.id).catch(() => null);
+      if (!currentMember || currentMember.voice.channelId !== voiceChannel.id) return;
+      if (getNonBotVoiceMembers(voiceChannel).length < VOICE_MONITOR_MIN_MEMBERS) return;
+      const hadRole = currentMember.roles.cache.has(role.id);
+      // Do not claim a manually assigned role. A role already owned by this
+      // bot for another active source may safely gain this session's record.
+      const hasBotOwnedGrant = hadRole && await VoiceParticipantRoleGrant.exists({
+        guildId: voiceChannel.guild.id,
+        memberId: member.id,
+        roleId: role.id,
+        grantedByBot: true,
+        status: { $in: [null, "active", "removing", "failed"] },
+      });
+      if (hadRole && !hasBotOwnedGrant) {
+        // The member acquired this role outside a bot-owned active grant.
+        // Retire only this stale failed record and leave the manual role alone.
+        await markExactVoiceMonitorGrantRemoved({
+          guildId: voiceChannel.guild.id,
+          memberId: member.id,
+          roleId: role.id,
+          sourceId: getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId),
+        }).catch((error) => logRecoverableError("Failed to retire manual voice participant role record", error));
+        return;
+      }
+    if (!hadRole) {
       try {
         await member.roles.add(role, "VC参加者ロールを付与");
         try {
@@ -9760,13 +10244,35 @@ async function ensureSessionMembersHaveRole(session, voiceChannel, members) {
         } catch (error) {
           // A grant without a durable ownership record cannot be reconciled
           // after a restart, so roll it back instead of leaving it untracked.
-          await member.roles.remove(role, "VC参加者ロール記録の保存失敗に伴うロール解除").catch((error) => logRecoverableError(`Failed to roll back participant role for ${member.id}`, error));
+          let rollbackFailed = false;
+          try {
+            await member.roles.remove(role, "VC参加者ロール記録の保存失敗に伴うロール解除");
+          } catch (rollbackError) {
+            rollbackFailed = true;
+            logRecoverableError(`Failed to roll back participant role for ${member.id}`, rollbackError);
+          }
           console.error(`Failed to persist voice participant role grant for ${member.id}: ${error.message}`);
+          await recordVoiceMonitorRoleFailure({ guild: voiceChannel.guild, memberId: member.id, roleId: role.id, sourceId: getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId), operation: "付与", error, ownershipConfirmed: rollbackFailed });
+          return;
         }
       } catch (error) {
         console.error(`Failed to add voice participant role to ${member.id}: ${error.message}`);
+        await recordVoiceMonitorRoleFailure({ guild: voiceChannel.guild, memberId: member.id, roleId: role.id, sourceId: getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId), operation: "付与", error, ownershipConfirmed: false });
+        return;
       }
     }
+    // A member moving directly between monitored VCs already has the role,
+    // but still needs an ownership record for this session.
+    if (!hadRole || hasBotOwnedGrant) {
+      const sourceId = getVoiceMonitorSessionKey(session.guildId, session.voiceChannelId);
+      await VoiceParticipantRoleGrant.updateOne(
+        { guildId: voiceChannel.guild.id, memberId: member.id, roleId: role.id, sourceType: "voice_monitor", sourceId },
+        { $set: { sourceType: "voice_monitor", sourceId, grantedByBot: true, grantedAt: new Date(), status: "active", removedAt: null, cleanupAt: null, retryCount: 0, nextRetryAt: null, lastError: null }, $setOnInsert: { guildId: voiceChannel.guild.id, memberId: member.id, roleId: role.id } },
+        { upsert: true },
+      );
+      clearVoiceMonitorRoleRetryState({ guildId: voiceChannel.guild.id, memberId: member.id, roleId: role.id, sourceId });
+    }
+    });
   }
 }
 
@@ -10233,11 +10739,22 @@ async function handleTopicFormModal(interaction) {
 }
 
 async function removeVoiceParticipantRole(member, roleId, source = null) {
+  const clearRetryState = () => {
+    if (source?.sourceType === "voice_monitor" && source.sourceId) {
+      clearVoiceMonitorRoleRetryState({
+        guildId: member.guild.id,
+        memberId: member.id,
+        roleId,
+        sourceId: source.sourceId,
+      });
+    }
+  };
   const activeGrantStatuses = [null, "active", "removing", "failed"];
   const ownershipFilter = {
     guildId: member.guild.id,
     memberId: member.id,
     roleId,
+    grantedByBot: true,
     status: { $in: activeGrantStatuses },
     ...(source?.sourceType ? { sourceType: source.sourceType } : {}),
     ...(source?.sourceId != null ? { sourceId: source.sourceId } : {}),
@@ -10247,6 +10764,7 @@ async function removeVoiceParticipantRole(member, roleId, source = null) {
   // Only revoke a role that this bot recorded as its own grant.  The same
   // role may also be assigned manually or by another feature.
   if (!grant) {
+    clearRetryState();
     return;
   }
 
@@ -10257,13 +10775,17 @@ async function removeVoiceParticipantRole(member, roleId, source = null) {
       cleanupAt: null,
     },
   });
-  if (!marked || marked.matchedCount < 1) return;
+  if (!marked || marked.matchedCount < 1) {
+    clearRetryState();
+    return;
+  }
 
   const otherActiveGrant = source?.sourceType
     ? await VoiceParticipantRoleGrant.exists({
       guildId: member.guild.id,
       memberId: member.id,
       roleId,
+      grantedByBot: true,
       status: { $in: activeGrantStatuses },
       $nor: [{
         sourceType: source.sourceType,
@@ -10281,6 +10803,9 @@ async function removeVoiceParticipantRole(member, roleId, source = null) {
           status: "removed",
           removedAt,
           cleanupAt: new Date(removedAt.getTime() + 30 * 24 * 60 * 60 * 1000),
+          retryCount: 0,
+          nextRetryAt: null,
+          lastError: null,
         },
       },
     );
@@ -10288,6 +10813,7 @@ async function removeVoiceParticipantRole(member, roleId, source = null) {
 
   if (otherActiveGrant || !member.roles.cache.has(roleId)) {
     await markRemoved();
+    clearRetryState();
     return;
   }
 
@@ -10301,10 +10827,14 @@ async function removeVoiceParticipantRole(member, roleId, source = null) {
       },
       { $set: { status: "failed", cleanupAt: null } },
     );
+    if (source?.sourceType === "voice_monitor" && source.sourceId) {
+      await recordVoiceMonitorRoleFailure({ guild: member.guild, memberId: member.id, roleId, sourceId: source.sourceId, operation: "解除", error, isRetryAttempt: source.isRetryAttempt === true, ownershipConfirmed: true });
+    }
     throw error;
   }
 
   await markRemoved();
+  clearRetryState();
 }
 
 function scheduleBumpReminder(reminder) {
@@ -12429,6 +12959,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `機能: ${settings.voiceReminderEnabled === false ? "無効" : "有効"}`,
       `対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
       `対象子VCカテゴリ: ${settings.voiceReminderChildCategoryId ? `<#${settings.voiceReminderChildCategoryId}>` : "未設定"}`,
+      `明示的な監視VC: ${Array.isArray(settings.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.length ? settings.voiceMonitorVoiceChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定（PB子VC判定を使用）"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       "",
       "【kokuchi】",
@@ -12993,6 +13524,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       kokuchiReservationTimers,
       oteboRecruitmentTimers,
       restoredWaitingMonitorTimers,
+      voiceParticipantRoleRetryTimers,
     ]) {
       for (const timer of timers.values()) clearTimeout(timer);
       timers.clear();
