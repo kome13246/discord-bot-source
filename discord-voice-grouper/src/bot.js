@@ -56,8 +56,10 @@ import {
 import { CallWaitInterest } from "./models/call-wait-interest.js";
 import { KokuchiReservation } from "./models/kokuchi-reservation.js";
 import { MongoLeaseLock } from "./models/mongo-lease-lock.js";
+import { ProfileRegistrationPanel } from "./models/profile-registration-panel.js";
 import { acquireMongoLease, releaseMongoLease } from "./mongo-lease-lock-store.js";
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
+import { buildProfileRegistrationPanelPayload, createProfileRegistrationPanelService } from "./profile-registration-panel-service.js";
 import {
   canSendPublicProfile,
   canPublishProfile,
@@ -272,6 +274,7 @@ const client = new Client({
   ],
 });
 const voiceChannelControlService = createVoiceChannelControlService({ getGuildSettings, sendOperationalLog, setVoiceChannelStatus });
+const profileRegistrationPanelService = createProfileRegistrationPanelService({ getGuildSettings, sendOperationalLog });
 const fukyoThemeService = createFukyoThemeService({
   getGuildSettings,
   saveGuildSettings,
@@ -305,6 +308,7 @@ client.once(Events.ClientReady, async (readyClient) => {
     restoreOteboRecruitmentTimers(),
     restoreFailedSplitReviewDeliveries(),
     restoreProfiles(client, { sendOperationalLog, getGuildSettings }),
+    profileRegistrationPanelService.restore(client),
     restoreScheduledActions(),
     restoreBosyuEditSessions(),
     restoreSplitProcessSessions(),
@@ -378,6 +382,9 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     await handleDisboardBumpMessage(message);
     await handleTopicRequestMessage(message);
+    void handleProfileRegistrationPanelMessage(message).catch((error) => {
+      logRecoverableError("Profile registration panel message processing failed", error);
+    });
   } catch (error) {
     console.error("Message processing failed", {
       guildId: message.guildId ?? null,
@@ -407,6 +414,13 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     logRecoverableError("Voice exit schedule processing failed", error);
   }
 });
+
+async function handleProfileRegistrationPanelMessage(message) {
+  if (!message.guild || message.author?.bot || message.webhookId || message.system || message.channel?.isThread?.()) return;
+  const settings = await getGuildSettings(message.guild.id);
+  if (settings?.profileIntroductionChannelId !== message.channelId) return;
+  await profileRegistrationPanelService.requestProfileRegistrationPanelMove(message.guild, "human-message");
+}
 client.on(Events.ChannelCreate, async (channel) => {
   if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.ensurePanel(channel).catch((error) => console.error("VC control panel create failed:", error));
 });
@@ -746,19 +760,25 @@ async function handleSetupProfile(interaction) {
   if (!interaction.inGuild() || !interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
     await replyOrFollowUp(interaction, { content: "管理者のみ実行できます。", flags: MessageFlags.Ephemeral }); return;
   }
-  const embed = { title: "プロフィール登録・編集", description: "下のボタンからプロフィールを登録・編集できます。", color: 0x5865f2 };
-  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("profile_open").setLabel("プロフィールを登録・編集").setStyle(ButtonStyle.Primary));
-  await interaction.reply({ embeds: [embed], components: [row] });
+  await interaction.reply(buildProfileRegistrationPanelPayload());
 }
 
 async function handleProfileOpen(interaction) {
   if (!interaction.inGuild()) return interaction.reply({ content: "サーバー内で使用してください。", flags: MessageFlags.Ephemeral });
+  let profile;
+  try {
+    profile = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id }).lean();
+  } catch (error) {
+    await logProfileFailure(interaction, "profile modal fetch failed", error);
+    await interaction.reply({ content: "プロフィールの取得に失敗しました。", flags: MessageFlags.Ephemeral });
+    return;
+  }
   const input = (id, label, style, max, value, required) => new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setMaxLength(max).setRequired(required).setValue(value ?? ""));
   const modal = new ModalBuilder().setCustomId("profile_modal").setTitle("プロフィール登録・編集").addComponents(
-    input("profile_nickname", "呼び名", TextInputStyle.Short, 20, null, true),
-    input("profile_status", "現状", TextInputStyle.Short, 30, null, false),
-    input("profile_hobby", "趣味", TextInputStyle.Paragraph, 80, null, false),
-    input("profile_comment", "ひとこと", TextInputStyle.Paragraph, 150, null, false),
+    input("profile_nickname", "呼び名", TextInputStyle.Short, 20, normalizeProfileValue(profile?.nickname, 20), true),
+    input("profile_status", "現状", TextInputStyle.Short, 30, normalizeProfileValue(profile?.status, 30), false),
+    input("profile_hobby", "趣味", TextInputStyle.Paragraph, 80, normalizeProfileValue(profile?.hobby, 80), false),
+    input("profile_comment", "ひとこと", TextInputStyle.Paragraph, 150, normalizeProfileValue(profile?.comment, 150), false),
   );
   await interaction.showModal(modal);
 }
@@ -781,11 +801,9 @@ async function handleProfileModal(interaction) {
     existing = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id });
     const values = {
       nickname: submittedValues.nickname,
-      // A modal must be shown before any database read.  Empty optional
-      // fields therefore preserve existing values instead of erasing them.
-      status: submittedValues.status || existing?.status || "",
-      hobby: submittedValues.hobby || existing?.hobby || "",
-      comment: submittedValues.comment || existing?.comment || "",
+      status: submittedValues.status,
+      hobby: submittedValues.hobby,
+      comment: submittedValues.comment,
     };
     await UserProfile.findOneAndUpdate(
       { guildId: interaction.guildId, userId: interaction.user.id },
@@ -866,7 +884,7 @@ async function logProfileFailure(interaction, processName, error, profile = null
   const settings = await getGuildSettings(interaction.guildId).catch(() => null);
   const message = `[${processName}] guild=${interaction.guild?.name ?? "?"}(${interaction.guildId ?? "?"}) user=${interaction.user.username}(${interaction.user.id}) publishedChannelId=${profile?.publishedChannelId ?? "?"} publishedMessageId=${profile?.publishedMessageId ?? "?"} error=${summarizeProfileError(error)} time=${new Date().toISOString()}`;
   console.error(message);
-  await sendOperationalLog({ guild: interaction.guild, settings, fallbackChannel: interaction.channel, content: message });
+  await sendOperationalLog({ guild: interaction.guild, settings, fallbackChannel: null, content: message });
 }
 
 async function handleProfilePublishButton(interaction) {
@@ -908,6 +926,11 @@ async function handleProfilePublishButton(interaction) {
     const settings = await getGuildSettings(interaction.guildId);
     const publicMember = member ?? { displayName: interaction.user.username, user: interaction.user };
     const result = await publishProfile({ guild: interaction.guild, member: publicMember, profile, settings });
+    if (result.status === "published") {
+      void profileRegistrationPanelService.requestProfileRegistrationPanelMove(interaction.guild, "profile-published").catch((error) => {
+        logRecoverableError("Profile registration panel move after publication failed", error);
+      });
+    }
     if (result.status === "published" || result.status === "updated") {
       await interaction.editReply({ content: "自己紹介チャンネルにプロフィールを送信しました。" });
       return;
@@ -943,12 +966,29 @@ async function handleProfilePublishButton(interaction) {
 }
 
 async function handleProfileIntroductionSetting(interaction) {
-  const channel = interaction.options.getChannel("introduction_channel", true);
-  if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type) || !canSendPublicProfile(channel, interaction.guild)) {
+  const previousSettings = await getGuildSettings(interaction.guildId);
+  const channel = interaction.options.getChannel("introduction_channel", false);
+  if (!channel) {
+    const settings = await saveGuildSettingsWithCurrent(interaction.guildId, previousSettings, { profileIntroductionChannelId: null });
+    await profileRegistrationPanelService.removeProfileRegistrationPanel(interaction.guild).catch((error) => {
+      logRecoverableError("Profile registration panel removal after setting clear failed", error);
+    });
+    await replyOrFollowUp(interaction, { content: `自己紹介チャンネルの設定を解除しました。\n\n${formatSettings(settings)}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+    return;
+  }
+  if (channel.type !== ChannelType.GuildText || !canSendPublicProfile(channel, interaction.guild)) {
     await replyOrFollowUp(interaction, { content: "Botが閲覧・メッセージ送信・Embed送信できるテキストチャンネルを指定してください。", flags: MessageFlags.Ephemeral });
     return;
   }
-  const settings = await saveGuildSettingsWithCurrent(interaction.guildId, await getGuildSettings(interaction.guildId), { profileIntroductionChannelId: channel.id });
+  const settings = await saveGuildSettingsWithCurrent(interaction.guildId, previousSettings, { profileIntroductionChannelId: channel.id });
+  if (previousSettings?.profileIntroductionChannelId !== channel.id) {
+    await profileRegistrationPanelService.removeProfileRegistrationPanel(interaction.guild).catch((error) => {
+      logRecoverableError("Profile registration panel removal after channel change failed", error);
+    });
+  }
+  await profileRegistrationPanelService.ensureProfileRegistrationPanel(interaction.guild).catch((error) => {
+    logRecoverableError("Profile registration panel ensure after setting change failed", error);
+  });
   await replyOrFollowUp(interaction, { content: `自己紹介チャンネルを <#${channel.id}> に設定しました。\n\n${formatSettings(settings)}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
 
@@ -13544,6 +13584,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       CallWaitInterest.createIndexes(),
       KokuchiReservation.createIndexes(),
       MongoLeaseLock.createIndexes(),
+      ProfileRegistrationPanel.createIndexes(),
       FukyoThemeState.createIndexes(),
       FukyoWeeklyPost.createIndexes(),
       SplitProcessSession.createIndexes(),
@@ -13559,6 +13600,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
 
     if (callWaitTimer) clearTimeout(callWaitTimer);
     fukyoThemeService.shutdown();
+    profileRegistrationPanelService.shutdown();
     if (discordReadyWatchdog) clearTimeout(discordReadyWatchdog);
     for (const timers of [
       bumpReminderTimers,
