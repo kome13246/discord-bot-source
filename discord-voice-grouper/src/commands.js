@@ -303,8 +303,8 @@ export const settingCommand = new SlashCommandBuilder()
         option
           .setName("introduction_channel")
           .setDescription("自己紹介を公開するテキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(true),
+          .addChannelTypes(ChannelType.GuildText)
+          .setRequired(false),
       ),
   );
 

@@ -411,18 +411,20 @@ test("profile publication uses a guild and user scoped MongoDB lease after ackno
   assert.match(handler, /releaseMongoLease\(profileLease\)/);
 });
 
-test("profile edit modal is displayed before any MongoDB lookup", async () => {
+test("profile edit modal loads saved values before it is displayed", async () => {
   const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
   const start = source.indexOf("async function handleProfileOpen");
   const end = source.indexOf("async function handleProfileModal", start);
   assert.ok(start >= 0 && end > start);
   const handler = source.slice(start, end);
+  assert.match(handler, /UserProfile\.findOne\(\{ guildId: interaction\.guildId, userId: interaction\.user\.id \}\)\.lean\(\)/);
   assert.match(handler, /await interaction\.showModal\(modal\)/);
-  assert.doesNotMatch(handler, /UserProfile\.(find|findOne|findOneAndUpdate)/);
+  assert.match(handler, /normalizeProfileValue\(profile\?\.nickname, 20\)/);
   const modalStart = source.indexOf("async function handleProfileModal");
   const modalEnd = source.indexOf("async function logProfileFailure", modalStart);
   const modalHandler = source.slice(modalStart, modalEnd);
-  assert.match(modalHandler, /submittedValues\.status \|\| existing\?\.status/);
+  assert.match(modalHandler, /status: submittedValues\.status/);
+  assert.doesNotMatch(modalHandler, /submittedValues\.status \|\| existing\?\.status/);
 });
 
 test("bosyu edit modal uses its restored memory session without a pre-modal MongoDB read", async () => {
