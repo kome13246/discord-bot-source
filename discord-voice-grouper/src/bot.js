@@ -66,6 +66,9 @@ import {
   refreshPublishedProfile,
 } from "./profile-publication-service.js";
 import { createVoiceChannelControlService } from "./voice-channel-control-service.js";
+import { createFukyoThemeService } from "./fukyo-theme-service.js";
+import { FukyoThemeState } from "./models/fukyo-theme-state.js";
+import { FukyoWeeklyPost } from "./models/fukyo-weekly-post.js";
 import {
   createEveryonePermissionSnapshot,
   countUniqueParticipantIds,
@@ -269,6 +272,13 @@ const client = new Client({
   ],
 });
 const voiceChannelControlService = createVoiceChannelControlService({ getGuildSettings, sendOperationalLog, setVoiceChannelStatus });
+const fukyoThemeService = createFukyoThemeService({
+  getGuildSettings,
+  saveGuildSettings,
+  sendOperationalLog,
+  acquireMongoLease,
+  releaseMongoLease,
+});
 
 let discordReadyWatchdog = null;
 
@@ -300,6 +310,7 @@ client.once(Events.ClientReady, async (readyClient) => {
     restoreSplitProcessSessions(),
     restoreVoiceMonitorSessions(),
     voiceChannelControlService.restore(client),
+    fukyoThemeService.restore(client),
   ]);
   for (const result of restoreResults) {
     if (result.status === "rejected") {
@@ -563,6 +574,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === "delwadai") {
       await handleDelWadai(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "addfukyo") {
+      await fukyoThemeService.addTheme(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "showfukyo") {
+      await fukyoThemeService.showThemes(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "delfukyo") {
+      await fukyoThemeService.deleteTheme(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "sendfukyo") {
+      await fukyoThemeService.sendTheme(interaction);
       return;
     }
 
@@ -950,6 +981,11 @@ async function handleSetting(interaction) {
   }
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  if (subcommand === "fukyo") {
+    await fukyoThemeService.updateSetting(interaction);
+    return;
+  }
 
   if (subcommand === "vc_control") {
     const category = interaction.options.getChannel("category", false);
@@ -13005,7 +13041,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   function formatSettings(settings) {
     const text = formatLegacySettings(settings);
     if (!settings) return text;
-    return `${text}\n\n【プロフィール】\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}\n\n【VCコントロール】\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}\n退出予定通知を残す: ${settings.voiceExitScheduleKeepMessage !== false ? "はい" : "いいえ"}`;
+    return `${text}\n\n【布教テーマ】\n投稿先: ${settings.fukyoThemeChannelId ? `<#${settings.fukyoThemeChannelId}>` : "未設定"}\n自動投稿: ${settings.fukyoWeeklyThemeEnabled ? "有効" : "無効"}\n登録数: ${settings.fukyoThemes?.length ?? 0}\n\n【プロフィール】\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}\n\n【VCコントロール】\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}\n退出予定通知を残す: ${settings.voiceExitScheduleKeepMessage !== false ? "はい" : "いいえ"}`;
   }
 
   async function persistSplitParticipantMemberIds(sessionId, participantMemberIds) {
@@ -13508,6 +13544,8 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       CallWaitInterest.createIndexes(),
       KokuchiReservation.createIndexes(),
       MongoLeaseLock.createIndexes(),
+      FukyoThemeState.createIndexes(),
+      FukyoWeeklyPost.createIndexes(),
       SplitProcessSession.createIndexes(),
       SplitReview.createIndexes(),
       SplitReviewDraft.createIndexes(),
@@ -13520,6 +13558,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     console.log(`Graceful shutdown started${signal ? ` (${signal})` : ""}.`);
 
     if (callWaitTimer) clearTimeout(callWaitTimer);
+    fukyoThemeService.shutdown();
     if (discordReadyWatchdog) clearTimeout(discordReadyWatchdog);
     for (const timers of [
       bumpReminderTimers,

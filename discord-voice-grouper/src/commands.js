@@ -290,6 +290,13 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName("fukyo")
+      .setDescription("布教チャンネルの週替わりテーマを設定します")
+      .addChannelOption((option) => option.setName("channel").setDescription("テーマの投稿先チャンネル").addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(false))
+      .addBooleanOption((option) => option.setName("enabled").setDescription("毎週月曜日6:00（JST）の自動投稿を有効にします").setRequired(false)),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName("profile")
       .setDescription("自己紹介チャンネルを設定します")
       .addChannelOption((option) =>
@@ -411,6 +418,25 @@ export const kokuchiCommand = new SlashCommandBuilder()
       .setRequired(false),
   );
 
+export const addFukyoCommand = new SlashCommandBuilder()
+  .setName("addfukyo")
+  .setDescription("布教テーマを追加します")
+  .addStringOption((option) => option.setName("theme").setDescription("追加するテーマ").setRequired(true).setMaxLength(50));
+
+export const showFukyoCommand = new SlashCommandBuilder()
+  .setName("showfukyo")
+  .setDescription("登録されている布教テーマを表示します");
+
+export const delFukyoCommand = new SlashCommandBuilder()
+  .setName("delfukyo")
+  .setDescription("番号で布教テーマを削除します")
+  .addIntegerOption((option) => option.setName("number").setDescription("/showfukyo の番号").setRequired(true).setMinValue(1));
+
+export const sendFukyoCommand = new SlashCommandBuilder()
+  .setName("sendfukyo")
+  .setDescription("布教テーマを投稿します")
+  .addIntegerOption((option) => option.setName("theme_number").setDescription("/showfukyo の番号（省略時は未使用からランダム）").setRequired(false).setMinValue(1));
+
 export const sendCallWaitCommand = new SlashCommandBuilder()
   .setName("sendcallwait")
   .setDescription("通話待機システムの募集メッセージを今すぐ送信します");
@@ -440,6 +466,10 @@ export const commands = [
   addWadaiCommand.toJSON(),
   showWadaiCommand.toJSON(),
   delWadaiCommand.toJSON(),
+  addFukyoCommand.toJSON(),
+  showFukyoCommand.toJSON(),
+  delFukyoCommand.toJSON(),
+  sendFukyoCommand.toJSON(),
   kokuchiCommand.toJSON(),
   removeCommand.toJSON(),
   sendCallWaitCommand.toJSON(),

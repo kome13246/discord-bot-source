@@ -13,7 +13,8 @@ export async function saveVoiceExitSchedule(schedule) {
   );
   if (updated) return updated;
   try {
-    return await VoiceExitSchedule.create({ ...schedule, status: "scheduled", retryCount: 0 });
+    const created = await VoiceExitSchedule.create({ ...schedule, status: "scheduled", retryCount: 0 });
+    return created.toObject();
   } catch (error) {
     if (error?.code !== 11000) throw error;
     return VoiceExitSchedule.findOneAndUpdate(

@@ -12,6 +12,12 @@ test("退出予定はサーバー・利用者単位で一意に永続化し、�
   assert.equal(VoiceExitNoticeDeletion.schema.path("deleteAt").instance, "Date");
 });
 
+test("新規の退出予定保存も通常オブジェクトを返す", async () => {
+  const store = await readFile(new URL("../src/voice-exit-schedule-store.js", import.meta.url), "utf8");
+  assert.match(store, /const created = await VoiceExitSchedule\.create\([\s\S]*?return created\.toObject\(\);/);
+  assert.match(store, /returnDocument: "after", lean: true/);
+});
+
 test("退出予定の既存設定は通知を残す既定値になる", () => {
   assert.equal(normalizeGuildSettings({}).voiceExitScheduleKeepMessage, true);
   assert.equal(normalizeGuildSettings({ voiceExitScheduleKeepMessage: false }).voiceExitScheduleKeepMessage, false);
@@ -76,4 +82,13 @@ test("中断executingの正常回収は失敗ログではなく運用情報と�
   assert.match(restore, /退出予定の中断状態を起動時に回収しました。/);
   assert.match(restore, /await logInfo\(content, schedule, guild\)/);
   assert.doesNotMatch(restore, /logFailure\("中断executing回収", schedule, new Error/);
+});
+
+test("初回登録の予定もDocumentを正規化し、正しいIDで通知claimする", async () => {
+  const source = await readFile(new URL("../src/voice-channel-control-service.js", import.meta.url), "utf8");
+  assert.match(source, /typeof schedule\?\.toObject === "function" \? schedule\.toObject\(\) : schedule/);
+  assert.match(source, /schedule\?\._id && schedule\.guildId && schedule\.userId && schedule\.voiceChannelId && schedule\.scheduledAt/);
+  assert.match(source, /claimVoiceExitSchedule\(normalizedSchedule\._id\)/);
+  assert.match(source, /void notify\(\{ \.\.\.normalizedSchedule, guild \}\)/);
+  assert.match(source, /console\.error\("退出予定タイマーを登録できません:/);
 });
