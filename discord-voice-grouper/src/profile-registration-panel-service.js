@@ -13,8 +13,8 @@ import {
 } from "./profile-registration-panel-store.js";
 import { acquireMongoLease, releaseMongoLease } from "./mongo-lease-lock-store.js";
 
-const PANEL_TITLE = "プロフィール登録・編集";
-const PANEL_DESCRIPTION = "ここから登録したプロフィールはVC参加時にVCのチャットへ自動で送信されます";
+const PANEL_TITLE = "自己紹介登録・編集";
+const PANEL_DESCRIPTION = "ここからプロフィールを登録しておくとVC参加時にVCのチャットへ自動で送信されるようになります";
 const REQUIRED_PERMISSIONS = [
   PermissionFlagsBits.ViewChannel,
   PermissionFlagsBits.SendMessages,
@@ -27,7 +27,7 @@ export function buildProfileRegistrationPanelPayload() {
   return {
     embeds: [new EmbedBuilder().setTitle(PANEL_TITLE).setDescription(PANEL_DESCRIPTION).setColor(0x5865f2)],
     components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("profile_open").setLabel("プロフィールを登録・編集").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("profile_open").setLabel("登録・編集").setStyle(ButtonStyle.Primary),
     )],
     allowedMentions: { parse: [] },
   };
