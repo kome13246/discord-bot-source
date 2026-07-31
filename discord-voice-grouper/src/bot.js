@@ -390,6 +390,11 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   } catch (error) {
     logRecoverableError("Voice participant role processing failed", error);
   }
+  try {
+    await voiceChannelControlService.handleVoiceState(oldState, newState);
+  } catch (error) {
+    logRecoverableError("Voice exit schedule processing failed", error);
+  }
 });
 client.on(Events.ChannelCreate, async (channel) => {
   if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.ensurePanel(channel).catch((error) => console.error("VC control panel create failed:", error));
@@ -949,8 +954,9 @@ async function handleSetting(interaction) {
   if (subcommand === "vc_control") {
     const category = interaction.options.getChannel("category", false);
     const notifyRole = interaction.options.getRole("notify_role", false);
-    if (!category && !notifyRole) {
-      await replyOrFollowUp(interaction, { content: "category または notify_role を指定してください。", flags: MessageFlags.Ephemeral });
+    const exitScheduleKeepMessage = interaction.options.getBoolean("exit_schedule_keep_message", false);
+    if (!category && !notifyRole && exitScheduleKeepMessage === null) {
+      await replyOrFollowUp(interaction, { content: "category、notify_role、exit_schedule_keep_message のいずれかを指定してください。", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -960,8 +966,9 @@ async function handleSetting(interaction) {
     const settings = await saveGuildSettingsWithCurrent(interaction.guildId, await getGuildSettings(interaction.guildId), {
       ...(category ? { vcControlCategoryId: category.id } : {}),
       ...(notifyRole ? { vcControlNotifyRoleId: notifyRole.id } : {}),
+      ...(exitScheduleKeepMessage === null ? {} : { voiceExitScheduleKeepMessage: exitScheduleKeepMessage }),
     });
-    await replyOrFollowUp(interaction, { content: `VCコントロール設定を保存しました。\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+    await replyOrFollowUp(interaction, { content: `VCコントロール設定を保存しました。\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}\n退出予定通知を残す: ${settings.voiceExitScheduleKeepMessage !== false ? "はい" : "いいえ"}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
     if (category) {
       for (const channel of interaction.guild.channels.cache.values()) if (channel.type === ChannelType.GuildVoice && channel.parentId === category.id) await voiceChannelControlService.ensurePanel(channel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     }
@@ -12998,7 +13005,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
   function formatSettings(settings) {
     const text = formatLegacySettings(settings);
     if (!settings) return text;
-    return `${text}\n\n【プロフィール】\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}\n\n【VCコントロール】\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}`;
+    return `${text}\n\n【プロフィール】\n自己紹介チャンネル: ${settings.profileIntroductionChannelId ? `<#${settings.profileIntroductionChannelId}>` : "未設定"}\n\n【VCコントロール】\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}\n退出予定通知を残す: ${settings.voiceExitScheduleKeepMessage !== false ? "はい" : "いいえ"}`;
   }
 
   async function persistSplitParticipantMemberIds(sessionId, participantMemberIds) {

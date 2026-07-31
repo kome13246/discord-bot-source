@@ -285,7 +285,8 @@ export const settingCommand = new SlashCommandBuilder()
       .setName("vc_control")
       .setDescription("VCコントロールパネルを設定します")
       .addChannelOption((option) => option.setName("category").setDescription("対象カテゴリ").addChannelTypes(ChannelType.GuildCategory).setRequired(false))
-      .addRoleOption((option) => option.setName("notify_role").setDescription("タイマー終了通知ロール").setRequired(false)),
+      .addRoleOption((option) => option.setName("notify_role").setDescription("VCコントロール通知ロール").setRequired(false))
+      .addBooleanOption((option) => option.setName("exit_schedule_keep_message").setDescription("退出予定の通知メッセージを残す").setRequired(false)),
   )
   .addSubcommand((subcommand) =>
     subcommand
