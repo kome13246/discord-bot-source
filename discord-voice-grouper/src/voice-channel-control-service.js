@@ -63,6 +63,14 @@ function isRetryableDiscordError(error) {
   return error?.status >= 500 || error?.code === "ETIMEDOUT" || error?.code === "ECONNRESET";
 }
 
+function normalizeVoiceExitSchedule(schedule) {
+  return typeof schedule?.toObject === "function" ? schedule.toObject() : schedule;
+}
+
+function hasRequiredVoiceExitScheduleFields(schedule) {
+  return Boolean(schedule?._id && schedule.guildId && schedule.userId && schedule.voiceChannelId && schedule.scheduledAt);
+}
+
 export function createVoiceChannelControlService({ getGuildSettings, sendOperationalLog = async () => {}, setVoiceChannelStatus = async (channel, status) => channel.setVoiceChannelStatus?.(status) }) {
   const getSettings = (guild) => getGuildSettings(guild.id).catch(() => null);
   const isTarget = (channel, settings) => channel?.type === ChannelType.GuildVoice
@@ -117,9 +125,16 @@ export function createVoiceChannelControlService({ getGuildSettings, sendOperati
   }
 
   async function notify(schedule, alreadyClaimed = false) {
-    const claimed = alreadyClaimed ? schedule : await claimVoiceExitSchedule(schedule._id);
+    const normalizedSchedule = normalizeVoiceExitSchedule(schedule);
+    const activeGuild = normalizedSchedule?.guild;
+    if (!hasRequiredVoiceExitScheduleFields(normalizedSchedule)) {
+      const error = new Error("通知に必要な退出予定データが不足しています。");
+      console.error("退出予定の通知を開始できません:", normalizedSchedule, error);
+      await logFailure("通知予定データ検証", normalizedSchedule, error, activeGuild);
+      return;
+    }
+    const claimed = alreadyClaimed ? normalizedSchedule : await claimVoiceExitSchedule(normalizedSchedule._id);
     if (!claimed) return;
-    const activeGuild = schedule.guild;
     const channel = activeGuild?.channels?.cache?.get(claimed.voiceChannelId)
       ?? await activeGuild?.channels?.fetch?.(claimed.voiceChannelId).catch(() => null);
     const member = activeGuild?.members?.cache?.get(claimed.userId)
@@ -168,16 +183,23 @@ export function createVoiceChannelControlService({ getGuildSettings, sendOperati
   }
 
   function scheduleVoiceExit(guild, schedule) {
-    clearScheduleTimer(schedule.guildId, schedule.userId);
-    const delay = new Date(schedule.scheduledAt).getTime() - Date.now();
+    const normalizedSchedule = normalizeVoiceExitSchedule(schedule);
+    if (!hasRequiredVoiceExitScheduleFields(normalizedSchedule)) {
+      const error = new Error("タイマーに必要な退出予定データが不足しています。");
+      console.error("退出予定タイマーを登録できません:", normalizedSchedule, error);
+      void logFailure("タイマー予定データ検証", normalizedSchedule, error, guild);
+      return;
+    }
+    clearScheduleTimer(normalizedSchedule.guildId, normalizedSchedule.userId);
+    const delay = new Date(normalizedSchedule.scheduledAt).getTime() - Date.now();
     if (delay < -EXIT_DELAY_GRACE_MS) {
-      return cancelVoiceExitSchedule(schedule.guildId, schedule.userId).catch((error) => logFailure("期限切れ処理", schedule, error, guild));
+      return cancelVoiceExitSchedule(normalizedSchedule.guildId, normalizedSchedule.userId).catch((error) => logFailure("期限切れ処理", normalizedSchedule, error, guild));
     }
     const run = () => {
-      scheduleTimers.delete(key(schedule.guildId, schedule.userId));
-      void notify({ ...schedule, guild }).catch((error) => logFailure("通知処理", schedule, error, guild));
+      scheduleTimers.delete(key(normalizedSchedule.guildId, normalizedSchedule.userId));
+      void notify({ ...normalizedSchedule, guild }).catch((error) => logFailure("通知処理", normalizedSchedule, error, guild));
     };
-    scheduleTimers.set(key(schedule.guildId, schedule.userId), setTimeout(run, Math.max(0, delay)));
+    scheduleTimers.set(key(normalizedSchedule.guildId, normalizedSchedule.userId), setTimeout(run, Math.max(0, delay)));
   }
 
   function scheduleNoticeDeletion(guild, notice) {

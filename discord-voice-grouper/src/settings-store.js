@@ -48,6 +48,12 @@ export function mergeGuildSettingsWithEnvironmentDefaults(
 /** Backward-compatible, idempotent read-time normalization. */
 export function normalizeGuildSettings(settings = {}) {
   const result = { ...settings };
+  result.fukyoThemeChannelId = typeof result.fukyoThemeChannelId === "string" && result.fukyoThemeChannelId
+    ? result.fukyoThemeChannelId : null;
+  result.fukyoWeeklyThemeEnabled = result.fukyoWeeklyThemeEnabled === true;
+  result.fukyoThemes = Array.isArray(result.fukyoThemes)
+    ? result.fukyoThemes.filter((theme) => theme && typeof theme.id === "string" && typeof theme.name === "string" && typeof theme.normalizedName === "string")
+    : [];
   result.voiceExitScheduleKeepMessage = result.voiceExitScheduleKeepMessage !== false;
   result.callWaitMode = "button";
   result.callWaitIntervalMinutes = [30, 45, 60].includes(Number(result.callWaitIntervalMinutes))
