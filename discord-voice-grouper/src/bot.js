@@ -770,11 +770,11 @@ async function handleProfileOpen(interaction) {
     profile = await UserProfile.findOne({ guildId: interaction.guildId, userId: interaction.user.id }).lean();
   } catch (error) {
     await logProfileFailure(interaction, "profile modal fetch failed", error);
-    await interaction.reply({ content: "プロフィールの取得に失敗しました。", flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: "自己紹介の取得に失敗しました。", flags: MessageFlags.Ephemeral });
     return;
   }
   const input = (id, label, style, max, value, required) => new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setMaxLength(max).setRequired(required).setValue(value ?? ""));
-  const modal = new ModalBuilder().setCustomId("profile_modal").setTitle("プロフィール登録・編集").addComponents(
+  const modal = new ModalBuilder().setCustomId("profile_modal").setTitle("自己紹介登録・編集").addComponents(
     input("profile_nickname", "呼び名", TextInputStyle.Short, 20, normalizeProfileValue(profile?.nickname, 20), true),
     input("profile_status", "現状", TextInputStyle.Short, 30, normalizeProfileValue(profile?.status, 30), false),
     input("profile_hobby", "趣味", TextInputStyle.Paragraph, 80, normalizeProfileValue(profile?.hobby, 80), false),
@@ -811,7 +811,7 @@ async function handleProfileModal(interaction) {
       { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   } catch (error) {
-    await interaction.editReply({ content: "プロフィールの保存に失敗しました。" }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+    await interaction.editReply({ content: "自己紹介の保存に失敗しました。" }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     await logProfileFailure(interaction, "profile save failed", error);
     return;
   }
@@ -832,7 +832,7 @@ async function handleProfileModal(interaction) {
     return null;
   });
   if (!latestProfile) {
-    await interaction.editReply({ content: "プロフィールの保存後確認に失敗しました。" });
+    await interaction.editReply({ content: "自己紹介の保存後確認に失敗しました。" });
     return;
   }
   let publication = { status: "unpublished" };
@@ -850,13 +850,13 @@ async function handleProfileModal(interaction) {
     }
   }
 
-  const baseMessage = existing ? "プロフィールを更新しました。" : "プロフィールを登録しました。";
+  const baseMessage = existing ? "自己紹介を更新しました。" : "自己紹介を登録しました。";
   if (publication.status === "updated") {
     await interaction.editReply({ content: `${baseMessage}\n自己紹介チャンネルのメッセージも更新しました。` });
     return;
   }
   if (publication.status === "update-failed") {
-    await interaction.editReply({ content: `${baseMessage}\nプロフィールは更新しましたが、自己紹介チャンネルのメッセージ更新に失敗しました。` });
+    await interaction.editReply({ content: `${baseMessage}\n自己紹介は更新しましたが、チャンネルのメッセージ更新に失敗しました。` });
     return;
   }
 
@@ -894,7 +894,7 @@ async function handleProfilePublishButton(interaction) {
   }
   const [, targetUserId] = interaction.customId.split(":");
   if (targetUserId !== interaction.user.id) {
-    await interaction.reply({ content: "このボタンはプロフィールを登録した本人だけが使用できます。", flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: "このボタンは自己紹介を登録した本人だけが使用できます。", flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -915,12 +915,12 @@ async function handleProfilePublishButton(interaction) {
     }
     profile = await UserProfile.findOne({ guildId: interaction.guildId, userId: targetUserId });
     if (!profile) {
-      await interaction.editReply({ content: "プロフィールが見つかりません。先にプロフィールを保存してください。" });
+      await interaction.editReply({ content: "自己紹介が見つかりません。先に自己紹介を保存してください。" });
       return;
     }
     const member = await interaction.guild.members.fetch(targetUserId).catch(() => null);
     if (interaction.user.bot || member?.user.bot) {
-      await interaction.editReply({ content: "Botのプロフィールは公開できません。" });
+      await interaction.editReply({ content: "Botの自己紹介は公開できません。" });
       return;
     }
     const settings = await getGuildSettings(interaction.guildId);
@@ -932,7 +932,7 @@ async function handleProfilePublishButton(interaction) {
       });
     }
     if (result.status === "published" || result.status === "updated") {
-      await interaction.editReply({ content: "自己紹介チャンネルにプロフィールを送信しました。" });
+      await interaction.editReply({ content: "自己紹介チャンネルへ送信しました。" });
       return;
     }
     if (result.status === "missing") {
