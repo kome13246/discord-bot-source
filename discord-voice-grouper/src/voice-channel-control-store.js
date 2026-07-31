@@ -6,9 +6,7 @@ export const upsertVoiceControl = (guildId, channelId, patch = {}) => VoiceChann
   { guildId, channelId }, { $set: { guildId, channelId, ...patch } }, { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, lean: true },
 );
 export const deleteVoiceControl = (guildId, channelId) => VoiceChannelControl.deleteOne({ guildId, channelId });
-export const setVoiceControlTimer = (guildId, channelId, timer) => VoiceChannelControl.findOneAndUpdate(
-  { guildId, channelId }, { $set: { timer } }, { returnDocument: "after", lean: true },
-);
-export const clearVoiceControlTimer = (guildId, channelId, timerId) => VoiceChannelControl.findOneAndUpdate(
-  { guildId, channelId, "timer.timerId": timerId }, { $set: { timer: null } }, { returnDocument: "after", lean: true },
+// Legacy VC-wide timer data is intentionally never restored as an exit schedule.
+export const clearLegacyVoiceControlTimers = () => VoiceChannelControl.updateMany(
+  { timer: { $exists: true } }, { $unset: { timer: "" } },
 );

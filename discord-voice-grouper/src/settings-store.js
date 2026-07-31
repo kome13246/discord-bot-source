@@ -48,6 +48,7 @@ export function mergeGuildSettingsWithEnvironmentDefaults(
 /** Backward-compatible, idempotent read-time normalization. */
 export function normalizeGuildSettings(settings = {}) {
   const result = { ...settings };
+  result.voiceExitScheduleKeepMessage = result.voiceExitScheduleKeepMessage !== false;
   result.callWaitMode = "button";
   result.callWaitIntervalMinutes = [30, 45, 60].includes(Number(result.callWaitIntervalMinutes))
     ? Number(result.callWaitIntervalMinutes)
