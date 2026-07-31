@@ -14,7 +14,7 @@ import {
 import { acquireMongoLease, releaseMongoLease } from "./mongo-lease-lock-store.js";
 
 const PANEL_TITLE = "プロフィール登録・編集";
-const PANEL_DESCRIPTION = "ここから登録したプロフィールはVCのチャットへ自動で送信されます";
+const PANEL_DESCRIPTION = "ここから登録したプロフィールはVC参加時にVCのチャットへ自動で送信されます";
 const REQUIRED_PERMISSIONS = [
   PermissionFlagsBits.ViewChannel,
   PermissionFlagsBits.SendMessages,
