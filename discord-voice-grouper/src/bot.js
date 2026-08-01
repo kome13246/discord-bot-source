@@ -3025,14 +3025,11 @@ async function publishKokuchi({ guild, weekday, sendChannel, overviewChannel, se
     throw new Error("A /kokuchi publication is already in progress for this guild.");
   }
   const currentSettings = settings ?? await getGuildSettings(guild.id);
-  const mentionRoleIds = [...new Set(Array.isArray(currentSettings?.kokuchiMentionRoleIds)
-    ? currentSettings.kokuchiMentionRoleIds.filter(Boolean)
-    : [])];
   postedAt = new Date();
   publicationAttempted = true;
   postedMessage = await sendChannel.send({
-    content: `${mentionRoleIds.map((roleId) => `<@&${roleId}>`).join(" ")} ${formatKokuchiMessage({ weekday, overviewChannelId: overviewChannel.id, eventTime: currentSettings?.kokuchiEventTime })}`.trim(),
-    allowedMentions: { roles: mentionRoleIds },
+    content: formatKokuchiMessage({ weekday, overviewChannelId: overviewChannel.id, eventTime: currentSettings?.kokuchiEventTime }),
+    allowedMentions: { roles: ["1506629235438129323"] },
   });
   if (onPublished) {
     await onPublished({ postedMessage, postedAt });
