@@ -1708,6 +1708,13 @@ async function handleShugoSetting(interaction) {
     "voice_reminder_parent_channel",
     false,
   );
+  const voiceReminderParentChannels = [
+    voiceReminderParentChannel,
+    interaction.options.getChannel("voice_reminder_parent_channel_2", false),
+    interaction.options.getChannel("voice_reminder_parent_channel_3", false),
+    interaction.options.getChannel("voice_reminder_parent_channel_4", false),
+    interaction.options.getChannel("voice_reminder_parent_channel_5", false),
+  ].filter(Boolean);
   const voiceReminderChildCategory = interaction.options.getChannel(
     "voice_reminder_child_category",
     false,
@@ -1727,8 +1734,10 @@ async function handleShugoSetting(interaction) {
     patch.voiceReminderEnabled = voiceReminderEnabled;
   }
 
-  if (voiceReminderParentChannel) {
-    patch.voiceReminderParentChannelId = voiceReminderParentChannel.id;
+  if (voiceReminderParentChannels.length > 0) {
+    const parentChannelIds = [...new Set(voiceReminderParentChannels.map((channel) => channel.id))];
+    patch.voiceReminderParentChannelIds = parentChannelIds;
+    patch.voiceReminderParentChannelId = parentChannelIds[0];
   }
 
   if (voiceReminderChildCategory) {
@@ -1756,15 +1765,19 @@ async function handleShugoSetting(interaction) {
       && [...voiceMonitorSessions.values()].some((session) => session.guildId === interaction.guildId),
   );
 
+  const sessions = [...voiceMonitorSessions.values()]
+    .filter((session) => session.guildId === interaction.guildId);
+  for (const session of sessions) {
+    const shouldKeepSession = settings.voiceReminderEnabled !== false
+      && await isVoiceChannelMonitored(interaction.guild, settings, session.voiceChannelId);
+    if (shouldKeepSession) continue;
+    const voiceChannel = await interaction.guild.channels.fetch(session.voiceChannelId).catch(() => null);
+    await stopVoiceMonitorSession(session, interaction.guild, voiceChannel, settings).catch((error) => {
+      logRecoverableError("Failed to clean up invalid voice monitor session", error);
+    });
+  }
+
   if (patch.voiceReminderEnabled === false) {
-    const sessions = [...voiceMonitorSessions.values()]
-      .filter((session) => session.guildId === interaction.guildId);
-    for (const session of sessions) {
-      const voiceChannel = await interaction.guild.channels.fetch(session.voiceChannelId).catch(() => null);
-      await stopVoiceMonitorSession(session, interaction.guild, voiceChannel, settings).catch((error) => {
-        logRecoverableError("Failed to clean up disabled voice monitor session", error);
-      });
-    }
     await reconcilePersistedVoiceParticipantRoleGrants(interaction.guild, settings).catch((error) => {
       logRecoverableError("Failed to reconcile disabled voice monitor grants", error);
     });
@@ -7208,6 +7221,8 @@ async function processRestoredWaitingMonitor(sessionId, guild) {
     }
     const waitingChannel = await guild.channels.fetch(session.waitingChannelId).catch(() => null);
     if (!waitingChannel?.isVoiceBased?.()) {
+      const splitStartMessage = await fetchSplitStartAnnouncement(guild, session);
+      await editSplitStartAnnouncementClosed(splitStartMessage);
       await SplitProcessSession.updateOne({ sessionId }, { $set: { waitingMonitorStatus: "closed", waitingMonitorClosedAt: new Date(), waitingVcCleanupCompleted: true } });
       clearRestoredWaitingMonitor(sessionId);
       return;
@@ -7220,10 +7235,14 @@ async function processRestoredWaitingMonitor(sessionId, guild) {
     const monitorEndsAt = new Date(session.waitingMonitorEndsAt).getTime();
     if (Number.isFinite(monitorEndsAt) && Date.now() >= monitorEndsAt) {
       if (hasUnderfilledChildChannel) {
-        await SplitProcessSession.updateOne(
+        const extended = await SplitProcessSession.updateOne(
           { sessionId, waitingMonitorLeaseOwner: waitingMonitorLeaseOwner, waitingMonitorStatus: "active" },
           { $set: { waitingMonitorStatus: "extended", waitingMonitorExtendedAt: new Date() } },
         );
+        if (extended.matchedCount === 1) {
+          const splitStartMessage = await fetchSplitStartAnnouncement(guild, session);
+          await editSplitStartAnnouncementExtended(splitStartMessage, waitingChannel);
+        }
       } else {
         const closing = await SplitProcessSession.findOneAndUpdate(
           { sessionId, status: "active", waitingMonitorStatus: { $in: ["active", "extended"] }, waitingMonitorLeaseOwner: waitingMonitorLeaseOwner },
@@ -7232,7 +7251,9 @@ async function processRestoredWaitingMonitor(sessionId, guild) {
         );
         if (closing) {
           const operationChannel = await guild.channels.fetch(session.operationChannelId).catch(() => null);
+          const splitStartMessage = await fetchSplitStartAnnouncement(guild, session);
           await notifyWaitingVcClosure(operationChannel, waitingChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+          await editSplitStartAnnouncementClosed(splitStartMessage);
           try {
             await waitingChannel.delete();
           } catch (error) {
@@ -9260,6 +9281,19 @@ async function editSplitStartAnnouncementClosed(message) {
   });
 }
 
+async function fetchSplitStartAnnouncement(guild, session) {
+  if (!guild || !session?.splitStartMessageChannelId || !session?.splitStartMessageId) {
+    return null;
+  }
+
+  const channel = await guild.channels.fetch(session.splitStartMessageChannelId).catch(() => null);
+  if (!channel?.messages?.fetch) {
+    return null;
+  }
+
+  return channel.messages.fetch(session.splitStartMessageId).catch(() => null);
+}
+
 function getWadaiTopics(settings) {
   const useSavedTopics = settings?.wadaiTopicsVersion === 2;
   const savedTopics =
@@ -10048,7 +10082,8 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
     return;
   }
 
-  if (settings?.voiceReminderParentChannelId === channelId) {
+  const parentChannelIds = getVoiceReminderParentChannelIds(settings);
+  if (parentChannelIds.includes(channelId)) {
     return;
   }
 
@@ -10091,7 +10126,7 @@ async function maybeSendAutoSplitSuggestion(guild, settings, channelId) {
       return;
     }
 
-    const canAutoSplit = Boolean(settings?.voiceReminderParentChannelId && settings?.tempRoleId);
+    const canAutoSplit = Boolean(parentChannelIds.length && settings?.tempRoleId);
     const components = [createAutoSplitRow(channelId, !canAutoSplit)];
     const mentionRoleId = settings?.voiceParticipantRoleId;
     const mentionText = mentionRoleId ? `<@&${mentionRoleId}> ` : "";
@@ -10162,37 +10197,56 @@ async function isVoiceChannelMonitored(guild, settings, channelId) {
   if (Array.isArray(settings?.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.includes(channelId)) {
     return true;
   }
-  // Do not treat every VC in a category as monitored. PB child channels are
-  // eligible only while they are recorded by an active split session.
-  return Boolean(await SplitProcessSession.exists({
-    guildId: guild.id,
-    status: "active",
-    childChannelIds: channelId,
-  }).catch(() => null));
+  return isPbChildVoiceChannel(guild, settings, voiceChannel);
+}
+
+function getVoiceReminderParentChannelIds(settings) {
+  const configured = settings?.voiceReminderParentChannelIds
+    ?? settings?.voiceReminderParentChannelId;
+  return [...new Set(
+    (Array.isArray(configured) ? configured : [configured])
+      .filter((channelId) => typeof channelId === "string" && channelId.length > 0),
+  )];
+}
+
+async function resolveVoiceReminderParentChannel(guild, settings, sourceChannel = null) {
+  const parentChannels = (await Promise.all(
+    getVoiceReminderParentChannelIds(settings).map((channelId) =>
+      guild.channels.fetch(channelId).catch(() => null),
+    ),
+  )).filter((channel) => channel?.isVoiceBased());
+
+  return parentChannels.find((channel) =>
+    sourceChannel?.parentId && channel.parentId === sourceChannel.parentId,
+  ) ?? parentChannels[0] ?? null;
 }
 
 async function isPbChildVoiceChannel(guild, settings, voiceChannel) {
-  if (!settings?.voiceReminderParentChannelId || !voiceChannel?.isVoiceBased()) {
+  if (!voiceChannel?.isVoiceBased()) {
     return false;
   }
 
-  const parentChannel = await guild.channels
-    .fetch(settings.voiceReminderParentChannelId)
-    .catch(() => null);
-
-  if (!parentChannel?.isVoiceBased() || voiceChannel.id === parentChannel.id) {
+  const parentChannelIds = getVoiceReminderParentChannelIds(settings);
+  if (!parentChannelIds.length || parentChannelIds.includes(voiceChannel.id)) {
     return false;
   }
 
-  if (settings.voiceReminderChildCategoryId) {
-    return voiceChannel.parentId === settings.voiceReminderChildCategoryId;
+  const parentChannels = (await Promise.all(
+    parentChannelIds.map((channelId) => guild.channels.fetch(channelId).catch(() => null)),
+  )).filter((channel) => channel?.isVoiceBased());
+  if (parentChannels.length === 0) {
+    return false;
   }
 
-  if (settings.childCategoryId) {
-    return voiceChannel.parentId === settings.childCategoryId;
+  const targetCategoryId = settings.voiceReminderChildCategoryId ?? settings.childCategoryId;
+  if (targetCategoryId) {
+    return voiceChannel.parentId === targetCategoryId;
   }
 
-  return Boolean(parentChannel.parentId && voiceChannel.parentId === parentChannel.parentId);
+  const parentCategoryIds = new Set(
+    parentChannels.map((channel) => channel.parentId).filter(Boolean),
+  );
+  return parentCategoryIds.has(voiceChannel.parentId);
 }
 
 function getNonBotVoiceMembers(voiceChannel) {
@@ -10855,10 +10909,12 @@ async function handleAutoSplitButton(interaction) {
     return;
   }
 
-const parentChannelId = settings?.voiceReminderParentChannelId;
-    const parentChannel = parentChannelId
-      ? await guild.channels.fetch(parentChannelId).catch(() => null)
-      : null;
+    const parentChannel = await resolveVoiceReminderParentChannel(
+      guild,
+      settings,
+      voiceChannel,
+    );
+    const parentChannelId = parentChannel?.id ?? null;
     const participantRole = settings?.tempRoleId
       ? await guild.roles.fetch(settings.tempRoleId).catch(() => null)
       : null;
@@ -11841,6 +11897,7 @@ async function handleSplitVoice(interaction) {
         settings,
         previousPairKeys: getPairKeysFromGroups(previousGroups),
         splitSessionId,
+        splitStartMessage,
         currentGroupMembers: new Map(
           transferResult.groupSummaries.map((summary) => [summary.channelId, new Set(summary.memberIds)]),
         ),
@@ -12656,6 +12713,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
         waitingMonitorExtendedAt: new Date(),
         waitingMonitorHeartbeatAt: new Date(),
       }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      await editSplitStartAnnouncementExtended(options.splitStartMessage, options.waitingChannel);
       await sendOperationalLog({
         guild: options.guild,
         settings: options.settings,
@@ -12692,6 +12750,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       ).catch(() => null);
       if (closing) {
         await notifyWaitingVcClosure(options.channel, options.waitingChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+        await editSplitStartAnnouncementClosed(options.splitStartMessage);
         try {
           await options.waitingChannel.delete();
         } catch (error) {
@@ -13413,9 +13472,9 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       "",
       "【雑談・VC集合】",
       `機能: ${settings.voiceReminderEnabled === false ? "無効" : "有効"}`,
-      `対象PB親VC: ${settings.voiceReminderParentChannelId ? `<#${settings.voiceReminderParentChannelId}>` : "未設定"}`,
+      `対象PB親VC: ${getVoiceReminderParentChannelIds(settings).length ? getVoiceReminderParentChannelIds(settings).map((id) => `<#${id}>`).join(" ") : "未設定"}`,
       `対象子VCカテゴリ: ${settings.voiceReminderChildCategoryId ? `<#${settings.voiceReminderChildCategoryId}>` : "未設定"}`,
-      `明示的な監視VC: ${Array.isArray(settings.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.length ? settings.voiceMonitorVoiceChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定（PB子VC判定を使用）"}`,
+      `明示的な監視VC: ${Array.isArray(settings.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.length ? settings.voiceMonitorVoiceChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定（子VCカテゴリ判定を使用）"}`,
       `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
       "",
       "【kokuchi】",

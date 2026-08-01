@@ -190,6 +190,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_VOICE_REMINDER_ENABLED=true
 # PB_VOICE_REMINDER_CHANNEL_ID=123456789012345678
 # PB_VOICE_REMINDER_PARENT_CHANNEL_ID=123456789012345678
+# PB_VOICE_REMINDER_PARENT_CHANNEL_IDS=123456789012345678,234567890123456789
 # PB_VOICE_REMINDER_CHILD_CATEGORY_ID=123456789012345678
 # PB_WADAI_CHANNEL_ID=123456789012345678
 # PB_POST_SPLIT_WADAI_CHANNEL_ID=123456789012345678
@@ -233,6 +234,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_VOICE_REMINDER_CHANNEL_ID` | 任意 | VCリマインダーを送るテキストチャンネルIDです。 |
 | `PB_VOICE_TOPIC_CHANNEL_ID` | 任意 | 旧設定との互換用です。現在のリマインダー話題フォームでは使いません。 |
 | `PB_VOICE_REMINDER_PARENT_CHANNEL_ID` | 任意 | リマインダー対象にするPB親VCのIDです。 |
+| `PB_VOICE_REMINDER_PARENT_CHANNEL_IDS` | 任意 | リマインダー対象にするPB親VCのIDをカンマ区切りで指定します。単一IDの旧設定より優先されます。 |
 | `PB_VOICE_REMINDER_CHILD_CATEGORY_ID` | 任意 | リマインダー対象にするPB子VCカテゴリIDです。未設定時はPB親VCのカテゴリから判定します。 |
 | `PB_WADAI_CHANNEL_ID` | 任意 | `/kokuchi` の告知送信先、告知時刻から算出する事前案内送信先、`/splitvc` 後のスタート案内・参加お礼送信先として使うテキストチャンネルIDです。 |
 | `PB_POST_SPLIT_WADAI_CHANNEL_ID` | 任意 | `/splitvc` 後に最初の話題と発話順を送るテキストチャンネルIDです。未設定時は実行チャンネルへ送ります。 |
@@ -485,7 +487,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_KOKUCHI_MENTION_ROLE_IDS`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_OTEBO_PREVIEW_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_INTERVAL_MINUTES`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID` または `PB_VOICE_REMINDER_PARENT_CHANNEL_IDS`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_KOKUCHI_MENTION_ROLE_IDS`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_OTEBO_PREVIEW_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_INTERVAL_MINUTES`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
 Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting zatudan`、`/setting kokuchi` などで再設定が必要になることがあります。
 
@@ -565,7 +567,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 ```text
 /setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ kokuchi_overview_channel:告知概要チャンネル waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
 /setting bosyu bosyu_channel:募集チャンネル bosyu_mention_role:@募集通知
-/setting zatudan voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_parent_channel:PB親VC voice_reminder_child_category:PB子VCカテゴリ
+/setting zatudan voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_parent_channel:PB親VC voice_reminder_parent_channel_2:PB親VC2 voice_reminder_child_category:PB子VCカテゴリ
 /setting kokuchi announcement_channel:告知・スタート案内送信先 event_time:21:00 gathering_voice_channel:集合VC mention_role:@告知ロール
 /setting logs log_channel:運用ログ
 /setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
@@ -591,8 +593,8 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `bosyu_mention_role` | `/b` の募集メッセージでメンションするロールです。 |
 | `voice_participant_role` | VCリマインダーの対象VCに2人以上集まったとき付与するロールです。 |
 | `voice_reminder_enabled` | VC集合フォームの開始通知の有効・無効を保存します。`false` でも参加者ロールの付与・解除は行います。 |
-| `voice_reminder_parent_channel` | リマインダー対象にするPB親VCです。 |
-| `voice_reminder_child_category` | リマインダー対象にするPB子VCカテゴリです。未設定時はPB親VCのカテゴリから判定します。 |
+| `voice_reminder_parent_channel` / `_2`〜`_5` | リマインダー対象から除外するPB親VCを複数指定できます。 |
+| `voice_reminder_child_category` | リマインダー対象にするPB子VCカテゴリです。設定時は、そのカテゴリ内の子VCだけを対象にします。未設定時は指定した親VCのカテゴリから判定します。 |
 | `announcement_channel` | `/kokuchi` の告知送信先と、`/splitvc` 後のスタート案内・参加お礼送信先を兼ねます。`/kokuchi` の `channel` を省略した場合にも使います。 |
 | `post_split_wadai_channel` | `/splitvc` 後の最初の話題と発話順の送信先です。未設定時は実行チャンネルへ送ります。 |
 | `split_start_channel` | 旧設定との互換用です。現在は `announcement_channel` と同じ送信先として扱います。 |
@@ -834,7 +836,7 @@ Discord APIのチャンネルステータス項目は使わず、募集メッセ
 
 ### VC集合フォーム
 
-VC集合フォームは、PB子VCまたは設定された監視VCに2人以上集まったときに開始します。
+VC集合フォームは、`voice_reminder_child_category`で指定したカテゴリ内のPB子VC、または設定された監視VCに2人以上集まったときに開始します。
 
 - 開始時に送信先へ参加者ロールをメンションし、話題フォームボタン付きの集合メッセージを1回送ります。
 - 開始時に `/b` の使用可能チャンネルへ参加者ロールをメンションした開始通知を送ります。`voice_reminder_enabled:false` の場合はこの公開通知を送りませんが、参加者ロールの付与・解除は継続します。
@@ -845,7 +847,7 @@ VC集合フォームは、PB子VCまたは設定された監視VCに2人以上�
 - セッション終了時、他の有効なVCセッションにいないメンバーから参加者ロールを解除します。
 - Botが付与した参加者ロールは記録され、再起動時に現在のVC参加状況を照合します。再起動中に離脱して条件を満たさなくなったメンバーのロールも解除します。
 - `voice_reminder_child_category` で指定したカテゴリ内のVC単体で6人以上になると、自動振り分け提案を送ります。
-- `voice_reminder_child_category` が未設定の場合は、VC集合フォームと同じく `child_category`、またはPB親VCのカテゴリから判定します。
+- `voice_reminder_child_category` が未設定の場合は、`child_category`、または指定したPB親VCのカテゴリから判定します。
 - 自動振り分け提案では、`voice_participant_role` で指定したVC集合フォームの参加者ロールをメンションします。
 
 話題フォーム:
