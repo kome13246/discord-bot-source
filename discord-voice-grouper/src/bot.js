@@ -4676,6 +4676,7 @@ async function processCallWaitForGuild(guild, settings) {
         settings,
         action: "reset",
         memberIds: [],
+        recruitmentId: evaluatedRecruitmentId,
       });
     }
   }
@@ -5245,6 +5246,14 @@ async function registerCallWaitInterestFromPublicButton(interaction) {
       content: `興味あり登録後の付随処理に失敗しました。募集ID: ${prompt.messageId}、ユーザーID: ${interaction.user.id}、エラー: ${error?.stack ?? error}`,
     }).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
   }
+  await sendCallWaitApplicantLog({
+    guild: interaction.guild,
+    settings,
+    action: "interest",
+    userId: interaction.user.id,
+    memberIds: prompt.memberIds,
+    recruitmentId: prompt.messageId,
+  });
   await interaction.editReply({
     content: "興味ありとして登録しました。\n通知条件の確認や変更は、Botから届いたDMで行えます。",
     flags: MessageFlags.Ephemeral,
@@ -5482,6 +5491,7 @@ async function finalizeCallWaitParticipantRegistration({ guild, settings, recrui
     action: "join",
     userId,
     memberIds,
+    recruitmentId,
     source,
   });
   await notifyCallWaitInterests(guild.id, recruitmentId);
@@ -5972,17 +5982,18 @@ async function handleCallWaitButton(interaction) {
       source: "public_prompt",
     });
   } else {
+    if (activeInterest) await endCallWaitInterest(activeInterest, "canceled");
     await sendCallWaitApplicantLog({
       guild: interaction.guild,
       settings: latestSettings ?? settings,
       action: "cancel",
       userId,
       memberIds: displayedMemberIds,
+      recruitmentId: prompt.messageId,
     });
   }
 
   if (!isJoin) {
-    if (activeInterest) await endCallWaitInterest(activeInterest, "canceled");
     await reconcileCallWaitInterestThresholds(interaction.guildId, prompt.messageId);
   }
 
@@ -6006,6 +6017,7 @@ async function sendCallWaitApplicantLog({
   action,
   userId = null,
   memberIds,
+  recruitmentId = null,
   source = null,
 }) {
   const actionLabel =
@@ -6013,14 +6025,19 @@ async function sendCallWaitApplicantLog({
       ? "希望ボタンが押されました"
       : action === "cancel"
         ? "希望キャンセルボタンが押されました"
-        : "希望者リストをリセットしました";
+        : action === "interest"
+          ? "興味ありボタンが押されました"
+          : "希望者リストをリセットしました";
   const list = await formatCallWaitApplicantList(guild, memberIds);
+  const interestList = await formatCallWaitInterestList(guild, recruitmentId);
   const lines = [
     `通話待機システム: ${actionLabel}`,
     `操作ユーザー: ${userId ? `<@${userId}>` : "システム"}`,
     ...(action === "join" ? [`操作元: ${source === "interest_dm" ? "DM" : "公開募集メッセージ"}`] : []),
     "現在の通話希望者:",
     list,
+    "現在の興味あり:",
+    interestList,
   ];
 
   await sendOperationalLog({
@@ -6044,6 +6061,31 @@ async function formatCallWaitApplicantList(guild, memberIds) {
   for (const memberId of uniqueMemberIds) {
     const member = await guild.members.fetch(memberId).catch(() => null);
     lines.push(member ? `- ${member.displayName} (${member.id})` : `- ${memberId}`);
+  }
+
+  return lines.join("\n");
+}
+
+async function formatCallWaitInterestList(guild, recruitmentId) {
+  if (!recruitmentId) {
+    return "なし";
+  }
+
+  const memberIds = await CallWaitInterest.find({
+    guildId: guild.id,
+    recruitmentId,
+    status: "active",
+  }).distinct("userId");
+
+  if (memberIds.length === 0) {
+    return "なし";
+  }
+
+  const lines = [];
+
+  for (const memberId of memberIds) {
+    const member = await guild.members.fetch(memberId).catch(() => null);
+    lines.push(member ? `・${member.displayName}(${member.id})` : `・${memberId}`);
   }
 
   return lines.join("\n");
