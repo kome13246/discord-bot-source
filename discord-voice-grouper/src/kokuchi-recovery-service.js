@@ -241,9 +241,15 @@ export function createKokuchiRecoveryService({
   }
 
   async function restorePermission({ guild } = {}) {
-    const settings = await getGuildSettings(guild.id);
-    const result = await restoreIfNeeded(guild, settings);
-    return { status: result.status, result: result.status === "restored" || result.status === "not_needed" ? "success" : "failed", before: settings, errors: result.errors };
+    const lease = await acquireMongoLease(`kokuchi-recovery:${guild.id}`, { leaseMs: 2 * 60 * 1000 });
+    if (!lease) return { status: "busy", result: "failed", errors: ["kokuchi recovery is already running."] };
+    try {
+      const settings = await getGuildSettings(guild.id);
+      const result = await restoreIfNeeded(guild, settings);
+      return { status: result.status, result: result.status === "restored" || result.status === "not_needed" ? "success" : "failed", before: settings, errors: result.errors };
+    } finally {
+      await releaseMongoLease(lease).catch((error) => logger.error?.(`kokuchi recovery lease release failed for ${guild.id}: ${error?.message ?? error}`));
+    }
   }
 
   return { getCurrentTarget, normalCancel, forceTerminate, clearStateOnly, restorePermission };

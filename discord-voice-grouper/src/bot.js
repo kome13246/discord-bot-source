@@ -295,10 +295,12 @@ const fukyoThemeService = createFukyoThemeService({
   sendOperationalLog,
   acquireMongoLease,
   releaseMongoLease,
+  requestOperationalStatusRefresh,
 });
 const operationalStatusService = createOperationalStatusService({
   getGuildSettings,
   client,
+  getVoiceMonitorSessions: () => [...voiceMonitorSessions.values()],
   getStartupState: () => ({
     startedAt: botStartedAt,
     restoreCompleted: startupRestoreCompleted,
@@ -307,6 +309,8 @@ const operationalStatusService = createOperationalStatusService({
 });
 const operationalStatusBoardService = createOperationalStatusBoardService({
   getOperationalStatusSnapshot: (guild) => operationalStatusService.getOperationalStatusSnapshot(guild),
+  acquireMongoLease,
+  releaseMongoLease,
   logger: console,
 });
 const kokuchiRecoveryService = createKokuchiRecoveryService({
@@ -1401,40 +1405,63 @@ async function handleRemoveRole(interaction) {
 }
 
 async function runOperationalParticipantRoleRemoval(guild) {
-  const settings = await getGuildSettings(guild.id);
-  const roleIds = [...new Set([settings?.tempRoleId, settings?.voiceParticipantRoleId].filter(Boolean))];
-  if (!roleIds.length) return { status: "not-needed", result: "success", errors: [] };
-  const botMember = guild.members.me ?? await guild.members.fetchMe().catch(() => null);
-  if (!botMember?.permissions?.has(PermissionFlagsBits.ManageRoles)) return { status: "failed", result: "failed", errors: ["Bot lacks ManageRoles permission."] };
-  if (!await guild.members.fetch().then(() => true).catch(() => false)) return { status: "failed", result: "failed", errors: ["Guild members could not be fetched."] };
-  const roles = [];
-  const errors = [];
-  for (const roleId of roleIds) {
-    const role = await guild.roles.fetch(roleId).catch(() => null);
-    if (!role || !role.editable) errors.push(`Role ${roleId} is missing or not editable.`);
-    else roles.push(role);
-  }
-  const members = new Map();
-  for (const role of roles) for (const member of guild.members.cache.filter((item) => !item.user.bot && item.roles.cache.has(role.id)).values()) members.set(member.id, member);
-  let removed = 0;
-  let failed = 0;
-  for (const member of members.values()) {
-    for (const role of roles) {
-      if (!member.roles.cache.has(role.id)) continue;
+  const lease = await acquireMongoLease(`participant-role-cleanup:${guild.id}`, { leaseMs: 5 * 60 * 1000 });
+  if (!lease) return { status: "busy", result: "failed", errors: ["Participant role cleanup is already running."] };
+  try {
+    const settings = await getGuildSettings(guild.id);
+    const roleIds = [...new Set([settings?.tempRoleId, settings?.voiceParticipantRoleId].filter(Boolean))];
+    if (!roleIds.length) return { status: "not-needed", result: "success", errors: [] };
+    const botMember = guild.members.me ?? await guild.members.fetchMe().catch(() => null);
+    if (!botMember?.permissions?.has(PermissionFlagsBits.ManageRoles)) return { status: "failed", result: "failed", errors: ["Bot lacks ManageRoles permission."] };
+    const roles = new Map();
+    const errors = [];
+    for (const roleId of roleIds) {
+      const role = await guild.roles.fetch(roleId).catch(() => null);
+      if (!role || !role.editable) errors.push(`Role ${roleId} is missing or not editable.`);
+      else roles.set(roleId, role);
+    }
+    let grantsQuery = VoiceParticipantRoleGrant.find({
+      guildId: guild.id,
+      roleId: { $in: [...roles.keys()] },
+      grantedByBot: true,
+      status: { $in: ["active", "removing", "failed"] },
+    });
+    const grants = typeof grantsQuery.lean === "function" ? await grantsQuery.lean() : await grantsQuery;
+    let removed = 0;
+    let skipped = 0;
+    let failed = errors.length;
+    for (const grant of grants ?? []) {
+      const role = roles.get(grant.roleId);
+      if (!role) continue;
+      const member = await guild.members.fetch(grant.memberId).catch(() => null);
+      if (!member || member.user?.bot) {
+        skipped += 1;
+        continue;
+      }
+      const grantFilter = grant._id
+        ? { _id: grant._id, guildId: guild.id, grantedByBot: true }
+        : { guildId: guild.id, memberId: grant.memberId, roleId: grant.roleId, sourceType: grant.sourceType, sourceId: grant.sourceId, grantedByBot: true };
       try {
+        if (!member.roles.cache.has(role.id)) {
+          await VoiceParticipantRoleGrant.updateOne(grantFilter, { $set: { status: "removed", removedAt: new Date(), cleanupAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), lastError: null } });
+          removed += 1;
+          continue;
+        }
+        await VoiceParticipantRoleGrant.updateOne(grantFilter, { $set: { status: "removing", lastError: null } });
         await member.roles.remove(role, "Operational status board role cleanup");
-        await VoiceParticipantRoleGrant.updateMany(
-          { guildId: guild.id, memberId: member.id, roleId: role.id, status: { $in: [null, "active", "removing", "failed"] } },
-          { $set: { status: "removed", removedAt: new Date(), cleanupAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } },
-        );
+        await VoiceParticipantRoleGrant.updateOne(grantFilter, { $set: { status: "removed", removedAt: new Date(), cleanupAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), lastError: null } });
         removed += 1;
       } catch (error) {
         failed += 1;
-        errors.push(`${member.id}/${role.id}: ${error?.message ?? error}`);
+        errors.push(`${grant.memberId}/${grant.roleId}: ${error?.message ?? error}`);
+        await VoiceParticipantRoleGrant.updateOne(grantFilter, { $set: { status: "failed", lastError: String(error?.message ?? error).slice(0, 1000) } }).catch(() => {});
       }
     }
+    const status = failed ? (removed ? "partial" : "failed") : "completed";
+    return { status, result: failed ? (removed ? "partial" : "failed") : "success", removed, skipped, failed, errors };
+  } finally {
+    await releaseMongoLease(lease).catch((error) => logRecoverableError("Failed to release participant role cleanup lease", error));
   }
-  return { status: failed ? (removed ? "partial" : "failed") : "completed", result: failed ? (removed ? "partial" : "failed") : "success", removed, failed, errors };
 }
 
 async function reinstallOperationalPanels(guild) {
@@ -1475,8 +1502,12 @@ async function closeExpiredOperationalRecruitments(guild) {
     }
     for (const recruitment of expiredOtebo) {
       try {
-        await processOteboDeadline(guild.id, recruitment.id);
-        results.push(`otebo:${recruitment.id}`);
+        const result = await processOteboDeadline(guild.id, recruitment.id);
+        if (result?.status === "busy") {
+          errors.push(`otebo:${recruitment.id}: deadline processing is already running`);
+        } else {
+          results.push(`otebo:${recruitment.id}`);
+        }
       } catch (error) {
         errors.push(`otebo:${recruitment.id}: ${error?.message ?? error}`);
       }
@@ -3381,6 +3412,12 @@ async function handleKokuchiReservationCancel(interaction) {
     await interaction.followUp({ content: "この告知予約をキャンセルする権限がありません。", flags: MessageFlags.Ephemeral });
     return;
   }
+  const lease = await acquireMongoLease(`kokuchi-recovery:${interaction.guildId}`, { leaseMs: 5 * 60 * 1000 });
+  if (!lease) {
+    await interaction.followUp({ content: "Kokuchi recovery is already running; please retry shortly.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  try {
   if (!["pending", "sent", "cancel_partial"].includes(reservation.status)) {
     const content = reservation.status === "canceled"
         ? "この告知予約はすでにキャンセルされています。"
@@ -3423,6 +3460,9 @@ async function handleKokuchiReservationCancel(interaction) {
     return;
   }
   await interaction.followUp({ content: "この告知予約はすでに処理されています。", flags: MessageFlags.Ephemeral });
+  } finally {
+    await releaseMongoLease(lease).catch((error) => logRecoverableError("Failed to release kokuchi cancellation lease", error));
+  }
 }
 
 function emptyKokuchiCancellationResult() {
@@ -6341,6 +6381,15 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
       await removeCallWaitRoleFromMembers(guild, roleId, targetMemberIds, payload);
     }
 
+    if (payload?.sourceType === "otebo" && payload.sourceId) {
+      const currentSettings = await getGuildSettings(guild.id);
+      const recruitment = getOteboRecruitment(currentSettings, payload.sourceId);
+      if (recruitment?.status === "cleanup_pending") {
+        await deleteOteboRecruitmentState(guild.id, currentSettings, payload.sourceId);
+        clearOteboRecruitmentTimers(guild.id, payload.sourceId);
+      }
+    }
+
     if (payload?.sessionId) {
       const settings = await getGuildSettings(guild.id);
 
@@ -7227,10 +7276,10 @@ function startRestoredWaitingMonitor(session, guild) {
   const timer = setInterval(() => {
     void processRestoredWaitingMonitor(session.sessionId, guild).catch((error) => {
       console.error(`Restored waiting monitor failed for ${session.sessionId}:`, error);
-    });
+    }).finally(() => requestOperationalStatusRefresh(guild.id, "split-waiting-monitor"));
   }, WAITING_ROOM_POLL_MS);
   restoredWaitingMonitorTimers.set(session.sessionId, timer);
-  void processRestoredWaitingMonitor(session.sessionId, guild);
+  void processRestoredWaitingMonitor(session.sessionId, guild).finally(() => requestOperationalStatusRefresh(guild.id, "split-waiting-monitor"));
 }
 
 async function restoreSplitProcessSessions() {
@@ -8397,6 +8446,9 @@ async function processOteboDeadline(guildId, recruitmentId) {
     return;
   }
 
+  const deadlineLease = await acquireMongoLease(`otebo-deadline:${guild.id}:${recruitmentId}`, { leaseMs: 2 * 60 * 1000 });
+  if (!deadlineLease) return { status: "busy" };
+  try {
   const settings = await getGuildSettings(guild.id);
   const recruitment = getOteboRecruitment(settings, recruitmentId);
 
@@ -8450,6 +8502,9 @@ async function processOteboDeadline(guildId, recruitmentId) {
     action: "reset",
     memberIds: [],
   });
+  } finally {
+    await releaseMongoLease(deadlineLease).catch((error) => logRecoverableError("Failed to release otebo deadline lease", error));
+  }
 }
 
 async function releaseOteboSuccessClaim(guild, recruitmentId, error) {
@@ -11159,7 +11214,7 @@ function scheduleBumpReminder(reminder) {
     bumpReminderTimers.delete(reminder.id);
     void sendBumpReminder(reminder).catch((error) => {
       console.error(error);
-    });
+    }).finally(() => requestOperationalStatusRefresh(reminder.guildId, "bump-reminder"));
   }, delayMs);
 
   bumpReminderTimers.set(reminder.id, timer);

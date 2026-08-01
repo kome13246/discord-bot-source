@@ -73,7 +73,7 @@ function splitText(text, max = 1900) {
   return output;
 }
 
-export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, sendOperationalLog, acquireMongoLease, releaseMongoLease }) {
+export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, sendOperationalLog, acquireMongoLease, releaseMongoLease, requestOperationalStatusRefresh = () => {} }) {
   let timer = null;
   let client = null;
   let stopped = false;
@@ -82,6 +82,14 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
     const lease = await acquireMongoLease(`fukyo-theme:${guildId}`, { leaseMs: 60_000 });
     if (!lease) return { locked: false };
     try { return { locked: true, value: await work() }; } finally { await releaseMongoLease(lease).catch(() => null); }
+  }
+
+  function refreshStatus(guildId, reason) {
+    try {
+      requestOperationalStatusRefresh(guildId, reason);
+    } catch (error) {
+      console.error(`Fukyo operational status refresh request failed: ${error?.message ?? error}`);
+    }
   }
 
   function themes(settings) {
@@ -155,7 +163,9 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
       }
     });
     if (!locked.locked) await log(guild, currentSettings, `布教テーマ週次投稿をロック取得失敗のため中止しました。guildId=${guild.id} weekKey=${slot.weekKey}`, true);
-    return locked.value ?? { status: "lock-unavailable" };
+    const result = locked.value ?? { status: "lock-unavailable" };
+    refreshStatus(guild.id, `fukyo-weekly:${result.status}`);
+    return result;
   }
 
   async function runWeeklyForAllGuilds() {
@@ -193,7 +203,9 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
         const settings = await getGuildSettings(interaction.guildId); const current = themes(settings);
         if (current.some((theme) => theme.normalizedName === normalizedName)) return { duplicate: true };
         const next = [...current, { id: crypto.randomUUID(), name, normalizedName }];
-        await saveGuildSettings(interaction.guildId, { fukyoThemes: next }); return { name };
+        await saveGuildSettings(interaction.guildId, { fukyoThemes: next });
+        refreshStatus(interaction.guildId, "fukyo-theme-add");
+        return { name };
       });
       if (!locked.locked) return reply(interaction, "別の布教テーマ操作を処理中です。少し待ってから再実行してください。");
       return reply(interaction, locked.value.duplicate ? "同じ布教テーマがすでに登録されています。" : `布教テーマ「${name}」を追加しました。`);
@@ -215,6 +227,7 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
         current.splice(number - 1, 1); await saveGuildSettings(interaction.guildId, { fukyoThemes: current });
         const state = await getFukyoThemeState(interaction.guildId);
         if (state) await saveFukyoThemeState(interaction.guildId, { ...state, usedThemeIds: (state.usedThemeIds ?? []).filter((id) => id !== target.id) });
+        refreshStatus(interaction.guildId, "fukyo-theme-delete");
         return target;
       });
       if (!locked.locked) return reply(interaction, "別の布教テーマ操作を処理中です。少し待ってから再実行してください。");
@@ -230,6 +243,7 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
         return publish(interaction.guild, settings, number === null ? null : number - 1);
       });
       if (!locked.locked) return reply(interaction, "別の布教テーマ操作を処理中です。少し待ってから再実行してください。");
+      refreshStatus(interaction.guildId, "fukyo-theme-send");
       if (!locked.value.ok) {
         const messages = { no_themes: "布教テーマは登録されていません。", invalid_number: "その番号の布教テーマはありません。", channel_missing: "布教テーマの投稿先チャンネルが設定されていません。", channel_unavailable: "布教テーマの投稿先チャンネルが見つからないか、送信できません。", permission_denied: "Botに投稿先チャンネルの閲覧または送信権限がありません。" };
         return reply(interaction, messages[locked.value.reason] ?? "布教テーマの送信に失敗しました。");
@@ -244,6 +258,7 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
       const patch = { ...(channel ? { fukyoThemeChannelId: channel.id } : {}), ...(enabled === null ? {} : { fukyoWeeklyThemeEnabled: enabled, ...(enabled && previous?.fukyoWeeklyThemeEnabled !== true ? { fukyoWeeklyThemeEnabledAt: new Date() } : {}) }) };
       const saved = await saveGuildSettings(interaction.guildId, patch);
       if (enabled === false) scheduleNext();
+      refreshStatus(interaction.guildId, "fukyo-setting");
       return reply(interaction, `布教テーマ設定を更新しました。\n投稿先: ${saved.fukyoThemeChannelId ? `<#${saved.fukyoThemeChannelId}>` : "未設定"}\n自動投稿: ${saved.fukyoWeeklyThemeEnabled ? "有効" : "無効"}`);
     },
   };
