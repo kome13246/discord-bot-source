@@ -63,6 +63,7 @@ import { OperationalStatusBoard } from "./models/operational-status-board.js";
 import { acquireMongoLease, releaseMongoLease } from "./mongo-lease-lock-store.js";
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
 import { buildProfileRegistrationPanelPayload, createProfileRegistrationPanelService } from "./profile-registration-panel-service.js";
+import { saveProfileRegistrationPanel } from "./profile-registration-panel-store.js";
 import {
   canSendPublicProfile,
   canPublishProfile,
@@ -836,6 +837,13 @@ async function handleSetupProfile(interaction) {
     await replyOrFollowUp(interaction, { content: "管理者のみ実行できます。", flags: MessageFlags.Ephemeral }); return;
   }
   await interaction.reply(buildProfileRegistrationPanelPayload());
+  const message = await interaction.fetchReply();
+  try {
+    await saveProfileRegistrationPanel({ guildId: interaction.guildId, channelId: message.channelId, messageId: message.id });
+  } catch (error) {
+    await message.delete().catch(() => null);
+    throw error;
+  }
 }
 
 async function handleProfileOpen(interaction) {
@@ -5270,6 +5278,12 @@ async function cancelCallWaitInterestFromPublicButton(interaction) {
   const interest = await CallWaitInterest.findOne({ guildId: interaction.guildId, recruitmentId: interaction.message?.id, userId: interaction.user.id, status: "active" }).lean();
   if (!interest) return false;
   await endCallWaitInterest(interest, "canceled");
+  await sendCallWaitInterestStateLog({
+    guildId: interaction.guildId,
+    recruitmentId: interest.recruitmentId,
+    userId: interaction.user.id,
+    action: "interest_cancel",
+  }).catch((error) => logRecoverableError("Failed to log call-wait interest cancellation", error));
   await interaction.reply({ content: "興味ありを解除しました。\nこの募集についてのDM通知は送信されません。", flags: MessageFlags.Ephemeral });
   return true;
 }
@@ -5280,6 +5294,12 @@ async function cancelCallWaitInterestFromDm(interaction) {
   const interest = await CallWaitInterest.findOne({ recruitmentId, userId: interaction.user.id, status: "active" }).lean();
   if (!interest) { await interaction.reply({ content: "この募集の興味あり登録は、すでに解除されています。", flags: MessageFlags.Ephemeral }); return; }
   await endCallWaitInterest(interest, "canceled");
+  await sendCallWaitInterestStateLog({
+    guildId: interest.guildId,
+    recruitmentId,
+    userId: interaction.user.id,
+    action: "interest_cancel",
+  }).catch((error) => logRecoverableError("Failed to log call-wait interest cancellation", error));
   await interaction.update({ content: formatCallWaitInterestCanceledContent(interest), components: [] });
 }
 
@@ -5873,6 +5893,14 @@ async function handleCallWaitButton(interaction) {
   if (!isJoin && !memberIds.includes(userId)) {
     if (activeInterest) {
       await endCallWaitInterest(activeInterest, "canceled");
+      await sendCallWaitApplicantLog({
+        guild: interaction.guild,
+        settings,
+        action: "interest_cancel",
+        userId,
+        memberIds,
+        recruitmentId: prompt.messageId,
+      });
       await interaction.reply({
         content: "興味ありを解除しました。\nこの募集についてのDM通知は送信されません。",
         flags: MessageFlags.Ephemeral,
@@ -6027,7 +6055,9 @@ async function sendCallWaitApplicantLog({
         ? "希望キャンセルボタンが押されました"
         : action === "interest"
           ? "興味ありボタンが押されました"
-          : "希望者リストをリセットしました";
+          : action === "interest_cancel"
+            ? "興味あり解除ボタンが押されました"
+            : "希望者リストをリセットしました";
   const list = await formatCallWaitApplicantList(guild, memberIds);
   const interestList = await formatCallWaitInterestList(guild, recruitmentId);
   const lines = [
@@ -6046,6 +6076,26 @@ async function sendCallWaitApplicantLog({
     fallbackChannel: null,
     content: lines.join("\n"),
     allowedMentions: { parse: [] },
+  });
+}
+
+async function sendCallWaitInterestStateLog({ guildId, recruitmentId, userId, action }) {
+  const guild =
+    client.guilds.cache.get(guildId) ??
+    (await client.guilds.fetch(guildId).catch(() => null));
+  if (!guild) return;
+
+  const settings = await getGuildSettings(guild.id);
+  const prompt = settings?.callWaitPrompt?.messageId === recruitmentId
+    ? settings.callWaitPrompt
+    : null;
+  await sendCallWaitApplicantLog({
+    guild,
+    settings,
+    action,
+    userId,
+    memberIds: normalizeCallWaitMemberIds(prompt?.memberIds),
+    recruitmentId,
   });
 }
 

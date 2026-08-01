@@ -207,6 +207,7 @@ test("a debounced request resolves the superseded request and moves only once", 
 test("bot integration shares the setup payload, restores modal values, and ignores unsafe message triggers", async () => {
   const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
   assert.match(source, /interaction\.reply\(buildProfileRegistrationPanelPayload\(\)\)/);
+  assert.match(source, /const message = await interaction\.fetchReply\(\);[\s\S]*?saveProfileRegistrationPanel\(\{[\s\S]*?messageId: message\.id/);
   assert.match(source, /UserProfile\.findOne\(\{ guildId: interaction\.guildId, userId: interaction\.user\.id \}\)\.lean\(\)/);
   assert.match(source, /normalizeProfileValue\(profile\?\.nickname, 20\)/);
   assert.match(source, /status: submittedValues\.status/);

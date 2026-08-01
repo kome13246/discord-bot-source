@@ -321,12 +321,14 @@ test("call-wait logs include the active interest members", async () => {
   const log = source.slice(logStart, logEnd);
   const registration = source.slice(interestStart, interestEnd);
   assert.match(log, /action === "interest"/);
+  assert.match(log, /action === "interest_cancel"/);
   assert.match(log, /recruitmentId = null/);
   assert.match(log, /現在の興味あり:/);
   assert.match(log, /CallWaitInterest\.find\(\{[\s\S]*?status: "active"/);
   assert.match(log, /・\$\{member\.displayName\}\(\$\{member\.id\}\)/);
   assert.match(registration, /action: "interest"/);
   assert.match(registration, /recruitmentId: prompt\.messageId/);
+  assert.match(source, /sendCallWaitInterestStateLog\(\{[\s\S]*?action: "interest_cancel"/);
 });
 
 test("failed interest threshold deliveries remain retryable instead of becoming sent", async () => {
