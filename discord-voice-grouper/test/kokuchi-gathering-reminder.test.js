@@ -87,3 +87,16 @@ test("split cancellation restores pending gathering VC permissions and remove-ro
   assert.match(remove, /partiallySucceeded/);
   assert.match(remove, /fullyFailed/);
 });
+
+test("kokuchi publication keeps only the fixed role mention while the five-minute reminder uses configured role mentions", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const publication = source.slice(source.indexOf("async function publishKokuchi"), source.indexOf("async function scheduleKokuchiReservation"));
+  const reminder = source.slice(source.indexOf("async function sendKokuchiGatheringReminder"), source.indexOf("async function applyGatheringVcUnlock"));
+  const message = source.slice(source.indexOf("function formatKokuchiMessage"), source.indexOf("function formatSplitStartAnnouncement"));
+
+  assert.doesNotMatch(publication, /mentionRoleIds/);
+  assert.match(publication, /allowedMentions: \{ roles: \["1506629235438129323"\] \}/);
+  assert.match(reminder, /roleIds/);
+  assert.match(reminder, /allowedMentions: \{ roles: roleIds \}/);
+  assert.match(message, /<@&1506629235438129323>/);
+});
