@@ -74,7 +74,10 @@ function hasRequiredVoiceExitScheduleFields(schedule) {
 export function createVoiceChannelControlService({ getGuildSettings, sendOperationalLog = async () => {}, setVoiceChannelStatus = async (channel, status) => channel.setVoiceChannelStatus?.(status) }) {
   const getSettings = (guild) => getGuildSettings(guild.id).catch(() => null);
   const isTarget = (channel, settings) => channel?.type === ChannelType.GuildVoice
-    && channel.id !== settings?.voiceReminderParentChannelId
+    && !(Array.isArray(settings?.voiceReminderParentChannelIds)
+      ? settings.voiceReminderParentChannelIds
+      : [settings?.voiceReminderParentChannelId])
+      .includes(channel.id)
     && channel.id !== settings?.parentChannelId
     && channel.parentId === settings?.vcControlCategoryId;
   const logFailure = async (processName, context, error, guild = context?.guild) => {

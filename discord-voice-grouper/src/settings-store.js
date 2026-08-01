@@ -75,6 +75,19 @@ export function normalizeGuildSettings(settings = {}) {
     (Array.isArray(mentionRoles) ? mentionRoles : [mentionRoles])
       .filter((roleId) => typeof roleId === "string" && roleId.length > 0),
   )];
+  const voiceReminderParentChannelIds = Array.isArray(result.voiceReminderParentChannelIds)
+    && result.voiceReminderParentChannelIds.length > 0
+    ? result.voiceReminderParentChannelIds
+    : result.voiceReminderParentChannelId;
+  result.voiceReminderParentChannelIds = [...new Set(
+    (Array.isArray(voiceReminderParentChannelIds)
+      ? voiceReminderParentChannelIds
+      : [voiceReminderParentChannelIds])
+      .filter((channelId) => typeof channelId === "string" && channelId.length > 0),
+  )];
+  // Keep the old singular field available to older code and environment
+  // configurations while making the array the canonical representation.
+  result.voiceReminderParentChannelId = result.voiceReminderParentChannelIds[0] ?? null;
   return result;
 }
 
@@ -512,6 +525,7 @@ function getEnvironmentSettings(guildId) {
     waitingVcName: value("PB_WAITING_VC_NAME"), bosyuChannelId: value("PB_BOSYU_CHANNEL_ID"),
     bosyuMentionRoleId: value("PB_BOSYU_MENTION_ROLE_ID"), voiceParticipantRoleId: value("PB_VOICE_PARTICIPANT_ROLE_ID"),
     voiceReminderChannelId: value("PB_VOICE_REMINDER_CHANNEL_ID"), voiceTopicChannelId: value("PB_VOICE_TOPIC_CHANNEL_ID"),
+    voiceReminderParentChannelIds: parseOptionalIdList(value("PB_VOICE_REMINDER_PARENT_CHANNEL_IDS")),
     voiceReminderParentChannelId: value("PB_VOICE_REMINDER_PARENT_CHANNEL_ID"), voiceReminderChildCategoryId: value("PB_VOICE_REMINDER_CHILD_CATEGORY_ID"),
     voiceReminderEnabled: bool("PB_VOICE_REMINDER_ENABLED"), wadaiChannelId: value("PB_WADAI_CHANNEL_ID"),
     splitStartChannelId: value("PB_SPLIT_START_CHANNEL_ID"),
