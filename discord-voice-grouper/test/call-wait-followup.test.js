@@ -310,6 +310,25 @@ test("interest component handlers acknowledge before MongoDB or Discord work", a
   }
 });
 
+test("call-wait logs include the active interest members", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const logStart = source.indexOf("async function sendCallWaitApplicantLog");
+  const logEnd = source.indexOf("async function grantCallWaitRoleAndQueueNotice", logStart);
+  const interestStart = source.indexOf("async function registerCallWaitInterestFromPublicButton");
+  const interestEnd = source.indexOf("async function cancelCallWaitInterestFromPublicButton", interestStart);
+  assert.ok(logStart >= 0 && logEnd > logStart && interestStart >= 0 && interestEnd > interestStart);
+
+  const log = source.slice(logStart, logEnd);
+  const registration = source.slice(interestStart, interestEnd);
+  assert.match(log, /action === "interest"/);
+  assert.match(log, /recruitmentId = null/);
+  assert.match(log, /現在の興味あり:/);
+  assert.match(log, /CallWaitInterest\.find\(\{[\s\S]*?status: "active"/);
+  assert.match(log, /・\$\{member\.displayName\}\(\$\{member\.id\}\)/);
+  assert.match(registration, /action: "interest"/);
+  assert.match(registration, /recruitmentId: prompt\.messageId/);
+});
+
 test("failed interest threshold deliveries remain retryable instead of becoming sent", async () => {
   const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
   const start = source.indexOf("async function reconcileCallWaitInterestThresholds");

@@ -90,23 +90,27 @@ export function createOperationalManagementService({
       errors: (result?.errors ?? []).map(clean).slice(0, 20),
       cleanupAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     };
+    let durableRecorded = false;
+    let operationalRecorded = false;
     try {
       await OperationalActionLog.create(entry);
+      durableRecorded = true;
     } catch (error) {
       logger.error?.(`Operational audit log failed for ${interaction.guildId}: ${error?.message ?? error}`);
     }
     try {
       const settings = await getGuildSettings(interaction.guildId).catch(() => null);
-      await sendOperationalLog({
+      const sent = await sendOperationalLog({
         guild: interaction.guild,
         settings,
         fallbackChannel: null,
         content: `運用管理 action=${actionType} guildId=${interaction.guildId} actorUserId=${interaction.user?.id ?? "unknown"} result=${entry.result}${targetId ? ` targetId=${targetId}` : ""}${entry.errors.length ? ` errors=${entry.errors.join(" / ")}` : ""}`,
       });
+      operationalRecorded = Boolean(sent);
     } catch (error) {
       logger.error?.(`Operational management log failed for ${interaction.guildId}: ${error?.message ?? error}`);
     }
-    return entry;
+    return { ...entry, auditStatus: durableRecorded && operationalRecorded ? "recorded" : durableRecorded || operationalRecorded ? "partial" : "failed" };
   }
 
   async function snapshot(guild) {
@@ -188,8 +192,17 @@ export function createOperationalManagementService({
   }
 
   async function executeAndReport(interaction, action, targetId = null) {
+    const before = await snapshot(interaction.guild).catch(() => null);
     const result = await executeAction(interaction, action, targetId).catch((error) => ({ status: "failed", result: "failed", errors: [clean(error?.message ?? error)] }));
-    await audit(interaction, action, result, result.before ?? null, result.after ?? null);
+    const after = await snapshot(interaction.guild).catch(() => null);
+    const auditResult = await audit(interaction, action, result, result.before ?? before, result.after ?? after, targetId);
+    if (auditResult.auditStatus !== "recorded") {
+      result.errors = [...(result.errors ?? []), `Operational audit recording status: ${auditResult.auditStatus}`];
+      if (actionResult(result) === "success") {
+        result.status = "partial";
+        result.result = "partial";
+      }
+    }
     await boardService.requestRefresh(interaction.guild, `management:${action}`).catch(() => {});
     return result;
   }
@@ -291,7 +304,14 @@ export function createOperationalManagementService({
       const reason = interaction.fields.getTextInputValue("reason");
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const result = await recoveryService.clearStateOnly({ guild: interaction.guild, actorUserId: interaction.user.id, confirmed: true, reason });
-      await audit(interaction, "kokuchi_clear_state", result, result.before ?? null, result.after ?? null);
+      const auditResult = await audit(interaction, "kokuchi_clear_state", result, result.before ?? null, result.after ?? await snapshot(interaction.guild).catch(() => null));
+      if (auditResult.auditStatus !== "recorded") {
+        result.errors = [...(result.errors ?? []), `Operational audit recording status: ${auditResult.auditStatus}`];
+        if (actionResult(result) === "success") {
+          result.status = "partial";
+          result.result = "partial";
+        }
+      }
       await boardService.requestRefresh(interaction.guild, "management:kokuchi_clear_state").catch(() => {});
       await interaction.editReply(`kokuchi状態だけ解除: ${resultText(result)}`);
       return true;

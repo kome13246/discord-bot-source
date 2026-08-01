@@ -18,6 +18,7 @@ const ACTIVE_KOKUCHI_STATUSES = ["pending", "processing", "canceling", "cancel_p
 const ACTIVE_SPLIT_STATUSES = ["active", "finish_notice_pending", "role_remove_pending", "cleaning_up", "feedback_open"];
 const OBSERVED_SPLIT_STATUSES = [...ACTIVE_SPLIT_STATUSES, "failed", "cleanup_required"];
 const ACTIVE_ACTION_STATUSES = ["pending", "running"];
+const EXPIRED_PROMPT_STATES = ["active", "open", "pending", "processing", "evaluating", "role_granting", "failed"];
 const MODULE_KEYS = ["system", "kokuchi", "splitvc", "recruitment", "automation", "panels", "voice"];
 
 const defaultModels = {
@@ -131,6 +132,7 @@ async function collectSnapshot(guild, dependencies) {
     getGuildSettings,
     client,
     getStartupState = () => ({}),
+    getVoiceMonitorSessions = () => [],
     models,
     getDatabaseStatus: getDatabaseStatusOverride,
   } = dependencies;
@@ -169,10 +171,14 @@ async function collectSnapshot(guild, dependencies) {
   });
 
   let settings;
+  let settingsReadFailed = false;
+  let settingsReadError = null;
   try {
     settings = await getGuildSettings(guild.id);
   } catch (error) {
     settings = null;
+    settingsReadFailed = true;
+    settingsReadError = truncate(error?.message ?? error);
     const settingsIssue = issue("settings_unavailable", `GuildSettingsを取得できません: ${truncate(error?.message ?? error)}`, true);
     systemIssues.push(settingsIssue);
     system.issues.push(settingsIssue);
@@ -282,12 +288,14 @@ async function collectSnapshot(guild, dependencies) {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
     const prompt = settings?.callWaitPrompt ?? null;
     const otebo = Object.values(settings?.oteboRecruitments ?? {}).filter(Boolean);
-    const expiredPrompt = prompt && asDate(prompt.targetAt)?.getTime() <= Date.now() && ["active", "pending", "processing"].includes(prompt.lifecycleState ?? "active");
+    const expiredPrompt = prompt && asDate(prompt.targetAt)?.getTime() <= Date.now() && EXPIRED_PROMPT_STATES.includes(prompt.lifecycleState ?? "active");
     const expiredOtebo = otebo.filter((item) => asDate(item.targetAt)?.getTime() <= Date.now() && item.status === "active");
-    const uncertainOtebo = otebo.filter((item) => asDate(item.targetAt)?.getTime() <= Date.now() && item.status === "publishing");
+    const uncertainOtebo = otebo.filter((item) => ["publishing", "published_unconfirmed"].includes(item.status));
+    const pendingOteboCleanup = otebo.filter((item) => ["success_processing", "success_notified", "cleanup_pending", "failed"].includes(item.status));
     const issues = [];
     if (expiredPrompt || expiredOtebo.length) issues.push(issue("expired_recruitment", `期限切れの募集が${Number(Boolean(expiredPrompt)) + expiredOtebo.length}件あります。`, true));
     if (uncertainOtebo.length) issues.push(issue("otebo_publication_uncertain", `送信結果未確認のお手軽募集が${uncertainOtebo.length}件あります。自動削除は行いません。`, false));
+    if (pendingOteboCleanup.length) issues.push(issue("otebo_cleanup_pending", `Otebo success cleanup is incomplete: ${pendingOteboCleanup.length}`, true));
     const actions = expiredPrompt || expiredOtebo.length ? ["close_expired_recruitments"] : [];
     modules.recruitment = makeModule({
       key: "recruitment",
@@ -322,7 +330,9 @@ async function collectSnapshot(guild, dependencies) {
     const issues = [];
     if (enabled && !settings?.fukyoThemeChannelId) issues.push(issue("fukyo_channel_missing", "布教テーマ自動投稿は有効ですが送信先がありません。", true));
     const failedActions = scheduledActions.filter((action) => action.status === "failed");
+    const failedWeekly = weekly.filter((item) => item.status === "failed");
     if (failedActions.length) issues.push(issue("scheduled_action_failed", `永続スケジュール処理の失敗が${failedActions.length}件あります。`, true));
+    if (failedWeekly.length) issues.push(issue("fukyo_weekly_failed", `Fukyo weekly post failures: ${failedWeekly.length}`, true));
     const recentWeekly = weekly[0] ?? null;
     modules.automation = makeModule({
       key: "automation",
@@ -379,11 +389,12 @@ async function collectSnapshot(guild, dependencies) {
     const activeMonitors = activeSessions.filter((session) => session.waitingMonitorStatus && ["active", "extended", "closing"].includes(session.waitingMonitorStatus));
     const staleMonitors = activeMonitors.filter((session) => ageMs(session.waitingMonitorHeartbeatAt ?? session.updatedAt) > 3 * 60 * 1000);
     if (staleMonitors.length) issues.push(issue("voice_monitor_stale", `VC監視ハートビートが3分以上更新されていないセッションが${staleMonitors.length}件あります。`, true));
+    const inMemoryVoiceMonitors = (getVoiceMonitorSessions() ?? []).filter((session) => session?.guildId === guild.id);
     modules.voice = makeModule({
       key: "voice",
       label: "VC・ロール",
       summary: `退出予定 ${schedules.length}件 / ロール処理 ${grants.length}件 / 復元待ち ${settings?.gatheringVcRestorePending ? "あり" : "なし"}`,
-      details: { gatheringVcRestorePending: settings?.gatheringVcRestorePending === true, hasPermissionSnapshot: Boolean(settings?.gatheringVcPermissionBeforeOpen), roleGrantCounts: { active: grants.filter((grant) => grant.status === "active").length, removing: grants.filter((grant) => grant.status === "removing").length, failed: failedGrants.length }, failedRoleGrants: failedGrants.slice(0, 20).map((grant) => ({ memberId: grant.memberId, roleId: grant.roleId, lastError: grant.lastError })), exitScheduleCount: schedules.length, nextExitScheduleAt: schedules[0]?.scheduledAt ?? null, activeVoiceMonitorCount: activeMonitors.length, staleVoiceMonitorCount: staleMonitors.length },
+      details: { gatheringVcRestorePending: settings?.gatheringVcRestorePending === true, hasPermissionSnapshot: Boolean(settings?.gatheringVcPermissionBeforeOpen), roleGrantCounts: { active: grants.filter((grant) => grant.status === "active").length, removing: grants.filter((grant) => grant.status === "removing").length, failed: failedGrants.length }, failedRoleGrants: failedGrants.slice(0, 20).map((grant) => ({ memberId: grant.memberId, roleId: grant.roleId, lastError: grant.lastError })), exitScheduleCount: schedules.length, nextExitScheduleAt: schedules[0]?.scheduledAt ?? null, activeVoiceMonitorCount: activeMonitors.length + inMemoryVoiceMonitors.length, staleVoiceMonitorCount: staleMonitors.length },
       issues,
       disabled: grants.length === 0 && schedules.length === 0 && !settings?.gatheringVcRestorePending,
       inProgress: grants.length > 0 || schedules.length > 0 || activeSessions.length > 0,
@@ -397,6 +408,18 @@ async function collectSnapshot(guild, dependencies) {
     modules.voice = makeModule({ key: "voice", label: "VC・ロール", summary: "状態を取得できません。", issues: [issue("read_failed", truncate(error?.message ?? error), true)], unknown: true });
   }
 
+  if (settingsReadFailed) {
+    const settingsIssue = issue("settings_unavailable", `GuildSettings could not be read${settingsReadError ? `: ${settingsReadError}` : ""}`, true);
+    for (const key of ["kokuchi", "recruitment", "automation", "panels", "voice"]) {
+      const module = modules[key];
+      if (!module) continue;
+      module.issues = [...(module.issues ?? []), settingsIssue];
+      module.blocking = true;
+      module.severity = "unknown";
+      module.summary = truncate(`${module.summary} GuildSettings is unavailable.`);
+    }
+    unknownModule = true;
+  }
   const allIssues = Object.values(modules).flatMap((module) => module.issues ?? []);
   const actions = [...new Set(Object.values(modules).flatMap((module) => module.availableActions ?? []))];
   const snapshotStatus = unknownModule ? "partial" : "success";
@@ -419,9 +442,9 @@ async function collectSnapshot(guild, dependencies) {
   return snapshot;
 }
 
-export function createOperationalStatusService({ getGuildSettings, client, getStartupState, models: injectedModels = {}, getDatabaseStatus: getDatabaseStatusOverride } = {}) {
+export function createOperationalStatusService({ getGuildSettings, client, getStartupState, getVoiceMonitorSessions, models: injectedModels = {}, getDatabaseStatus: getDatabaseStatusOverride } = {}) {
   const models = { ...defaultModels, ...injectedModels };
-  const dependencies = { getGuildSettings, client, getStartupState, models, getDatabaseStatus: getDatabaseStatusOverride };
+  const dependencies = { getGuildSettings, client, getStartupState, getVoiceMonitorSessions, models, getDatabaseStatus: getDatabaseStatusOverride };
 
   async function getOperationalStatusSnapshot(guild) {
     if (!guild?.id) throw new Error("A guild is required to build an operational status snapshot.");
