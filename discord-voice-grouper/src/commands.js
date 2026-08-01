@@ -282,6 +282,20 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName("status_board")
+      .setDescription("Bot運用ステータスボードを設置・解除します")
+      .addChannelOption((option) => option
+        .setName("channel")
+        .setDescription("ステータスボードを設置するテキストチャンネル")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(false))
+      .addBooleanOption((option) => option
+        .setName("remove")
+        .setDescription("既存のステータスボードを解除します")
+        .setRequired(false)),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName("vc_control")
       .setDescription("VCコントロールパネルを設定します")
       .addChannelOption((option) => option.setName("category").setDescription("対象カテゴリ").addChannelTypes(ChannelType.GuildCategory).setRequired(false))
@@ -321,6 +335,14 @@ export const showReviewCommand = new SlashCommandBuilder()
       { name: "all：すべて", value: "all" },
     ))
     .addIntegerOption((option) => option.setName("recent").setDescription("直近の開催回数").setMinValue(1).setRequired(false)));
+
+export const botStatusCommand = new SlashCommandBuilder()
+  .setName("botstatus")
+  .setDescription("Bot運用ステータスを確認・更新・管理します")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  .addSubcommand((subcommand) => subcommand.setName("show").setDescription("現在状態をEphemeral表示します"))
+  .addSubcommand((subcommand) => subcommand.setName("refresh").setDescription("状態を再取得してボードを更新します"))
+  .addSubcommand((subcommand) => subcommand.setName("manage").setDescription("管理操作メニューを表示します"));
 
 export const bCommand = new SlashCommandBuilder()
   .setName("b")
@@ -461,6 +483,7 @@ export const commands = [
   setupProfileCommand.toJSON(),
   splitVoiceCommand.toJSON(),
   settingCommand.toJSON(),
+  botStatusCommand.toJSON(),
   showReviewCommand.toJSON(),
   bCommand.toJSON(),
   addWadaiCommand.toJSON(),
