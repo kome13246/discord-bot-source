@@ -57,6 +57,9 @@ import { CallWaitInterest } from "./models/call-wait-interest.js";
 import { KokuchiReservation } from "./models/kokuchi-reservation.js";
 import { MongoLeaseLock } from "./models/mongo-lease-lock.js";
 import { ProfileRegistrationPanel } from "./models/profile-registration-panel.js";
+import { OperationalActionLog } from "./models/operational-action-log.js";
+import { OperationalHealthState } from "./models/operational-health-state.js";
+import { OperationalStatusBoard } from "./models/operational-status-board.js";
 import { acquireMongoLease, releaseMongoLease } from "./mongo-lease-lock-store.js";
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
 import { buildProfileRegistrationPanelPayload, createProfileRegistrationPanelService } from "./profile-registration-panel-service.js";
@@ -69,6 +72,10 @@ import {
 } from "./profile-publication-service.js";
 import { createVoiceChannelControlService } from "./voice-channel-control-service.js";
 import { createFukyoThemeService } from "./fukyo-theme-service.js";
+import { createOperationalStatusService } from "./operational-status-service.js";
+import { createOperationalStatusBoardService } from "./operational-status-board-service.js";
+import { createOperationalManagementService } from "./operational-management-service.js";
+import { createKokuchiRecoveryService } from "./kokuchi-recovery-service.js";
 import { FukyoThemeState } from "./models/fukyo-theme-state.js";
 import { FukyoWeeklyPost } from "./models/fukyo-weekly-post.js";
 import {
@@ -244,8 +251,10 @@ const FEEDBACK_FORM_TYPES = {
 
 let callWaitTimer = null;
 let shouldSendMongoSuccessLog = false;
+const botStartedAt = new Date();
 let startupRestoreCompleted = false;
 let startupRestoreFailed = false;
+let startupRestoreFailures = [];
 let shuttingDown = false;
 let processingScheduledCallWaitTick = false;
 
@@ -255,6 +264,11 @@ function getKokuchiReservationCleanupAt(now = new Date()) {
 
 function logRecoverableError(context, error) {
   console.error(`${context}: ${error?.message ?? error}`, error);
+}
+
+function requestOperationalStatusRefresh(guildId, reason = "state-change") {
+  const guild = client.guilds.cache.get(guildId);
+  if (guild && operationalStatusBoardService) void operationalStatusBoardService.requestRefresh(guild, reason).catch((error) => logRecoverableError("Operational status refresh request failed", error));
 }
 
 if (!DISCORD_TOKEN) {
@@ -281,6 +295,40 @@ const fukyoThemeService = createFukyoThemeService({
   sendOperationalLog,
   acquireMongoLease,
   releaseMongoLease,
+});
+const operationalStatusService = createOperationalStatusService({
+  getGuildSettings,
+  client,
+  getStartupState: () => ({
+    startedAt: botStartedAt,
+    restoreCompleted: startupRestoreCompleted,
+    restoreFailed: startupRestoreFailed,
+  }),
+});
+const operationalStatusBoardService = createOperationalStatusBoardService({
+  getOperationalStatusSnapshot: (guild) => operationalStatusService.getOperationalStatusSnapshot(guild),
+  logger: console,
+});
+const kokuchiRecoveryService = createKokuchiRecoveryService({
+  getGuildSettings,
+  saveGuildSettings,
+  acquireMongoLease,
+  releaseMongoLease,
+  clearReservationTimers: clearKokuchiReservationTimers,
+  restoreGatheringVcPermission: restoreGatheringVcPermissionAfterSplit,
+  completeReservationCancellation: completeKokuchiCancellation,
+});
+const operationalManagementService = createOperationalManagementService({
+  statusService: operationalStatusService,
+  boardService: operationalStatusBoardService,
+  recoveryService: kokuchiRecoveryService,
+  getGuildSettings,
+  sendOperationalLog,
+  actions: {
+    removeParticipantRoles: runOperationalParticipantRoleRemoval,
+    reinstallPanels: reinstallOperationalPanels,
+    closeExpiredRecruitments: closeExpiredOperationalRecruitments,
+  },
 });
 
 let discordReadyWatchdog = null;
@@ -316,13 +364,22 @@ client.once(Events.ClientReady, async (readyClient) => {
     voiceChannelControlService.restore(client),
     fukyoThemeService.restore(client),
   ]);
-  for (const result of restoreResults) {
+  startupRestoreFailures = [];
+  for (const [index, result] of restoreResults.entries()) {
     if (result.status === "rejected") {
       startupRestoreFailed = true;
+      const failure = { name: `restore-${index}`, error: result.reason?.message ?? String(result.reason) };
+      startupRestoreFailures.push(failure);
       console.error("Startup restore failed:", result.reason);
     }
   }
   startupRestoreCompleted = true;
+  await operationalStatusService.recordStartupRestore({
+    results: restoreResults.map((result, index) => ({ ...result, name: `restore-${index}` })),
+    completedAt: new Date(),
+  }).catch((error) => console.error("Failed to persist startup restore health:", error));
+  operationalStatusBoardService.start(readyClient);
+  await operationalStatusBoardService.restore(readyClient).catch((error) => console.error("Failed to restore operational status boards:", error));
   if (shouldSendMongoSuccessLog) {
     shouldSendMongoSuccessLog = false;
     void (async () => {
@@ -413,6 +470,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   } catch (error) {
     logRecoverableError("Voice exit schedule processing failed", error);
   }
+  requestOperationalStatusRefresh(newState.guild?.id ?? oldState.guild?.id, "voice-state");
 });
 
 async function handleProfileRegistrationPanelMessage(message) {
@@ -423,9 +481,11 @@ async function handleProfileRegistrationPanelMessage(message) {
 }
 client.on(Events.ChannelCreate, async (channel) => {
   if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.ensurePanel(channel).catch((error) => console.error("VC control panel create failed:", error));
+  if (channel.guildId) requestOperationalStatusRefresh(channel.guildId, "channel-create");
 });
 client.on(Events.ChannelDelete, async (channel) => {
   if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.cleanup(channel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+  if (channel.guildId) requestOperationalStatusRefresh(channel.guildId, "channel-delete");
 });
 client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
   if (newChannel.type !== ChannelType.GuildVoice) return;
@@ -434,6 +494,7 @@ client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
   const isTarget = newChannel.parentId === settings?.vcControlCategoryId;
   if (isTarget && !wasTarget) await voiceChannelControlService.ensurePanel(newChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
   if (!isTarget && wasTarget) await voiceChannelControlService.cleanup(newChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+  requestOperationalStatusRefresh(newChannel.guild.id, "channel-update");
 });
 client.on(Events.InteractionCreate, async (interaction) => {
   if (shuttingDown) {
@@ -447,6 +508,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
   try {
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith("operational:")) { await operationalManagementService.handle(interaction); return; }
       if (interaction.customId.startsWith(`${SPLIT_REVIEW_OPEN}:`) || interaction.customId.startsWith(`${SPLIT_REVIEW_SUBMIT}:`)) { await handleSplitReviewButton(interaction); return; }
       if (interaction.customId.startsWith(`${SPLIT_RANDOM_TOPIC}:`)) { await handleSplitRandomTopicButton(interaction); return; }
       if (interaction.customId.startsWith("vc_control:")) { await voiceChannelControlService.handle(interaction); return; }
@@ -517,6 +579,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith("operational:")) { await operationalManagementService.handle(interaction); return; }
       if (interaction.customId.startsWith(`${SPLIT_REVIEW_SELECT}:`)) { await handleSplitReviewSelect(interaction); return; }
       if (interaction.customId.startsWith("vc_control:")) { await voiceChannelControlService.handle(interaction); return; }
       if (interaction.customId.startsWith(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:`)) {
@@ -533,6 +596,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith("operational:")) { await operationalManagementService.handle(interaction); return; }
       if (interaction.customId.startsWith(`${SPLIT_REVIEW_MODAL}:`)) { await handleSplitReviewModal(interaction); return; }
       if (interaction.customId.startsWith("vc_control:")) { await voiceChannelControlService.handle(interaction); return; }
       if (interaction.customId === "profile_modal") {
@@ -563,6 +627,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === "splitvc") {
       await handleSplitVoice(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "botstatus") {
+      await operationalManagementService.handleCommand(interaction);
       return;
     }
 
@@ -753,6 +822,8 @@ async function handleShowReview(interaction) {
     }
     console.error(error);
     await replySafely(interaction, "処理中にエラーが発生しました。Renderのログを確認してください。");
+  } finally {
+    if (interaction.guildId) requestOperationalStatusRefresh(interaction.guildId, "interaction");
   }
 });
 
@@ -1021,6 +1092,27 @@ async function handleSetting(interaction) {
   }
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  if (subcommand === "status_board") {
+    const channel = interaction.options.getChannel("channel", false);
+    const remove = interaction.options.getBoolean("remove", false) === true;
+    if (remove && channel) {
+      await interaction.editReply("解除時はchannelを指定せずremove=trueにしてください。");
+      return;
+    }
+    if (!remove && !channel) {
+      await interaction.editReply("channelを指定するか、remove=trueで既存ボードを解除してください。");
+      return;
+    }
+    const result = remove
+      ? await operationalStatusBoardService.remove(interaction.guild)
+      : await operationalStatusBoardService.configure(interaction.guild, channel);
+    await interaction.editReply(remove
+      ? `ステータスボードを解除しました: ${result.status}`
+      : `ステータスボードを設置しました。${result.status}`);
+    requestOperationalStatusRefresh(interaction.guildId, "status-board-setting");
+    return;
+  }
 
   if (subcommand === "fukyo") {
     await fukyoThemeService.updateSetting(interaction);
@@ -1306,6 +1398,98 @@ async function handleRemoveRole(interaction) {
     fallbackChannel: interaction.channel,
     content: `/remove role を実行しました。対象 ${targetMembers.size} 人、完全成功 ${fullySucceeded} 人、一部成功 ${partiallySucceeded} 人、完全失敗 ${fullyFailed} 人、スキップ ${skipped} 件。理由: ${[...reasons].join("、") || "なし"}`,
   }).catch((error) => logRecoverableError("Failed to log bulk role removal", error));
+}
+
+async function runOperationalParticipantRoleRemoval(guild) {
+  const settings = await getGuildSettings(guild.id);
+  const roleIds = [...new Set([settings?.tempRoleId, settings?.voiceParticipantRoleId].filter(Boolean))];
+  if (!roleIds.length) return { status: "not-needed", result: "success", errors: [] };
+  const botMember = guild.members.me ?? await guild.members.fetchMe().catch(() => null);
+  if (!botMember?.permissions?.has(PermissionFlagsBits.ManageRoles)) return { status: "failed", result: "failed", errors: ["Bot lacks ManageRoles permission."] };
+  if (!await guild.members.fetch().then(() => true).catch(() => false)) return { status: "failed", result: "failed", errors: ["Guild members could not be fetched."] };
+  const roles = [];
+  const errors = [];
+  for (const roleId of roleIds) {
+    const role = await guild.roles.fetch(roleId).catch(() => null);
+    if (!role || !role.editable) errors.push(`Role ${roleId} is missing or not editable.`);
+    else roles.push(role);
+  }
+  const members = new Map();
+  for (const role of roles) for (const member of guild.members.cache.filter((item) => !item.user.bot && item.roles.cache.has(role.id)).values()) members.set(member.id, member);
+  let removed = 0;
+  let failed = 0;
+  for (const member of members.values()) {
+    for (const role of roles) {
+      if (!member.roles.cache.has(role.id)) continue;
+      try {
+        await member.roles.remove(role, "Operational status board role cleanup");
+        await VoiceParticipantRoleGrant.updateMany(
+          { guildId: guild.id, memberId: member.id, roleId: role.id, status: { $in: [null, "active", "removing", "failed"] } },
+          { $set: { status: "removed", removedAt: new Date(), cleanupAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } },
+        );
+        removed += 1;
+      } catch (error) {
+        failed += 1;
+        errors.push(`${member.id}/${role.id}: ${error?.message ?? error}`);
+      }
+    }
+  }
+  return { status: failed ? (removed ? "partial" : "failed") : "completed", result: failed ? (removed ? "partial" : "failed") : "success", removed, failed, errors };
+}
+
+async function reinstallOperationalPanels(guild) {
+  const settings = await getGuildSettings(guild.id);
+  let profile = null;
+  let voice = 0;
+  const errors = [];
+  if (settings?.profileIntroductionChannelId) {
+    profile = await profileRegistrationPanelService.ensureProfileRegistrationPanel(guild).catch((error) => { errors.push(`profile: ${error.message}`); return null; });
+  }
+  if (settings?.vcControlCategoryId) {
+    const category = await guild.channels.fetch(settings.vcControlCategoryId).catch(() => null);
+    for (const channel of guild.channels.cache.values()) {
+      if (channel.type !== ChannelType.GuildVoice || channel.parentId !== category?.id) continue;
+      await voiceChannelControlService.ensurePanel(channel).then(() => { voice += 1; }).catch((error) => errors.push(`voice:${channel.id}: ${error.message}`));
+    }
+  }
+  return { status: errors.length ? (profile || voice ? "partial" : "failed") : "completed", result: errors.length ? (profile || voice ? "partial" : "failed") : "success", profile: Boolean(profile), voice, errors };
+}
+
+async function closeExpiredOperationalRecruitments(guild) {
+  const settings = await getGuildSettings(guild.id);
+  const now = Date.now();
+  const expiredPrompt = settings?.callWaitPrompt
+    && new Date(settings.callWaitPrompt.targetAt).getTime() <= now
+    && ["active", "open", "pending", "processing", "evaluating", "role_granting", "failed"].includes(settings.callWaitPrompt.lifecycleState ?? "active");
+  const expiredOtebo = Object.values(getOteboRecruitments(settings)).filter((recruitment) => (
+    recruitment
+    && new Date(recruitment.targetAt).getTime() <= now
+    && recruitment.status === "active"
+  ));
+  const results = [];
+  const errors = [];
+  try {
+    if (expiredPrompt) {
+      await processCallWaitForGuild(guild, settings);
+      results.push(`call-wait:${settings.callWaitPrompt.messageId}`);
+    }
+    for (const recruitment of expiredOtebo) {
+      try {
+        await processOteboDeadline(guild.id, recruitment.id);
+        results.push(`otebo:${recruitment.id}`);
+      } catch (error) {
+        errors.push(`otebo:${recruitment.id}: ${error?.message ?? error}`);
+      }
+    }
+    return {
+      status: errors.length ? (results.length ? "partial" : "failed") : "completed",
+      result: errors.length ? (results.length ? "partial" : "failed") : "success",
+      processed: results,
+      errors,
+    };
+  } catch (error) {
+    return { status: "failed", result: "failed", errors: [error?.message ?? String(error)] };
+  }
 }
 
 async function handleKokuchiSetting(interaction) {
@@ -2023,6 +2207,15 @@ async function handleKokuchi(interaction) {
       return;
     }
     const reservationId = createSessionId();
+    const recoveryLease = await acquireMongoLease(`kokuchi-recovery:${interaction.guildId}`, { leaseMs: 5 * 60 * 1000 }).catch((error) => {
+      logRecoverableError("Failed to acquire kokuchi recovery lease", error);
+      return null;
+    });
+    if (!recoveryLease) {
+      await replyOrFollowUp(interaction, { content: "kokuchiの復旧処理が実行中です。完了してから再実行してください。", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    try {
     // The reminder is sent only when the reservation is at least exactly
     // thirty minutes away.  A reservation made 29:59 beforehand is skipped.
     const reminderStatus = scheduledAt.getTime() - Date.now() < 30 * 60 * 1000 ? "skipped" : "pending";
@@ -2078,9 +2271,20 @@ async function handleKokuchi(interaction) {
       return;
     }
     await replyOrFollowUp(interaction, { content: "予約を受け付けました。", flags: MessageFlags.Ephemeral });
+    } finally {
+      await releaseMongoLease(recoveryLease).catch((error) => logRecoverableError("Failed to release kokuchi recovery lease", error));
+    }
     return;
   }
 
+  const recoveryLease = await acquireMongoLease(`kokuchi-recovery:${interaction.guildId}`, { leaseMs: 5 * 60 * 1000 }).catch((error) => {
+    logRecoverableError("Failed to acquire kokuchi recovery lease", error);
+    return null;
+  });
+  if (!recoveryLease) {
+    await replyOrFollowUp(interaction, { content: "kokuchiの復旧処理が実行中です。完了してから再実行してください。", flags: MessageFlags.Ephemeral });
+    return;
+  }
   try {
     await publishImmediateKokuchi({
       interaction,
@@ -2098,6 +2302,8 @@ async function handleKokuchi(interaction) {
       return;
     }
     throw error;
+  } finally {
+    await releaseMongoLease(recoveryLease).catch((releaseError) => logRecoverableError("Failed to release kokuchi recovery lease", releaseError));
   }
 
   await replyOrFollowUp(interaction, {
@@ -2258,7 +2464,7 @@ async function scheduleKokuchiPreNotice(guild, settings) {
     kokuchiPreNoticeTimers.delete(guild.id);
     void sendKokuchiPreNotice(guild.id).catch((error) => {
       console.error(`Failed to send kokuchi pre notice: ${error.message}`, error);
-    });
+    }).finally(() => requestOperationalStatusRefresh(guild.id, "kokuchi-pre-notice"));
   }, noticeAt.getTime() - now.getTime());
 
   kokuchiPreNoticeTimers.set(guild.id, timer);
@@ -2427,7 +2633,7 @@ async function scheduleGatheringVcUnlock(guild, settings) {
     gatheringVcUnlockTimers.delete(guild.id);
     void applyGatheringVcUnlock(guild.id).catch((error) => {
       console.error(`Failed to unlock gathering VC: ${error.message}`, error);
-    });
+    }).finally(() => requestOperationalStatusRefresh(guild.id, "gathering-vc-unlock"));
   }, unlockAt.getTime() - now.getTime());
 
   gatheringVcUnlockTimers.set(guild.id, timer);
@@ -2477,7 +2683,7 @@ async function scheduleKokuchiGatheringReminder(guild, settings) {
         `Failed to send kokuchi gathering reminder: ${error.message}`,
         error,
       );
-    });
+    }).finally(() => requestOperationalStatusRefresh(guild.id, "kokuchi-gathering-reminder"));
   }, remindAt.getTime() - now.getTime());
 
   kokuchiGatheringReminderTimers.set(guild.id, timer);
@@ -2751,6 +2957,7 @@ async function restoreGatheringVcPermissionAfterSplit(guild, settings) {
       gatheringVcRestorePending: false,
       gatheringVcRestorePendingAt: null,
     });
+    requestOperationalStatusRefresh(guild.id, "gathering-vc-restored");
     return true;
   } catch (error) {
     await sendOperationalLog({
@@ -2852,14 +3059,18 @@ async function scheduleKokuchiReservation(guild, reservation) {
   const sendIn = scheduledAt.getTime() - Date.now();
   if (!Number.isFinite(scheduledAt.getTime())) return;
   const sendTimer = setTimeout(() => {
-    void processKokuchiReservation(guild.id, reservation.reservationId).catch((error) => console.error("Reserved /kokuchi failed:", error));
+    void processKokuchiReservation(guild.id, reservation.reservationId)
+      .catch((error) => console.error("Reserved /kokuchi failed:", error))
+      .finally(() => requestOperationalStatusRefresh(guild.id, "kokuchi-reservation"));
   }, Math.max(0, sendIn));
   kokuchiReservationTimers.set(`${reservation.reservationId}:send`, sendTimer);
   if (reservation.reminderStatus === "pending") {
     const reminderIn = sendIn - 30 * 60 * 1000;
     if (reminderIn >= -5_000) {
       const reminderTimer = setTimeout(() => {
-        void sendKokuchiReservationReminder(guild.id, reservation.reservationId).catch((error) => console.error("Reserved /kokuchi reminder failed:", error));
+        void sendKokuchiReservationReminder(guild.id, reservation.reservationId)
+          .catch((error) => console.error("Reserved /kokuchi reminder failed:", error))
+          .finally(() => requestOperationalStatusRefresh(guild.id, "kokuchi-reservation-reminder"));
       }, reminderIn);
       kokuchiReservationTimers.set(`${reservation.reservationId}:reminder`, reminderTimer);
     } else {
@@ -3304,6 +3515,7 @@ async function completeKokuchiCancellation({ reservation, guild }) {
   if (updated.matchedCount !== 1) {
     throw new Error("Kokuchi cancellation final state could not be persisted.");
   }
+  requestOperationalStatusRefresh(reservation.guildId, "kokuchi-cancellation");
   return { ...result, status, settings, permissionRestored };
 }
 
@@ -4481,6 +4693,7 @@ async function processCallWaitForGuild(guild, settings) {
       });
     }
     callWaitGuildLocks.delete(guild.id);
+    requestOperationalStatusRefresh(guild.id, "call-wait-processing");
   }
 }
 
@@ -6034,9 +6247,11 @@ async function schedulePersistentRoleRemoval({ actionKey, type, guild, roleId, m
   if (previous) clearTimeout(previous);
   const timer = setTimeout(() => {
     timers.delete(actionKey);
-    void executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds, type, payload }).catch((error) => {
-      console.error(`Failed to execute ${type}: ${error.message}`);
-    });
+    void executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds, type, payload })
+      .catch((error) => {
+        console.error(`Failed to execute ${type}: ${error.message}`);
+      })
+      .finally(() => requestOperationalStatusRefresh(guild.id, type));
   }, Math.max(0, executeAt.getTime() - Date.now()));
   timers.set(actionKey, timer);
 }
@@ -6045,9 +6260,11 @@ async function scheduleWaitingVcCleanup({ actionKey, guild, channelId, delayMs, 
   const executeAt = new Date(Date.now() + delayMs);
   await scheduleAction({ actionKey, guildId: guild.id, type: "split_waiting_vc_cleanup", executeAt, payload: { channelId, sessionId } });
   const timer = setTimeout(() => {
-    void executeWaitingVcCleanup({ actionKey, guild, channelId, sessionId }).catch((error) => {
-      console.error(`Failed to clean up waiting VC: ${error.message}`);
-    });
+    void executeWaitingVcCleanup({ actionKey, guild, channelId, sessionId })
+      .catch((error) => {
+        console.error(`Failed to clean up waiting VC: ${error.message}`);
+      })
+      .finally(() => requestOperationalStatusRefresh(guild.id, "split-waiting-vc-cleanup"));
   }, Math.max(0, executeAt.getTime() - Date.now()));
   const previous = callWaitRoleRemovalTimers.get(actionKey);
   if (previous) clearTimeout(previous);
@@ -6196,9 +6413,11 @@ async function restoreScheduledActions() {
     }
     if (action.type === "split_waiting_vc_cleanup") {
       const timer = setTimeout(() => {
-        void executeWaitingVcCleanup({ actionKey: action.actionKey, guild, channelId: action.payload?.channelId, sessionId: action.payload?.sessionId }).catch((error) => {
-          console.error(`Failed to restore waiting VC cleanup ${action.actionKey}: ${error.message}`);
-        });
+        void executeWaitingVcCleanup({ actionKey: action.actionKey, guild, channelId: action.payload?.channelId, sessionId: action.payload?.sessionId })
+          .catch((error) => {
+            console.error(`Failed to restore waiting VC cleanup ${action.actionKey}: ${error.message}`);
+          })
+          .finally(() => requestOperationalStatusRefresh(guild.id, "split-waiting-vc-cleanup"));
       }, Math.max(0, new Date(action.executeAt).getTime() - Date.now()));
       callWaitRoleRemovalTimers.set(action.actionKey, timer);
       restored += 1;
@@ -6206,9 +6425,11 @@ async function restoreScheduledActions() {
     }
     if (action.type === "split_finish_notice") {
       const timer = setTimeout(() => {
-        void executeSplitFinishNotice({ actionKey: action.actionKey, guild, payload: action.payload }).catch((error) => {
-          console.error(`Failed to restore split finish notice ${action.actionKey}: ${error.message}`);
-        });
+        void executeSplitFinishNotice({ actionKey: action.actionKey, guild, payload: action.payload })
+          .catch((error) => {
+            console.error(`Failed to restore split finish notice ${action.actionKey}: ${error.message}`);
+          })
+          .finally(() => requestOperationalStatusRefresh(guild.id, "split-finish-notice"));
       }, Math.max(0, new Date(action.executeAt).getTime() - Date.now()));
       callWaitRoleRemovalTimers.set(action.actionKey, timer);
       restored += 1;
@@ -6216,9 +6437,11 @@ async function restoreScheduledActions() {
     }
     if (action.type === "callwait_followup") {
       const timer = setTimeout(() => {
-        void executeCallWaitFollowup({ actionKey: action.actionKey, guild }).catch((error) => {
-          console.error(`Failed to restore call-wait follow-up ${action.actionKey}: ${error.message}`);
-        });
+        void executeCallWaitFollowup({ actionKey: action.actionKey, guild })
+          .catch((error) => {
+            console.error(`Failed to restore call-wait follow-up ${action.actionKey}: ${error.message}`);
+          })
+          .finally(() => requestOperationalStatusRefresh(guild.id, "callwait-followup"));
       }, Math.max(0, new Date(action.executeAt).getTime() - Date.now()));
       callWaitFollowupTimers.set(action.actionKey, timer);
       restored += 1;
@@ -6227,9 +6450,11 @@ async function restoreScheduledActions() {
     const timers = action.type === "otebo_role_remove" ? oteboRecruitmentTimers : callWaitRoleRemovalTimers;
     const timer = setTimeout(() => {
       timers.delete(action.actionKey);
-      void executeScheduledRoleRemoval({ actionKey: action.actionKey, guild, roleId: action.roleId, memberIds: action.memberIds, payload: action.payload }).catch((error) => {
-        console.error(`Failed to restore scheduled action ${action.actionKey}: ${error.message}`);
-      });
+      void executeScheduledRoleRemoval({ actionKey: action.actionKey, guild, roleId: action.roleId, memberIds: action.memberIds, payload: action.payload })
+        .catch((error) => {
+          console.error(`Failed to restore scheduled action ${action.actionKey}: ${error.message}`);
+        })
+        .finally(() => requestOperationalStatusRefresh(guild.id, action.type));
     }, Math.max(0, new Date(action.executeAt).getTime() - Date.now()));
     timers.set(action.actionKey, timer);
     restored += 1;
@@ -7075,9 +7300,11 @@ async function scheduleCallWaitFollowupCheck(guild) {
   const delayMs = Math.max(0, new Date(scheduledAction.executeAt).getTime() - Date.now());
   const timer = setTimeout(() => {
     callWaitFollowupTimers.delete(scheduledAction.actionKey);
-    void executeCallWaitFollowup({ actionKey: scheduledAction.actionKey, guild }).catch((error) => {
-      console.error(`Failed to run call wait follow-up ${scheduledAction.actionKey}: ${error.message}`, error);
-    });
+    void executeCallWaitFollowup({ actionKey: scheduledAction.actionKey, guild })
+      .catch((error) => {
+        console.error(`Failed to run call wait follow-up ${scheduledAction.actionKey}: ${error.message}`, error);
+      })
+      .finally(() => requestOperationalStatusRefresh(guild.id, "callwait-followup"));
   }, delayMs);
 
   callWaitFollowupTimers.set(scheduledAction.actionKey, timer);
@@ -7104,9 +7331,11 @@ async function executeCallWaitFollowup({ actionKey, guild }) {
     if (retried) {
       const retryTimer = setTimeout(() => {
         callWaitFollowupTimers.delete(actionKey);
-        void executeCallWaitFollowup({ actionKey, guild }).catch((retryError) => {
-          console.error(`Failed to retry call-wait follow-up ${actionKey}: ${retryError.message}`, retryError);
-        });
+        void executeCallWaitFollowup({ actionKey, guild })
+          .catch((retryError) => {
+            console.error(`Failed to retry call-wait follow-up ${actionKey}: ${retryError.message}`, retryError);
+          })
+          .finally(() => requestOperationalStatusRefresh(guild.id, "callwait-followup-retry"));
       }, CALL_WAIT_FOLLOWUP_RETRY_MS);
       callWaitFollowupTimers.set(actionKey, retryTimer);
     } else {
@@ -7910,7 +8139,7 @@ function scheduleOteboRecruitmentTimers(guild, recruitment) {
       oteboRecruitmentTimers.delete(key);
       void processOteboNoticePublish(guild.id, recruitment.id).catch((error) => {
         console.error(`Failed to publish otebo notice message: ${error.message}`, error);
-      });
+      }).finally(() => requestOperationalStatusRefresh(guild.id, "otebo-notice-publish"));
     }, publishDelayMs);
 
     oteboRecruitmentTimers.set(key, publishTimer);
@@ -7924,7 +8153,7 @@ function scheduleOteboRecruitmentTimers(guild, recruitment) {
       oteboRecruitmentTimers.delete(key);
       void processOteboDeadline(guild.id, recruitment.id).catch((error) => {
         console.error(`Failed to process otebo deadline: ${error.message}`, error);
-      });
+      }).finally(() => requestOperationalStatusRefresh(guild.id, "otebo-deadline"));
     }, delayMs);
 
     oteboRecruitmentTimers.set(key, timer);
@@ -8109,7 +8338,7 @@ function scheduleOteboImmediateConfirmation(
       memberId,
     ).catch((error) => {
       console.error(`Failed to process otebo confirmation: ${error.message}`, error);
-    });
+    }).finally(() => requestOperationalStatusRefresh(guild.id, "otebo-confirmation"));
   }, delayMs);
 
   oteboRecruitmentTimers.set(key, timer);
@@ -8665,7 +8894,7 @@ function scheduleOteboVoiceStatusClear(guild, session) {
     oteboRecruitmentTimers.delete(key);
     void processOteboVoiceStatusClear(guild.id, session.id).catch((error) => {
       console.error(`Failed to process otebo voice status clear: ${error.message}`, error);
-    });
+    }).finally(() => requestOperationalStatusRefresh(guild.id, "otebo-voice-status-clear"));
   }, Math.max(1000, clearAt.getTime() - Date.now()));
 
   oteboRecruitmentTimers.set(key, timer);
@@ -8690,7 +8919,7 @@ function scheduleOteboVoiceStatusDeadline(guild, session) {
     oteboRecruitmentTimers.delete(key);
     void processOteboVoiceStatusDeadline(guild.id, session.id).catch((error) => {
       console.error(`Failed to process otebo voice status deadline: ${error.message}`, error);
-    });
+    }).finally(() => requestOperationalStatusRefresh(guild.id, "otebo-voice-status-deadline"));
   }, Math.max(1000, deadlineAt - Date.now()));
 
   oteboRecruitmentTimers.set(key, timer);
@@ -8833,7 +9062,7 @@ function formatKokuchiMessage({ weekday, overviewChannelId }) {
   const eventTime = normalizeKokuchiEventTime(arguments[0]?.eventTime) ?? "21:00";
   const weekdayLabel = weekday === "土" ? "土曜日" : "火曜日";
   const lines = [
-    `本日は${weekdayLabel}！`,
+    `<@&1506629235438129323> 本日は${weekdayLabel}！`,
     `${normalizeKokuchiEventTime(eventTime) ?? "21:00"}から会話練習会です！`,
     `（概要は <#${overviewChannelId}> から）`,
   ];
@@ -13590,6 +13819,9 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       SplitProcessSession.createIndexes(),
       SplitReview.createIndexes(),
       SplitReviewDraft.createIndexes(),
+      OperationalStatusBoard.createIndexes(),
+      OperationalHealthState.createIndexes(),
+      OperationalActionLog.createIndexes(),
     ]);
   }
 
@@ -13599,6 +13831,7 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     console.log(`Graceful shutdown started${signal ? ` (${signal})` : ""}.`);
 
     if (callWaitTimer) clearTimeout(callWaitTimer);
+    operationalStatusBoardService.stop();
     fukyoThemeService.shutdown();
     profileRegistrationPanelService.shutdown();
     if (discordReadyWatchdog) clearTimeout(discordReadyWatchdog);
