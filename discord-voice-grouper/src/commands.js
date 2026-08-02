@@ -106,24 +106,6 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
-      .setName("bosyu")
-      .setDescription("/b の募集設定を保存します")
-      .addChannelOption((option) =>
-        option
-          .setName("bosyu_channel")
-          .setDescription("/bを使用できるテキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addRoleOption((option) =>
-        option
-          .setName("bosyu_mention_role")
-          .setDescription("/bでメンションするロール")
-          .setRequired(false),
-      ),
-  )
-  .addSubcommand((subcommand) =>
-    subcommand
       .setName("zatudan")
       .setDescription("VC集合フォーム設定を保存します")
       .addRoleOption((option) =>
@@ -245,6 +227,12 @@ export const settingCommand = new SlashCommandBuilder()
   .addSubcommand((subcommand) =>
     subcommand
       .setName("callwait")
+      .addRoleOption((option) =>
+        option
+          .setName("bosyu_mention_role")
+          .setDescription("ボタン募集の@通話へのメンションに使うロール")
+          .setRequired(false),
+      )
       .setDescription("通話待機システム設定を保存します")
       .addBooleanOption((option) =>
         option
@@ -272,21 +260,14 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("call_wait_prompt_channel")
-          .setDescription("募集メッセージを送るテキストチャンネル")
+          .setDescription("定時募集メッセージを送るテキストチャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
       .addChannelOption((option) =>
         option
           .setName("call_wait_notice_channel")
-          .setDescription("集合通知を送るテキストチャンネル")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false),
-      )
-      .addChannelOption((option) =>
-        option
-          .setName("otebo_preview_channel")
-          .setDescription("時間指定のお手軽募集を30分前まで掲載するチャンネル")
+          .setDescription("常設パネル・匿名募集・成立通知・VC開始通知を送るテキストチャンネル")
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(false),
       )
@@ -299,8 +280,8 @@ export const settingCommand = new SlashCommandBuilder()
       )
       .addIntegerOption((option) =>
         option
-          .setName("otebo_quick_confirm_seconds")
-          .setDescription("お手軽募集の即時募集でキャンセルを受け付ける秒数。省略時は30秒")
+        .setName("otebo_quick_confirm_seconds")
+          .setDescription("ボタン募集で参加希望のキャンセルを受け付ける秒数。省略時は30秒")
           .setMinValue(0)
           .setRequired(false),
       ),
@@ -371,40 +352,6 @@ export const botStatusCommand = new SlashCommandBuilder()
   .addSubcommand((subcommand) => subcommand.setName("show").setDescription("現在状態をEphemeral表示します"))
   .addSubcommand((subcommand) => subcommand.setName("refresh").setDescription("状態を再取得してボードを更新します"))
   .addSubcommand((subcommand) => subcommand.setName("manage").setDescription("管理操作メニューを表示します"));
-
-export const bCommand = new SlashCommandBuilder()
-  .setName("b")
-  .setDescription("募集メッセージを送信します")
-  .addStringOption((option) =>
-    option
-      .setName("note")
-      .setNameLocalizations({ ja: "ひとこと" })
-      .setDescription("ひとことを入力してください。例: 遠慮せずご参加ください！")
-      .setRequired(true)
-      .setMaxLength(200),
-  )
-  .addStringOption((option) =>
-    option
-      .setName("time")
-      .setNameLocalizations({ ja: "時間" })
-      .setDescription("時間を入力してください。例: 1時間、30分、未定")
-      .setRequired(false)
-      .setMaxLength(100),
-  )
-  .addStringOption((option) =>
-    option
-      .setName("purpose")
-      .setNameLocalizations({ ja: "名目" })
-      .setDescription("名目を入力してください。入力すると参加中VC名として設定されます")
-      .setRequired(false)
-      .setMaxLength(100),
-  )
-  .addBooleanOption((option) =>
-    option
-      .setName("anonymous")
-      .setDescription("実行者が分からない形で募集を送る")
-      .setRequired(false),
-  );
 
 export const addWadaiCommand = new SlashCommandBuilder()
   .setName("addwadai")
@@ -499,10 +446,6 @@ export const removeCommand = new SlashCommandBuilder()
     .setName("role")
     .setDescription("splitvcとVC集合の参加者ロールを一括解除します"));
 
-export const sendOteboCommand = new SlashCommandBuilder()
-  .setName("sendotebo")
-  .setDescription("お手軽募集の作成ボタン付きメッセージを送信します");
-
 export const setupFormsCommand = new SlashCommandBuilder()
   .setName("setupforms")
   .setDescription("話題提供・提案要望・相談苦情フォームのボタンを設置します");
@@ -513,7 +456,6 @@ export const commands = [
   settingCommand.toJSON(),
   botStatusCommand.toJSON(),
   showReviewCommand.toJSON(),
-  bCommand.toJSON(),
   addWadaiCommand.toJSON(),
   showWadaiCommand.toJSON(),
   delWadaiCommand.toJSON(),
@@ -524,6 +466,5 @@ export const commands = [
   kokuchiCommand.toJSON(),
   removeCommand.toJSON(),
   sendCallWaitCommand.toJSON(),
-  sendOteboCommand.toJSON(),
   setupFormsCommand.toJSON(),
 ];

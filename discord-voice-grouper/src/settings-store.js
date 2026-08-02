@@ -111,6 +111,89 @@ export async function saveGuildSettings(guildId, patch) {
   return patchGuildSettings(guildId, patch);
 }
 
+const OTEBO_RECRUITMENT_SLOT_ACTIVE_STATES = [
+  "creating",
+  "active",
+  "closing",
+  "merging",
+  "auto_cancel_processing",
+  "success_processing",
+  "success_notified",
+  "cleanup_pending",
+  "uncertain",
+];
+
+/**
+ * Claims the single button-recruitment slot for a guild.  The caller should
+ * hold a Mongo lease as well; this update is the durable, atomic guard that
+ * survives process restarts and multiple bot workers.
+ */
+export async function claimOteboRecruitmentSlot({ guildId, slot }) {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error("MongoDB is unavailable; button recruitment slot cannot be claimed.");
+  }
+  const now = new Date().toISOString();
+  const cleanSlot = removeUndefined({
+    ...slot,
+    status: slot?.status ?? "creating",
+    claimedAt: slot?.claimedAt ?? now,
+    updatedAt: now,
+  });
+  return GuildSettings.findOneAndUpdate(
+    {
+      guildId,
+      $or: [
+        { oteboRecruitmentSlot: { $exists: false } },
+        { oteboRecruitmentSlot: null },
+        { "oteboRecruitmentSlot.status": { $nin: OTEBO_RECRUITMENT_SLOT_ACTIVE_STATES } },
+      ],
+    },
+    {
+      $set: { oteboRecruitmentSlot: cleanSlot },
+      $setOnInsert: { guildId },
+    },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, lean: true },
+  );
+}
+
+export async function transitionOteboRecruitmentSlot({
+  guildId,
+  slotId,
+  fromStatuses,
+  toStatus,
+  patch = {},
+}) {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error("MongoDB is unavailable; button recruitment slot cannot be updated.");
+  }
+  return GuildSettings.findOneAndUpdate(
+    {
+      guildId,
+      ...(slotId ? { "oteboRecruitmentSlot.slotId": slotId } : {}),
+      ...(fromStatuses?.length ? { "oteboRecruitmentSlot.status": { $in: fromStatuses } } : {}),
+    },
+    {
+      $set: {
+        "oteboRecruitmentSlot.status": toStatus,
+        "oteboRecruitmentSlot.updatedAt": new Date().toISOString(),
+        ...Object.fromEntries(
+          Object.entries(removeUndefined(patch)).map(([key, value]) => [`oteboRecruitmentSlot.${key}`, value]),
+        ),
+      },
+    },
+    { returnDocument: "after", lean: true },
+  );
+}
+
+export async function releaseOteboRecruitmentSlot({ guildId, slotId, status = "closed", patch = {} }) {
+  return transitionOteboRecruitmentSlot({
+    guildId,
+    slotId,
+    toStatus: status,
+    patch: { closedAt: new Date().toISOString(), ...patch },
+  });
+}
+
 export async function updateCallWaitPromptMember({ guildId, messageId, userId, operation }) {
   if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is unavailable; participant state cannot be updated.");
   const update = operation === "add"
@@ -303,6 +386,22 @@ export async function updateOteboRecruitmentParticipant({ guildId, recruitmentId
     ? { $addToSet: { [memberPath]: userId }, ...(pendingConfirmation ? { $set: { [pendingPath]: pendingConfirmation } } : {}) }
     : { $pull: { [memberPath]: userId }, $unset: { [pendingPath]: 1 } };
   return GuildSettings.findOneAndUpdate(filter, update, { returnDocument: "after", lean: true });
+}
+
+export async function clearOteboRecruitmentConfirmation({ guildId, recruitmentId, messageId, userId, expiresAt }) {
+  if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is unavailable; recruitment state cannot be updated.");
+  const basePath = `oteboRecruitments.${recruitmentId}`;
+  const pendingPath = `${basePath}.pendingConfirmations.${userId}`;
+  return GuildSettings.findOneAndUpdate(
+    {
+      guildId,
+      [`${basePath}.messageId`]: messageId,
+      [`${basePath}.status`]: "active",
+      [pendingPath]: expiresAt,
+    },
+    { $unset: { [pendingPath]: 1 } },
+    { returnDocument: "after", lean: true },
+  );
 }
 
 export async function transitionOteboRecruitment({
@@ -522,7 +621,7 @@ function getEnvironmentSettings(guildId) {
     parentChannelId: value("PB_PARENT_CHANNEL_ID"), childCategoryId: value("PB_CHILD_CATEGORY_ID"),
     kokuchiOverviewChannelId: value("PB_KOKUCHI_OVERVIEW_CHANNEL_ID"),
     waitingVcCategoryId: value("PB_WAITING_VC_CATEGORY_ID") ?? value("PB_WAITING_CHANNEL_ID"),
-    waitingVcName: value("PB_WAITING_VC_NAME"), bosyuChannelId: value("PB_BOSYU_CHANNEL_ID"),
+    waitingVcName: value("PB_WAITING_VC_NAME"),
     bosyuMentionRoleId: value("PB_BOSYU_MENTION_ROLE_ID"), voiceParticipantRoleId: value("PB_VOICE_PARTICIPANT_ROLE_ID"),
     voiceReminderChannelId: value("PB_VOICE_REMINDER_CHANNEL_ID"), voiceTopicChannelId: value("PB_VOICE_TOPIC_CHANNEL_ID"),
     voiceReminderParentChannelIds: parseOptionalIdList(value("PB_VOICE_REMINDER_PARENT_CHANNEL_IDS")),
@@ -536,9 +635,9 @@ function getEnvironmentSettings(guildId) {
     logChannelId: value("PB_LOG_CHANNEL_ID"), formChannelId: value("PB_FORM_CHANNEL_ID"), formSendChannelId: value("PB_FORM_SEND_CHANNEL_ID"),
     formModeratorRoleId: value("PB_FORM_MODERATOR_ROLE_ID"), finishMessage: value("PB_FINISH_MESSAGE"),
     transferWaitSeconds: integer("PB_TRANSFER_WAIT_SECONDS"), noticeWaitMinutes: integer("PB_NOTICE_WAIT_MINUTES"), roleRemoveWaitMinutes: integer("PB_ROLE_REMOVE_WAIT_MINUTES"),
-    callWaitEnabled: bool("PB_CALL_WAIT_ENABLED"), callWaitRoleId: value("PB_CALL_WAIT_ROLE_ID"), callWaitChannelId: value("PB_CALL_WAIT_CHANNEL_ID"),
+    callWaitEnabled: bool("PB_CALL_WAIT_ENABLED"), callWaitRoleId: value("PB_CALL_WAIT_ROLE_ID"),
     callWaitPromptChannelId: value("PB_CALL_WAIT_PROMPT_CHANNEL_ID"), callWaitNoticeChannelId: value("PB_CALL_WAIT_NOTICE_CHANNEL_ID"),
-    oteboPreviewChannelId: value("PB_OTEBO_PREVIEW_CHANNEL_ID"), callWaitVoiceCategoryId: value("PB_CALL_WAIT_VOICE_CATEGORY_ID"),
+    callWaitVoiceCategoryId: value("PB_CALL_WAIT_VOICE_CATEGORY_ID"),
     callWaitIntervalMinutes: integer("PB_CALL_WAIT_INTERVAL_MINUTES"),
     oteboQuickConfirmSeconds: integer("PB_OTEBO_QUICK_CONFIRM_SECONDS"), updatedAt: "environment",
   };

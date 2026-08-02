@@ -8,6 +8,8 @@ import { KokuchiReservation } from "./models/kokuchi-reservation.js";
 import { OperationalHealthState } from "./models/operational-health-state.js";
 import { OperationalStatusBoard } from "./models/operational-status-board.js";
 import { ProfileRegistrationPanel } from "./models/profile-registration-panel.js";
+import { OteboRecruitmentPanel } from "./models/otebo-recruitment-panel.js";
+import { CallWaitRoleGeneration } from "./models/call-wait-role-generation.js";
 import { ScheduledAction } from "./models/scheduled-action.js";
 import { SplitProcessSession } from "./models/split-process-session.js";
 import { VoiceChannelControl } from "./models/voice-channel-control.js";
@@ -31,6 +33,8 @@ const defaultModels = {
   OperationalHealthState,
   OperationalStatusBoard,
   ProfileRegistrationPanel,
+  OteboRecruitmentPanel,
+  CallWaitRoleGeneration,
   ScheduledAction,
   SplitProcessSession,
   VoiceChannelControl,
@@ -288,20 +292,56 @@ async function collectSnapshot(guild, dependencies) {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
     const prompt = settings?.callWaitPrompt ?? null;
     const otebo = Object.values(settings?.oteboRecruitments ?? {}).filter(Boolean);
+    const panel = await readOne(models.OteboRecruitmentPanel, { guildId: guild.id });
+    const panelPresence = panel ? await verifyPanelMessage(guild, panel.channelId, panel.messageId) : null;
+    const currentGeneration = await readOne(models.CallWaitRoleGeneration, { guildId: guild.id, status: { $in: ["scheduled", "executing"] } });
+    const failedGenerations = await readMany(models.CallWaitRoleGeneration, { guildId: guild.id, status: { $in: ["failed", "superseded"] } }, { updatedAt: -1 });
+    const activeButton = otebo.find((item) => item.sourceType === "button" && ["creating", "active", "closing", "merging", "auto_cancel_processing", "success_processing", "success_notified", "cleanup_pending", "published_unconfirmed", "voice_started_notified"].includes(item.status));
+    const panelHiddenReasons = [];
+    if (settings?.callWaitEnabled !== true) panelHiddenReasons.push("call_wait_disabled");
+    if (!settings?.callWaitRoleId) panelHiddenReasons.push("call_wait_role_not_configured");
+    if (activeButton) panelHiddenReasons.push("button_recruitment_active");
+    if (["evaluating", "role_granting", "closing"].includes(prompt?.lifecycleState)) panelHiddenReasons.push("call_wait_prompt_processing");
+    if (["pending", "processing", "sent_unconfirmed", "failed"].includes(settings?.callWaitPendingNotice?.status)) panelHiddenReasons.push("call_wait_notice_processing");
+    if (settings?.oteboRecruitmentSlot?.status && !["closed", "cancelled", "completed"].includes(settings.oteboRecruitmentSlot.status)) panelHiddenReasons.push(`slot_${settings.oteboRecruitmentSlot.status}`);
+    if (settings?.callWaitRoleGeneration || currentGeneration) panelHiddenReasons.push("call_wait_role_generation_active");
+    if (Object.values(settings?.oteboVoiceStatusSessions ?? {}).some(Boolean)) panelHiddenReasons.push("otebo_voice_status_active");
+    if ((getVoiceMonitorSessions?.() ?? []).some((session) => session?.guildId === guild.id)) panelHiddenReasons.push("voice_monitor_active");
+    const participantRole = settings?.voiceParticipantRoleId
+      ? guild.roles?.cache?.get(settings.voiceParticipantRoleId)
+        ?? (typeof guild.roles?.fetch === "function" ? await guild.roles.fetch(settings.voiceParticipantRoleId).catch(() => null) : null)
+      : null;
+    if ([...(participantRole?.members?.values?.() ?? [])].some((member) => !member.user?.bot)) panelHiddenReasons.push("voice_participant_role_active");
+    if (!settings?.callWaitNoticeChannelId) panelHiddenReasons.push("notice_channel_not_configured");
     const expiredPrompt = prompt && asDate(prompt.targetAt)?.getTime() <= Date.now() && EXPIRED_PROMPT_STATES.includes(prompt.lifecycleState ?? "active");
     const expiredOtebo = otebo.filter((item) => asDate(item.targetAt)?.getTime() <= Date.now() && item.status === "active");
     const uncertainOtebo = otebo.filter((item) => ["publishing", "published_unconfirmed"].includes(item.status));
-    const pendingOteboCleanup = otebo.filter((item) => ["success_processing", "success_notified", "cleanup_pending", "failed"].includes(item.status));
+    const pendingOteboCleanup = otebo.filter((item) => ["auto_cancel_processing", "success_processing", "success_notified", "cleanup_pending", "failed", "voice_started_notified"].includes(item.status));
+    const slotStatus = settings?.oteboRecruitmentSlot?.status ?? null;
+    const uncertainSlot = ["creating", "cleanup_pending", "uncertain"].includes(slotStatus);
     const issues = [];
     if (expiredPrompt || expiredOtebo.length) issues.push(issue("expired_recruitment", `期限切れの募集が${Number(Boolean(expiredPrompt)) + expiredOtebo.length}件あります。`, true));
-    if (uncertainOtebo.length) issues.push(issue("otebo_publication_uncertain", `送信結果未確認のお手軽募集が${uncertainOtebo.length}件あります。自動削除は行いません。`, false));
+    if (uncertainOtebo.length) issues.push(issue("otebo_publication_uncertain", `送信結果未確認のボタン募集が${uncertainOtebo.length}件あります。自動削除は行いません。`, false));
     if (pendingOteboCleanup.length) issues.push(issue("otebo_cleanup_pending", `Otebo success cleanup is incomplete: ${pendingOteboCleanup.length}`, true));
+    if (uncertainSlot) issues.push(issue("otebo_slot_uncertain", `ボタン募集スロットが${slotStatus}状態です。自動再送は行いません。`, true));
     const actions = expiredPrompt || expiredOtebo.length ? ["close_expired_recruitments"] : [];
+    if (!panel && settings?.callWaitNoticeChannelId && panelHiddenReasons.length === 0) issues.push(issue("otebo_panel_state_missing", "ボタン募集パネルの保存情報がありません。", false));
+    if (panel && panelPresence?.checked && !panelPresence.exists && panelHiddenReasons.length === 0) issues.push(issue("otebo_panel_message_missing", "ボタン募集パネルのDiscordメッセージが見つかりません。", false));
+    if (failedGenerations.length) issues.push(issue("call_wait_role_generation_failed", `call_wait_role世代処理の失敗・旧世代が${failedGenerations.length}件あります。`, true));
     modules.recruitment = makeModule({
       key: "recruitment",
-      label: "定時募集・お手軽募集",
-      summary: settings?.callWaitEnabled ? `定時募集有効 / 現在募集 ${prompt ? 1 : 0}件 / お手軽募集 ${otebo.length}件` : "定時募集は無効です。",
-      details: { enabled: settings?.callWaitEnabled === true, currentPrompt: prompt ? { messageId: prompt.messageId, lifecycleState: prompt.lifecycleState, memberCount: prompt.memberIds?.length ?? 0, targetAt: prompt.targetAt } : null, otebo: otebo.map((item) => ({ id: item.id, status: item.status, memberCount: item.memberIds?.length ?? 0, targetAt: item.targetAt, publishedToNotice: item.publishedToNotice })) },
+      label: "定時募集・ボタン募集",
+      summary: settings?.callWaitEnabled ? `定時募集有効 / 現在募集 ${prompt ? 1 : 0}件 / ボタン募集 ${otebo.length}件` : "定時募集は無効です。",
+      details: {
+        enabled: settings?.callWaitEnabled === true,
+        currentPrompt: prompt ? { messageId: prompt.messageId, lifecycleState: prompt.lifecycleState, memberCount: prompt.memberIds?.length ?? 0, targetAt: prompt.targetAt } : null,
+        otebo: otebo.map((item) => ({ id: item.id, sourceType: item.sourceType ?? (item.type === "immediate" ? "button" : "scheduled"), status: item.status, ownerId: item.ownerId ?? null, memberCount: item.memberIds?.length ?? 0, pendingConfirmationCount: Object.keys(item.pendingConfirmations ?? {}).length, targetAt: item.targetAt, publishedToNotice: item.publishedToNotice, roleGenerationId: item.roleGenerationId ?? null })),
+        buttonRecruitmentSlot: settings?.oteboRecruitmentSlot ?? null,
+        oteboPanel: panel ? { channelId: panel.channelId, messageId: panel.messageId, updatedAt: panel.updatedAt, discordMessageExists: panelPresence?.checked ? panelPresence.exists : null } : null,
+        panelHiddenReasons,
+        currentCallWaitRoleGeneration: currentGeneration ? { generationId: currentGeneration.generationId, sourceType: currentGeneration.sourceType, sourceId: currentGeneration.sourceId, targetCount: currentGeneration.memberIds?.length ?? 0, memberIds: currentGeneration.memberIds ?? [], removeAt: currentGeneration.executeAt, status: currentGeneration.status } : settings?.callWaitRoleGeneration ?? null,
+        staleCallWaitRoleGenerations: failedGenerations.slice(0, 20).map((item) => ({ generationId: item.generationId, status: item.status, sourceType: item.sourceType, sourceId: item.sourceId, lastError: item.lastError, updatedAt: item.updatedAt })),
+      },
       issues,
       disabled: settings?.callWaitEnabled !== true && otebo.length === 0,
       inProgress: Boolean(prompt || otebo.length),
@@ -317,7 +357,7 @@ async function collectSnapshot(guild, dependencies) {
     modules.recruitment.details.pendingQuickRecruitments = bosyuCount;
   } catch (error) {
     unknownModule = true;
-    modules.recruitment = makeModule({ key: "recruitment", label: "定時募集・お手軽募集", summary: "状態を取得できません。", issues: [issue("read_failed", truncate(error?.message ?? error), true)], unknown: true });
+    modules.recruitment = makeModule({ key: "recruitment", label: "定時募集・ボタン募集", summary: "状態を取得できません。", issues: [issue("read_failed", truncate(error?.message ?? error), true)], unknown: true });
   }
 
   try {
@@ -444,6 +484,10 @@ async function collectSnapshot(guild, dependencies) {
 
 export function createOperationalStatusService({ getGuildSettings, client, getStartupState, getVoiceMonitorSessions, models: injectedModels = {}, getDatabaseStatus: getDatabaseStatusOverride } = {}) {
   const models = { ...defaultModels, ...injectedModels };
+  if (Object.keys(injectedModels).length > 0) {
+    if (!("OteboRecruitmentPanel" in injectedModels)) models.OteboRecruitmentPanel = null;
+    if (!("CallWaitRoleGeneration" in injectedModels)) models.CallWaitRoleGeneration = null;
+  }
   const dependencies = { getGuildSettings, client, getStartupState, getVoiceMonitorSessions, models, getDatabaseStatus: getDatabaseStatusOverride };
 
   async function getOperationalStatusSnapshot(guild) {
@@ -471,7 +515,13 @@ export function createOperationalStatusService({ getGuildSettings, client, getSt
 
 export async function getOperationalStatusSnapshot(guild, dependencies) {
   if (!dependencies?.getGuildSettings) throw new Error("getGuildSettings is required.");
-  return collectSnapshot(guild, { ...dependencies, models: { ...defaultModels, ...(dependencies.models ?? {}) } });
+  const injectedModels = dependencies.models ?? {};
+  const models = { ...defaultModels, ...injectedModels };
+  if (Object.keys(injectedModels).length > 0) {
+    if (!("OteboRecruitmentPanel" in injectedModels)) models.OteboRecruitmentPanel = null;
+    if (!("CallWaitRoleGeneration" in injectedModels)) models.CallWaitRoleGeneration = null;
+  }
+  return collectSnapshot(guild, { ...dependencies, models });
 }
 
 export { makeModule };

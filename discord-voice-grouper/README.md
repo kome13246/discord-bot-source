@@ -26,8 +26,6 @@
 - 待機中の参加者を、3人以下の子VCへ補充できます。
 - 補充先がない場合、待機中に3人集まった時点で新規子VCへ転送できます。
 - 待機VCは10分経過、または終了通知キャンセル時に自動削除されます。
-- `/b` で募集メッセージを送信できます。
-- `/b` 実行者がVCに入っていて名目を指定した場合、そのVC名を名目で更新します。
 - VC集合フォームで、2人以上集まったVCに参加者ロールを付与し、開始時に話題フォーム付きメッセージを送れます。
 - VC集合フォームと同じPB子VCカテゴリ内で、1つのVCに6人以上いる場合だけ自動振り分け提案を送れます。
 - 話題フォームの内容を、送信者が参加中のVCチャンネルステータスへ `今の話題：...` として設定できます。
@@ -44,8 +42,9 @@
 - 話題提供、提案・要望、相談・苦情フォームを設置し、入力内容を指定チャンネルへ転送できます。
 - 通話待機システムで、JST 0:00基準の30分・45分・60分間隔ごとに、ボタン式の雑談希望者募集を送れます（`/kokuchi` 実行日のJST 20:00〜21:59を除く）。
 - 希望者が2人以上集まった場合、参加希望者ロールを付与し、VCに2人入った確認後に集合通知できます。
-- `/sendotebo` で、ユーザーが任意の時刻・ひとことを指定して作るお手軽募集ボタンを設置できます。
-- 時間指定のお手軽募集は、30分前まで別チャンネルに事前掲載し、30分前に集合通知送信先へ移動できます。
+- `call_wait_notice_channel` に常設の「募集を作成」ボタンを置き、ユーザーがその場で「人が集まったらすぐ」の匿名募集を作成できます。
+- ボタン募集は作成者を初期参加者として扱い、別の参加者が参加希望して確認時間を過ぎると、2人以上で集合通知を送ります。
+- ボタン募集の掲載終了時刻、予定通話時間、`@通話` へのメンション、ひとことを作成画面で指定できます。
 
 ## グループ分けのルール
 
@@ -107,7 +106,7 @@ discord-voice-grouper/
 
 主な役割:
 
-- `src/bot.js`: Bot本体です。Discordに接続し、`/splitvc`、`/b`、`/setting`、話題コマンド、VCリマインダー、通話待機システム、DISBOARD bumpリマインドを処理します。
+- `src/bot.js`: Bot本体です。Discordに接続し、`/splitvc`、`/setting`、話題コマンド、VCリマインダー、通話待機システム、ボタン募集、DISBOARD bumpリマインドを処理します。
 - `src/bump-reminder-store.js`: DISBOARD bumpリマインドの予約を保存します。
 - `src/commands.js`: スラッシュコマンドの定義です。
 - `src/grouping.js`: 3人組・4人組に分ける計算ロジックです。
@@ -209,7 +208,6 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_CALL_WAIT_ROLE_ID=123456789012345678
 # PB_CALL_WAIT_PROMPT_CHANNEL_ID=123456789012345678
 # PB_CALL_WAIT_NOTICE_CHANNEL_ID=123456789012345678
-# PB_OTEBO_PREVIEW_CHANNEL_ID=123456789012345678
 # PB_CALL_WAIT_VOICE_CATEGORY_ID=123456789012345678
 # PB_CALL_WAIT_INTERVAL_MINUTES=30
 # PB_OTEBO_QUICK_CONFIRM_SECONDS=30
@@ -250,13 +248,12 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_NOTICE_WAIT_MINUTES` | 任意 | 終了通知までの待機分数です。未設定時は25分です。 |
 | `PB_ROLE_REMOVE_WAIT_MINUTES` | 任意 | 終了通知後のロール解除待機分数です。未設定時は3分です。 |
 | `PB_CALL_WAIT_ENABLED` | 任意 | 通話待機システムの有効・無効です。`true` で有効化します。 |
-| `PB_CALL_WAIT_ROLE_ID` | 任意 | 通話待機・お手軽募集で参加希望者に付与するロールIDです。 |
+| `PB_CALL_WAIT_ROLE_ID` | 任意 | 通話待機・ボタン募集で参加希望者に付与するロールIDです。 |
 | `PB_CALL_WAIT_PROMPT_CHANNEL_ID` | 任意 | 通話待機システムの募集メッセージを送るチャンネルIDです。 |
 | `PB_CALL_WAIT_NOTICE_CHANNEL_ID` | 任意 | 通話待機システムの集合通知を送るチャンネルIDです。 |
-| `PB_OTEBO_PREVIEW_CHANNEL_ID` | 任意 | 時間指定のお手軽募集を、メンション・掲載終了時刻の30分前まで掲載するチャンネルIDです。 |
 | `PB_CALL_WAIT_VOICE_CATEGORY_ID` | 任意 | 定時募集時に、すでに2人以上いるか確認するVCカテゴリIDです。 |
 | `PB_CALL_WAIT_INTERVAL_MINUTES` | 任意 | 定時募集の間隔です。`30`、`45`、`60`から選べ、未設定時は`30`です。 |
-| `PB_OTEBO_QUICK_CONFIRM_SECONDS` | 任意 | お手軽募集の「人が集まったらすぐ」で、参加希望後にキャンセルできる秒数です。未設定時は30秒です。 |
+| `PB_OTEBO_QUICK_CONFIRM_SECONDS` | 任意 | ボタン募集の「人が集まったらすぐ」で、参加希望後にキャンセルできる秒数です。未設定時は30秒です。 |
 
 テスト中は `DISCORD_GUILD_ID` を入れるのがおすすめです。
 サーバー単位のコマンド登録は反映が速く、動作確認がしやすいです。
@@ -487,7 +484,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID` または `PB_VOICE_REMINDER_PARENT_CHANNEL_IDS`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_KOKUCHI_MENTION_ROLE_IDS`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_OTEBO_PREVIEW_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_INTERVAL_MINUTES`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID` または `PB_VOICE_REMINDER_PARENT_CHANNEL_IDS`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_KOKUCHI_MENTION_ROLE_IDS`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_INTERVAL_MINUTES`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
 Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting zatudan`、`/setting kokuchi` などで再設定が必要になることがあります。
 
@@ -566,12 +563,11 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 
 ```text
 /setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ kokuchi_overview_channel:告知概要チャンネル waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
-/setting bosyu bosyu_channel:募集チャンネル bosyu_mention_role:@募集通知
 /setting zatudan voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_parent_channel:PB親VC voice_reminder_parent_channel_2:PB親VC2 voice_reminder_child_category:PB子VCカテゴリ
 /setting kokuchi announcement_channel:告知・スタート案内送信先 event_time:21:00 gathering_voice_channel:集合VC mention_role:@告知ロール
 /setting logs log_channel:運用ログ
 /setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
-/setting callwait call_wait_enabled:true call_wait_interval_minutes:45 call_wait_role:@通話希望者 call_wait_prompt_channel:募集チャンネル call_wait_notice_channel:集合通知チャンネル otebo_preview_channel:事前掲載チャンネル call_wait_voice_category:VCカテゴリ otebo_quick_confirm_seconds:30
+/setting callwait call_wait_enabled:true call_wait_interval_minutes:45 call_wait_role:@通話希望者 call_wait_prompt_channel:募集作成用チャンネル call_wait_notice_channel:常設パネル・集合通知チャンネル call_wait_voice_category:VCカテゴリ otebo_quick_confirm_seconds:30 bosyu_mention_role:@募集通知
 ```
 
 `child_category` は任意です。
@@ -589,8 +585,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 
 | オプション | 説明 |
 | --- | --- |
-| `bosyu_channel` | `/b` を使えるテキストチャンネルを制限します。未設定なら制限なしです。 |
-| `bosyu_mention_role` | `/b` の募集メッセージでメンションするロールです。 |
+| `bosyu_mention_role` | ボタン募集で `@通話へのメンション` を有効にしたときにメンションするロールです。 |
 | `voice_participant_role` | VCリマインダーの対象VCに2人以上集まったとき付与するロールです。 |
 | `voice_reminder_enabled` | VC集合フォームの開始通知の有効・無効を保存します。`false` でも参加者ロールの付与・解除は行います。 |
 | `voice_reminder_parent_channel` / `_2`〜`_5` | リマインダー対象から除外するPB親VCを複数指定できます。 |
@@ -605,9 +600,8 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `moderator_role` | 相談・苦情フォームの転送時にメンションするモデレーターロールです。 |
 | `call_wait_enabled` | 通話待機システムを有効・無効にします。 |
 | `call_wait_role` | 希望者が2人以上集まったとき、一時的に付与するロールです。 |
-| `call_wait_prompt_channel` | ボタン式の募集メッセージを送るチャンネルです。 |
-| `call_wait_notice_channel` | 集合通知を送るチャンネルです。 |
-| `otebo_preview_channel` | 時間指定のお手軽募集を、メンション・掲載終了時刻の30分前まで掲載するチャンネルです。未設定時は最初から `call_wait_notice_channel` に投稿します。 |
+| `call_wait_prompt_channel` | 定時募集メッセージを送るチャンネルです。ボタン募集の作成パネル自体は `call_wait_notice_channel` に常設されます。 |
+| `call_wait_notice_channel` | ボタン募集パネル、匿名のボタン募集、集合通知、VC開始時の自動取消通知を送るチャンネルです。 |
 | `call_wait_voice_category` | 毎時ちょうどに、すでに2人以上いるか確認するVCカテゴリです。 |
 | `call_wait_interval_minutes` | `30`、`45`、`60` 分から選べます。毎日JST 0:00基準の固定スロットで実行します。 |
 
@@ -808,38 +802,29 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 分類は `話題提供`、`提案・要望`、`相談・苦情` のいずれかです。
 `相談・苦情` の場合だけ、転送内容の先頭に設定したモデレーターロールをメンションします。
 
-### `/b`
+### ボタン募集
 
-募集メッセージを送信します。
+ボタン募集パネルは、設定した `call_wait_notice_channel` の最下部に常設されます。ユーザーが `募集を作成` を押すと、自分だけに見える作成画面が開きます。
 
-```text
-/b note:遠慮せずご参加ください！ time:30分 purpose:雑談 anonymous:true
-```
+作成画面では次を指定できます。
 
-オプション:
+- `掲載終了時刻`: JSTの次の15分区切りから2時間後まで
+- `予定通話時間`: なし / 30分間 / 1時間
+- `@通話へのメンション`: しない / する
+- `ひとこと`: 任意、300文字まで
 
-| オプション | 必須 | 説明 |
-| --- | --- | --- |
-| `note` | 必須 | 募集のひとことです。 |
-| `time` | 任意 | 募集時間です。 |
-| `purpose` | 任意 | 名目です。 |
-| `anonymous` | 任意 | `true` のときは公開メンションを抑えます。 |
+作成される募集は「人が集まったらすぐ」方式だけです。募集者は初期参加者になり、別のユーザーが `参加希望` を押すと設定した確認時間のカウントダウンが始まります。確認時間中は参加者本人だけが `参加をキャンセル` できます。
 
-`/b` は同じユーザーが15分以内に連続使用できないようになっています。
-送信後15分間は、募集メッセージの「募集内容を編集」ボタンから内容を編集できます。
+確認時間が過ぎてBot以外の参加者が2人以上なら、`call_wait_role` を対象者へ付与し、同じ `call_wait_notice_channel` に集合通知を送ります。成功後の公開メッセージには作成者名・参加者一覧を表示しません。成立しなかった募集は自動で削除されます。
 
-実行者がVCに入っていて `purpose` を指定した場合、BotはそのVCのチャンネル名を `purpose` に更新しようとします。
-編集ボタンから名目を変更した場合も、元のVC、または編集者が参加中のVCのチャンネル名を更新しようとします。
-
-現在のコードでは、`note` をVCのチャンネルステータスとして設定する処理は行っていません。
-Discord APIのチャンネルステータス項目は使わず、募集メッセージ本文に `ひとこと` として表示します。
+公開ボタンは `参加希望` と `募集を取り消す` です。募集者が取り消す場合は確認を求め、他のユーザーが取り消しを押した場合は募集者だけに操作可能な案内を返します。
 
 ### VC集合フォーム
 
 VC集合フォームは、`voice_reminder_child_category`で指定したカテゴリ内のPB子VC、または設定された監視VCに2人以上集まったときに開始します。
 
 - 開始時に送信先へ参加者ロールをメンションし、話題フォームボタン付きの集合メッセージを1回送ります。
-- 開始時に `/b` の使用可能チャンネルへ参加者ロールをメンションした開始通知を送ります。`voice_reminder_enabled:false` の場合はこの公開通知を送りませんが、参加者ロールの付与・解除は継続します。
+- 開始時に設定した送信先へ参加者ロールをメンションした開始通知を送ります。`voice_reminder_enabled:false` の場合はこの公開通知を送りませんが、参加者ロールの付与・解除は継続します。
 - `voice_participant_role` が設定されている場合、対象VC内の参加者へロールを付与します。
 - 30分ごとの確認メッセージは送信しません。
 - 対象VCが2人未満になった場合、5分待ってからセッションを終了します。5分以内に2人以上へ戻った場合はセッションを継続します。
@@ -905,62 +890,27 @@ VC集合フォームは、`voice_reminder_child_category`で指定したカテ�
 
 このコマンドで送った募集メッセージも、次のJST固定スロットに通常どおりボタン参加者の確認、削除、次回分への更新が行われます。
 
-### お手軽募集システム
+### ボタン募集システム
 
-管理者が次を実行すると、`call_wait_prompt_channel` に募集作成ボタンを設置します。
-
-```text
-/sendotebo
-```
-
-送信される作成用メッセージ:
+`call_wait_notice_channel` の最下部に、次の常設パネルを表示します。
 
 ```text
-下のボタンから募集作成できます。
+下のボタンから募集を作成すると、募集内容と参加ボタンを含む匿名の募集メッセージが送信されます。
+参加ボタンが押されると、参加者と募集作成者へ招集メンションが送られます。
+成立しなかった募集は自動で削除されます。
 ```
 
-ユーザーが `募集作成` ボタンを押すと、自分だけに見える入力画面が開きます。
-Discordの仕様上、ラジオボタンではなく選択メニューで次の項目を選びます。
+パネルの `募集を作成` ボタンから開く入力画面では、掲載終了時刻、予定通話時間（なし / 30分間 / 1時間）、`@通話へのメンション` の有無、300文字以内のひとことを指定できます。掲載終了時刻はJSTの次の15分区切りから2時間後までです。募集タイプの選択はありません。
 
-- 募集タイプ: `指定した時間になったら` / `人が集まったらすぐ`
-- メンション・掲載終了時刻: 現在時刻から一番近い次の15分区切りから2時間後まで
-- 通話時間: `設定なし` / `30分間だけ` / `1時間だけ`
-- ひとこと: 任意入力
-- `@通話へのメンション`: `しない` / `する`
+募集本文には作成者名・参加者一覧・ユーザーIDを表示しません。ひとこと内のメンションも通知されない形に変換されます。公開ボタンは `参加希望` と `募集を取り消す`、参加者本人だけに表示する操作は `参加をキャンセル` です。
 
-募集は基本的に `call_wait_notice_channel` に投稿されます。
-`指定した時間になったら` の募集で `otebo_preview_channel` が設定されており、指定時刻まで30分以上ある場合は、まず `otebo_preview_channel` に投稿します。
-指定時刻の30分前になったら、そのメッセージを削除し、同じ内容を `call_wait_notice_channel` へ投稿し直します。
-`@通話へのメンション` を `する` にした場合は、`bosyu_mention_role` を本文に入れます。
-ただし `otebo_preview_channel` に掲載している間はメンションせず、30分前に `call_wait_notice_channel` へ移動した後だけメンションします。
-ひとこと欄に `@everyone` やロールメンションを書いても、メンションとして通知されないように処理します。
+募集作成者は初期参加者です。別のユーザーが `参加希望` を押すと、`otebo_quick_confirm_seconds` 秒の確認時間が始まり、その間は参加者本人が取り消せます。確認時間を過ぎてBot以外の参加者が2人以上なら、`call_wait_role` を対象者へ付与し、次の集合通知を `call_wait_notice_channel` へ送ります。
 
-同時に作成できる募集は一人一つまでです。
-募集作成者も、初期状態で参加予定者リストに入っている参加予定者として扱います。
-募集メッセージには `参加希望` または `参加を予定` ボタンと、常設の `参加をキャンセル` ボタンが付きます。
-参加予定者が0人になった場合のみ、募集メッセージを削除して募集を終了します。
+```text
+@通話希望者 雑談募集が成立しました！VCへの参加お願いします！
+```
 
-`指定した時間になったら` の場合:
-
-- 募集者本人は最初から参加予定者に含まれます。
-- 募集本文に `現在の参加予定者数：x人` を表示し、参加予定者の増減時に更新します。
-- 他のユーザーが `参加を予定` ボタンを押すと参加予定者に追加されます。
-- 参加を取り消す場合は、募集メッセージ下の `参加をキャンセル` ボタンを押します。
-- 指定時刻に募集者を含めて2人以上いれば、参加予定者に `call_wait_role` を付与して集合通知を送ります。
-- 2人未満の場合は募集メッセージを削除します。
-
-`人が集まったらすぐ` の場合:
-
-- 募集者本人は最初から参加予定者に含まれます。
-- 他のユーザーが `参加希望` ボタンを押すと参加希望者に追加され、`otebo_quick_confirm_seconds` 秒だけキャンセルできます。
-- キャンセル猶予中の一時メッセージは、残り秒数を毎秒更新します。
-- キャンセルされずに猶予時間が過ぎると、募集者と参加希望者に `call_wait_role` を付与して集合通知を送ります。
-- 掲載終了時刻まで誰も参加希望しなかった場合は、募集メッセージを削除します。
-
-集合通知後、`call_wait_role` は20分後に自動解除します。
-会話時間に `30分間だけ` または `1時間だけ` が選ばれていた場合、集合通知後20分以内にロール付与対象者が同じVCへ最初に2人以上集まると、そのVCのチャンネルステータスを `会話時間：30分(予定)` または `会話時間：1時間(予定)` に設定します。
-設定したステータスは、会話時間 + 15分後に空へ戻します。
-参加・キャンセル・リセットのログは、定時募集と同じように `log_channel` へ送ります。
+成立時は募集メッセージを削除し、`call_wait_role` は20分後に世代番号を確認してから解除します。予定通話時間を指定していた場合は、成立後に同じVCへ2人以上集まった時点で既存のVCステータス処理を開始します。募集の掲載終了、VC開始、別の定時募集との統合、作成者による取消しでは、募集メッセージと一時状態を安全に回収します。
 
 ### `/splitvc`
 
@@ -1067,7 +1017,9 @@ PBが作成した子VCをBotが検出できている場合、その子VCがす�
 コードでは次のGateway Intentを使っています。
 
 - `Guilds`
+- `GuildMembers`
 - `GuildMessages`
+- `MessageContent`
 - `GuildVoiceStates`
 
 Botに必要な主な権限:
@@ -1079,8 +1031,9 @@ Botに必要な主な権限:
 - メンバーをVC間で移動できること
 - 参加者ロールを付与・解除できること
 - 途中参加用の待機VCを作成・削除できること
-- `/b` の名目に合わせてVC名を変更できること
 - 話題フォームの内容をVCチャンネルステータスへ設定できること
+- ボタン募集の `call_wait_notice_channel` で、表示・送信・埋め込み・履歴閲覧・メッセージ管理ができること
+- `call_wait_role` より上位のロールを持ち、Manage Roles権限があること
 
 Role Hierarchyの注意:
 
