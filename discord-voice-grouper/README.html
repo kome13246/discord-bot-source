@@ -3,1048 +3,137 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Discord Voice Grouper ガイド</title>
+  <title>Discord Voice Grouper 運用ガイド</title>
   <style>
-    :root {
-      color-scheme: light;
-      --bg: #f6f7f9;
-      --panel: #ffffff;
-      --panel-soft: #f0f4f8;
-      --text: #17202a;
-      --muted: #657386;
-      --line: #d9e0e8;
-      --accent: #2f6f73;
-      --accent-strong: #194f54;
-      --accent-soft: #e0f0ef;
-      --warn: #a15c18;
-      --warn-soft: #fff1df;
-      --ok: #316f45;
-      --ok-soft: #e5f3e9;
-      --code-bg: #15202b;
-      --code-text: #eaf2f4;
-      --shadow: 0 12px 30px rgba(24, 38, 53, 0.08);
-      --radius: 8px;
-      font-family:
-        "Yu Gothic UI",
-        "Yu Gothic",
-        "Meiryo",
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    html {
-      scroll-behavior: smooth;
-    }
-
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.75;
-      letter-spacing: 0;
-    }
-
-    a {
-      color: var(--accent-strong);
-      text-decoration: none;
-    }
-
-    a:hover {
-      text-decoration: underline;
-    }
-
-    .layout {
-      display: grid;
-      grid-template-columns: 280px minmax(0, 1fr);
-      min-height: 100vh;
-    }
-
-    .sidebar {
-      position: sticky;
-      top: 0;
-      height: 100vh;
-      overflow-y: auto;
-      padding: 24px 18px;
-      border-right: 1px solid var(--line);
-      background: #ffffff;
-    }
-
-    .brand {
-      display: grid;
-      gap: 6px;
-      margin-bottom: 20px;
-    }
-
-    .brand-title {
-      margin: 0;
-      font-size: 20px;
-      line-height: 1.25;
-      color: var(--accent-strong);
-    }
-
-    .brand-subtitle {
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .search {
-      width: 100%;
-      height: 40px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 0 12px;
-      font: inherit;
-      background: var(--panel-soft);
-      color: var(--text);
-      margin-bottom: 18px;
-    }
-
-    .nav-title {
-      margin: 20px 0 8px;
-      font-size: 12px;
-      color: var(--muted);
-      font-weight: 700;
-      text-transform: uppercase;
-    }
-
-    .nav {
-      display: grid;
-      gap: 4px;
-    }
-
-    .nav a {
-      display: block;
-      padding: 8px 10px;
-      border-radius: 6px;
-      color: var(--text);
-      font-size: 14px;
-    }
-
-    .nav a:hover {
-      background: var(--accent-soft);
-      text-decoration: none;
-    }
-
-    .main {
-      min-width: 0;
-    }
-
-    .hero {
-      padding: 56px 42px 34px;
-      background:
-        linear-gradient(135deg, rgba(47, 111, 115, 0.13), rgba(49, 111, 69, 0.08)),
-        #ffffff;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .hero-inner {
-      max-width: 1120px;
-      margin: 0 auto;
-    }
-
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 4px 10px;
-      border: 1px solid #b9d9d6;
-      border-radius: 999px;
-      background: #eef8f7;
-      color: var(--accent-strong);
-      font-size: 13px;
-      font-weight: 700;
-    }
-
-    h1 {
-      margin: 18px 0 12px;
-      font-size: clamp(32px, 5vw, 54px);
-      line-height: 1.08;
-      letter-spacing: 0;
-    }
-
-    .lead {
-      max-width: 820px;
-      margin: 0;
-      color: #39495b;
-      font-size: 18px;
-    }
-
-    .hero-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 24px;
-    }
-
-    .button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 38px;
-      padding: 0 14px;
-      border-radius: 6px;
-      border: 1px solid var(--accent);
-      background: var(--accent);
-      color: #ffffff;
-      font-weight: 700;
-    }
-
-    .button.secondary {
-      background: #ffffff;
-      color: var(--accent-strong);
-    }
-
-    .content {
-      max-width: 1120px;
-      margin: 0 auto;
-      padding: 34px 42px 80px;
-    }
-
-    section {
-      margin: 0 0 42px;
-      scroll-margin-top: 24px;
-    }
-
-    h2 {
-      margin: 0 0 14px;
-      font-size: 28px;
-      line-height: 1.25;
-    }
-
-    h3 {
-      margin: 28px 0 10px;
-      font-size: 20px;
-      line-height: 1.35;
-    }
-
-    p {
-      margin: 0 0 12px;
-    }
-
-    ul,
-    ol {
-      margin: 0 0 14px;
-      padding-left: 1.35em;
-    }
-
-    li {
-      margin: 4px 0;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 14px;
-      margin: 16px 0;
-    }
-
-    .grid.two {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 16px;
-      box-shadow: var(--shadow);
-    }
-
-    .card h3 {
-      margin-top: 0;
-    }
-
-    .card p:last-child,
-    .card ul:last-child,
-    .card ol:last-child {
-      margin-bottom: 0;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      min-height: 24px;
-      padding: 0 8px;
-      border-radius: 999px;
-      background: var(--accent-soft);
-      color: var(--accent-strong);
-      font-size: 12px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
-    .badge.warn {
-      background: var(--warn-soft);
-      color: var(--warn);
-    }
-
-    .badge.ok {
-      background: var(--ok-soft);
-      color: var(--ok);
-    }
-
-    .flow {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-      margin: 18px 0;
-    }
-
-    .flow-step {
-      position: relative;
-      min-height: 112px;
-      padding: 14px;
-      border-radius: var(--radius);
-      border: 1px solid #c8d8d7;
-      background: #ffffff;
-    }
-
-    .flow-step strong {
-      display: block;
-      margin-bottom: 6px;
-      color: var(--accent-strong);
-    }
-
-    .notice {
-      padding: 14px 16px;
-      border-left: 4px solid var(--accent);
-      background: #ffffff;
-      border-radius: 0 var(--radius) var(--radius) 0;
-      margin: 16px 0;
-      box-shadow: var(--shadow);
-    }
-
-    .notice.warn {
-      border-left-color: var(--warn);
-    }
-
-    code {
-      font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
-      background: #e9eef3;
-      padding: 2px 5px;
-      border-radius: 4px;
-      font-size: 0.92em;
-    }
-
-    .codeblock {
-      position: relative;
-      margin: 12px 0 18px;
-    }
-
-    pre {
-      margin: 0;
-      padding: 16px;
-      overflow-x: auto;
-      border-radius: var(--radius);
-      background: var(--code-bg);
-      color: var(--code-text);
-      line-height: 1.6;
-      font-size: 13px;
-    }
-
-    pre code {
-      background: transparent;
-      color: inherit;
-      padding: 0;
-      border-radius: 0;
-      font-size: inherit;
-    }
-
-    .copy {
-      position: absolute;
-      top: 8px;
-      right: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.35);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.12);
-      color: #ffffff;
-      min-height: 28px;
-      padding: 0 10px;
-      font: inherit;
-      font-size: 12px;
-      cursor: pointer;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 12px 0 18px;
-      background: #ffffff;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      overflow: hidden;
-      box-shadow: var(--shadow);
-    }
-
-    th,
-    td {
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--line);
-      text-align: left;
-      vertical-align: top;
-      font-size: 14px;
-    }
-
-    th {
-      background: var(--panel-soft);
-      color: #29384a;
-      font-weight: 700;
-    }
-
-    tr:last-child td {
-      border-bottom: 0;
-    }
-
-    details {
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: #ffffff;
-      box-shadow: var(--shadow);
-      margin: 10px 0;
-      overflow: hidden;
-    }
-
-    summary {
-      cursor: pointer;
-      padding: 13px 16px;
-      font-weight: 700;
-      color: var(--accent-strong);
-      background: #ffffff;
-    }
-
-    details[open] summary {
-      border-bottom: 1px solid var(--line);
-      background: var(--panel-soft);
-    }
-
-    .details-body {
-      padding: 14px 16px 16px;
-    }
-
-    .command-list {
-      display: grid;
-      gap: 12px;
-    }
-
-    .command {
-      display: grid;
-      gap: 6px;
-      padding: 14px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: #ffffff;
-      box-shadow: var(--shadow);
-    }
-
-    .command code {
-      width: fit-content;
-      background: var(--accent-soft);
-      color: var(--accent-strong);
-      font-weight: 700;
-    }
-
-    .hidden {
-      display: none !important;
-    }
-
-    .footer {
-      padding-top: 28px;
-      color: var(--muted);
-      border-top: 1px solid var(--line);
-      font-size: 14px;
-    }
-
-    @media (max-width: 980px) {
-      .layout {
-        display: block;
-      }
-
-      .sidebar {
-        position: relative;
-        height: auto;
-        border-right: 0;
-        border-bottom: 1px solid var(--line);
-      }
-
-      .nav {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      .hero,
-      .content {
-        padding-left: 22px;
-        padding-right: 22px;
-      }
-
-      .grid,
-      .grid.two,
-      .flow {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    @media print {
-      .sidebar,
-      .copy,
-      .hero-actions,
-      .search {
-        display: none;
-      }
-
-      .layout {
-        display: block;
-      }
-
-      body {
-        background: #ffffff;
-      }
-
-      .hero,
-      .content {
-        padding: 20px;
-      }
-
-      .card,
-      .notice,
-      table,
-      details {
-        box-shadow: none;
-      }
-    }
+    :root { color-scheme: light; --ink:#243247; --muted:#66758a; --line:#dce3ec; --accent:#3568d4; --soft:#f4f7fb; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:#f7f9fc; font:16px/1.75 system-ui,-apple-system,"Segoe UI","Noto Sans JP",sans-serif; }
+    header { padding:56px 24px 44px; color:white; background:linear-gradient(135deg,#20385e,#3568d4); }
+    header > div, main { max-width:1020px; margin:0 auto; }
+    h1 { margin:0 0 10px; font-size:clamp(30px,5vw,48px); }
+    h2 { margin:42px 0 14px; padding-bottom:6px; border-bottom:2px solid var(--line); }
+    h3 { margin-top:28px; }
+    p { margin:10px 0; }
+    nav { position:sticky; top:0; z-index:2; padding:10px 24px; background:#fff; border-bottom:1px solid var(--line); }
+    nav div { max-width:1020px; margin:0 auto; display:flex; flex-wrap:wrap; gap:8px 18px; }
+    nav a { color:var(--accent); text-decoration:none; }
+    main { padding:18px 24px 64px; }
+    section { scroll-margin-top:56px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+    .card, .note { padding:18px; background:white; border:1px solid var(--line); border-radius:12px; box-shadow:0 4px 16px #2538580b; }
+    .note { background:var(--soft); }
+    code, pre { font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; }
+    code { padding:2px 5px; border-radius:4px; background:#edf1f7; }
+    pre { overflow:auto; padding:16px; color:#182333; background:#eef2f7; border:1px solid var(--line); border-radius:8px; white-space:pre-wrap; }
+    table { width:100%; border-collapse:collapse; background:#fff; }
+    th, td { padding:9px 11px; text-align:left; vertical-align:top; border:1px solid var(--line); }
+    th { background:var(--soft); }
+    .small { color:var(--muted); font-size:.92em; }
+    .warning { border-left:4px solid #d78a25; }
+    @media (max-width:650px) { header { padding:38px 18px; } main, nav { padding-left:18px; padding-right:18px; } table { display:block; overflow:auto; } }
   </style>
 </head>
 <body>
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="brand">
-        <h1 class="brand-title">Discord Voice Grouper</h1>
-        <p class="brand-subtitle">読みやすいHTMLガイド</p>
+  <header>
+    <div>
+      <h1>Discord Voice Grouper</h1>
+      <p>ボイスチャンネルのグループ分け、通話待機、VC集合フォームを扱うDiscord Botです。</p>
+    </div>
+  </header>
+
+  <nav>
+    <div>
+      <a href="#overview">できること</a>
+      <a href="#setup">セットアップ</a>
+      <a href="#commands">コマンド</a>
+      <a href="#button-recruitment">ボタン募集</a>
+      <a href="#render">Render</a>
+      <a href="#trouble">トラブルシュート</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="overview">
+      <h2>できること</h2>
+      <div class="grid">
+        <div class="card"><strong>/splitvc</strong><br>VC参加者を3人組中心にグループ分けし、PB連携や途中参加VCまで処理します。</div>
+        <div class="card"><strong>通話待機</strong><br>JST固定スロットの定時募集と、VCの開始・終了に合わせた通知を処理します。</div>
+        <div class="card"><strong>ボタン募集</strong><br>常設パネルから匿名の即時募集を作成し、参加確定・ロール世代管理・VC開始を処理します。</div>
       </div>
-      <input id="search" class="search" type="search" placeholder="キーワード検索">
-      <div class="nav-title">導入</div>
-      <nav class="nav">
-        <a href="#overview">概要</a>
-        <a href="#quickstart">最短セットアップ</a>
-        <a href="#permissions">権限</a>
-        <a href="#env">環境変数</a>
-        <a href="#deploy">Render</a>
-      </nav>
-      <div class="nav-title">機能</div>
-      <nav class="nav">
-        <a href="#commands">コマンド一覧</a>
-        <a href="#splitvc">/splitvc</a>
-        <a href="#kokuchi">話題・告知</a>
-        <a href="#forms">フォーム</a>
-        <a href="#bosyu">/b 募集</a>
-        <a href="#voice-form">VC集合フォーム</a>
-        <a href="#callwait">通話待機</a>
-        <a href="#otebo">お手軽募集</a>
-        <a href="#bump">bump通知</a>
-      </nav>
-      <div class="nav-title">運用</div>
-      <nav class="nav">
-        <a href="#trouble">トラブル</a>
-        <a href="#operations">運用メモ</a>
-      </nav>
-    </aside>
+      <p class="small">公開募集には作成者名・参加者一覧・ユーザーIDを表示しません。詳細仕様は同梱の <a href="README.md">README.md</a> を参照してください。</p>
+    </section>
 
-    <main class="main">
-      <header class="hero">
-        <div class="hero-inner">
-          <span class="eyebrow">Discord Bot 運用ガイド</span>
-          <h1>3人組分け、PB連携、募集、フォーム運用を一つに整理</h1>
-          <p class="lead">
-            このHTMLはREADMEの内容を、導入手順・設定・機能別仕様・トラブル対応に分け直した読みやすい版です。
-            Botの使い方を確認するときは、左の検索とナビから必要な場所へ移動してください。
-          </p>
-          <div class="hero-actions">
-            <a class="button" href="#quickstart">セットアップを見る</a>
-            <a class="button secondary" href="#commands">コマンドを見る</a>
-            <a class="button secondary" href="#trouble">トラブル対応を見る</a>
-          </div>
-        </div>
-      </header>
+    <section id="setup">
+      <h2>セットアップ</h2>
+      <ol>
+        <li>Discord Developer PortalでBotを作成し、<code>Guilds</code>、<code>GuildMembers</code>、<code>GuildMessages</code>、<code>MessageContent</code>、<code>GuildVoiceStates</code>を有効にします。</li>
+        <li>Botを招待し、メッセージの送受信、履歴閲覧、メッセージ管理、Manage Roles、VC操作に必要な権限を付与します。</li>
+        <li><code>.env.example</code>を<code>.env</code>へコピーし、<code>DISCORD_TOKEN</code>、<code>DISCORD_CLIENT_ID</code>、<code>MONGODB_URI</code>を設定します。</li>
+        <li><code>npm install</code>、<code>npm run register</code>、<code>npm start</code>の順に実行します。</li>
+      </ol>
+      <div class="note warning">本番ではBotのロールを <code>call_wait_role</code> と <code>voice_participant_role</code> より上位に置いてください。Bot Tokenは公開しないでください。</div>
+    </section>
 
-      <div class="content">
-        <section id="overview" data-search-section>
-          <h2>概要</h2>
-          <div class="grid">
-            <div class="card">
-              <span class="badge ok">基本</span>
-              <h3>3人組を基本に振り分け</h3>
-              <p>VC内のメンバーを読み取り、3人組を中心にグループ分けします。余りが1人または2人なら既存グループへ寄せ、4人グループを作ります。</p>
-            </div>
-            <div class="card">
-              <span class="badge">PB連携</span>
-              <h3>親VC・子VCへ自動転送</h3>
-              <p>PBの親VCへ代表者を移動し、PBが作成した子VCへ同じグループの残りメンバーを移動します。</p>
-            </div>
-            <div class="card">
-              <span class="badge">運用補助</span>
-              <h3>募集・フォーム・ログ</h3>
-              <p>通話待機、お手軽募集、話題フォーム、提案フォーム、運用ログ、DISBOARD bump通知までまとめて扱います。</p>
-            </div>
-          </div>
+    <section id="commands">
+      <h2>コマンドと設定</h2>
+      <p><code>/setting callwait</code>で通話待機の共通設定を保存します。</p>
+      <pre>/setting callwait call_wait_enabled:true call_wait_interval_minutes:45 call_wait_role:@通話希望者 call_wait_prompt_channel:募集チャンネル call_wait_notice_channel:集合通知チャンネル call_wait_voice_category:VCカテゴリ otebo_quick_confirm_seconds:30 bosyu_mention_role:@募集通知</pre>
+      <table>
+        <thead><tr><th>設定</th><th>用途</th></tr></thead>
+        <tbody>
+          <tr><td><code>call_wait_prompt_channel</code></td><td>定時募集の送信先と、設定操作の基準チャンネルです。</td></tr>
+          <tr><td><code>call_wait_notice_channel</code></td><td>常設パネル、匿名募集、成立通知、VC開始通知の送信先です。</td></tr>
+          <tr><td><code>call_wait_role</code></td><td>定時募集・ボタン募集の成立時に一時付与するロールです。</td></tr>
+          <tr><td><code>bosyu_mention_role</code></td><td>ボタン募集で「@通話へのメンション」を有効にしたときの通知ロールです。</td></tr>
+          <tr><td><code>otebo_quick_confirm_seconds</code></td><td>別の参加者が参加希望した後の確認秒数です。省略時は30秒です。</td></tr>
+        </tbody>
+      </table>
+      <p class="small">旧来の募集コマンドや、時間を選ぶボタン募集モードは現行コマンドとして登録していません。</p>
+    </section>
 
-          <h3>グループ分けルール</h3>
-          <table>
-            <thead>
-              <tr><th>人数</th><th>分け方</th><th>補足</th></tr>
-            </thead>
-            <tbody>
-              <tr><td>1から2人</td><td>そのまま</td><td>小さいグループとして表示します。</td></tr>
-              <tr><td>3人</td><td>3</td><td>基本形です。</td></tr>
-              <tr><td>4人</td><td>4</td><td>余り1人を3人組へ寄せた形です。</td></tr>
-              <tr><td>5人</td><td>3 + 2</td><td>3人・4人だけでは作れないため例外です。</td></tr>
-              <tr><td>6人</td><td>3 + 3</td><td>2グループです。</td></tr>
-              <tr><td>7人</td><td>4 + 3</td><td>余り1人を1グループへ寄せます。</td></tr>
-              <tr><td>8人</td><td>4 + 4</td><td>余り2人を2グループへ寄せます。</td></tr>
-              <tr><td>9人以上</td><td>3人組中心</td><td>余りが出た場合だけ4人グループを作ります。</td></tr>
-            </tbody>
-          </table>
-        </section>
+    <section id="button-recruitment">
+      <h2>ボタン募集</h2>
+      <p><code>call_wait_notice_channel</code>の最下部に、次の常設パネルを表示します。</p>
+      <pre>下のボタンから募集を作成すると、募集内容と参加ボタンを含む匿名の募集メッセージが送信されます。
+参加ボタンが押されると、参加者と募集作成者へ招集メンションが送られます。
+成立しなかった募集は自動で削除されます。</pre>
+      <p>パネルの<code>募集を作成</code>から、次を入力します。</p>
+      <ul>
+        <li>掲載終了時刻: JSTの次の15分区切りから2時間後まで</li>
+        <li>予定通話時間: なし / 30分間 / 1時間</li>
+        <li>@通話へのメンション: しない / する</li>
+        <li>ひとこと: 任意、300文字まで</li>
+      </ul>
+      <p>公開本文は匿名で、公開ボタンは<code>参加希望</code>と<code>募集を取り消す</code>です。参加希望者本人だけに<code>参加をキャンセル</code>を表示します。作成者は初期参加者として扱い、確認時間後にBot以外の参加者が2人以上なら成立通知とロール付与を行います。</p>
+      <pre>&lt;@&amp;通話希望者&gt; 雑談募集が成立しました！VCへの参加お願いします！</pre>
+      <p>成立、掲載終了、VC開始、定時募集との統合、作成者による取消しでは、募集メッセージと一時状態を回収します。ロール解除は世代番号を確認してから行うため、後続の募集のロールを誤って解除しません。</p>
+    </section>
 
-        <section id="quickstart" data-search-section>
-          <h2>最短セットアップ</h2>
-          <div class="flow">
-            <div class="flow-step">
-              <strong>1. Discordアプリ作成</strong>
-              <p>Developer PortalでApplicationとBotを作り、TokenとClient IDを控えます。</p>
-            </div>
-            <div class="flow-step">
-              <strong>2. Botを招待</strong>
-              <p>Scopesは <code>bot</code> と <code>applications.commands</code> を選びます。</p>
-            </div>
-            <div class="flow-step">
-              <strong>3. .env作成</strong>
-              <p><code>.env.example</code> をコピーし、TokenやClient IDを入れます。</p>
-            </div>
-            <div class="flow-step">
-              <strong>4. 起動</strong>
-              <p><code>npm install</code>、<code>npm run register</code>、<code>npm start</code> の順に実行します。</p>
-            </div>
-          </div>
+    <section id="render">
+      <h2>Renderで運用する場合</h2>
+      <table>
+        <tbody>
+          <tr><th>Build Command</th><td><code>npm install</code></td></tr>
+          <tr><th>Start Command</th><td><code>npm start</code></td></tr>
+          <tr><th>Health Check Path</th><td><code>/health</code></td></tr>
+          <tr><th>必須環境変数</th><td><code>DISCORD_TOKEN</code>、<code>DISCORD_CLIENT_ID</code>、<code>MONGODB_URI</code></td></tr>
+          <tr><th>通話待機の主な環境変数</th><td><code>PB_CALL_WAIT_ENABLED</code>、<code>PB_CALL_WAIT_ROLE_ID</code>、<code>PB_CALL_WAIT_PROMPT_CHANNEL_ID</code>、<code>PB_CALL_WAIT_NOTICE_CHANNEL_ID</code>、<code>PB_CALL_WAIT_VOICE_CATEGORY_ID</code>、<code>PB_CALL_WAIT_INTERVAL_MINUTES</code>、<code>PB_OTEBO_QUICK_CONFIRM_SECONDS</code></td></tr>
+        </tbody>
+      </table>
+      <p>Renderでは、<code>/setting</code>で保存したサーバー設定を永続化するためMongoDB接続を維持してください。スラッシュコマンド変更後は<code>npm run register</code>を再実行します。</p>
+    </section>
 
-          <h3>ローカル起動コマンド</h3>
-          <div class="codeblock"><button class="copy">コピー</button><pre><code>copy .env.example .env
-npm install
-npm run register
-npm start</code></pre></div>
-
-          <div class="notice warn">
-            <p><strong>Tokenの扱い:</strong> <code>DISCORD_TOKEN</code> はパスワード相当です。GitHubや公開場所へ書かないでください。</p>
-          </div>
-        </section>
-
-        <section id="permissions" data-search-section>
-          <h2>必要な権限とIntent</h2>
-          <div class="grid two">
-            <div class="card">
-              <h3>Bot Permissions</h3>
-              <ul>
-                <li>View Channels</li>
-                <li>Send Messages</li>
-                <li>Add Reactions</li>
-                <li>Read Message History</li>
-                <li>Connect</li>
-                <li>Move Members</li>
-                <li>Manage Roles</li>
-                <li>Manage Channels</li>
-                <li>Set Voice Channel Status</li>
-              </ul>
-            </div>
-            <div class="card">
-              <h3>Developer Portalで確認するIntent</h3>
-              <ul>
-                <li>Server Members Intent: メンバー取得を安定させる場合に確認</li>
-                <li>Message Content Intent: 「話題を出して」など通常メッセージ本文へ反応する場合に必要</li>
-              </ul>
-            </div>
-          </div>
-          <div class="notice">
-            <p>参加者ロール、通話希望者ロール、VC集合フォーム用ロールは、Botの最上位ロールより下に置いてください。上にあるロールはBotから付与・解除できません。</p>
-          </div>
-        </section>
-
-        <section id="env" data-search-section>
-          <h2>環境変数</h2>
-          <p>最低限必要なのは <code>DISCORD_TOKEN</code> と <code>DISCORD_CLIENT_ID</code> です。Renderなどで設定を固定したい場合は、PB_で始まる環境変数も使えます。</p>
-
-          <details open>
-            <summary>必須・基本</summary>
-            <div class="details-body">
-              <table>
-                <thead><tr><th>名前</th><th>説明</th></tr></thead>
-                <tbody>
-                  <tr><td><code>DISCORD_TOKEN</code></td><td>Bot Tokenです。必須です。</td></tr>
-                  <tr><td><code>DISCORD_CLIENT_ID</code></td><td>ApplicationのClient IDです。必須です。</td></tr>
-                  <tr><td><code>DISCORD_GUILD_ID</code></td><td>テスト用サーバーだけへコマンド登録する場合に指定します。</td></tr>
-                  <tr><td><code>DISBOARD_BOT_ID</code></td><td>DISBOARD Bot IDです。未設定なら標準IDを使います。</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
-
-          <details>
-            <summary>/splitvc・PB連携</summary>
-            <div class="details-body">
-              <table>
-                <thead><tr><th>名前</th><th>説明</th></tr></thead>
-                <tbody>
-                  <tr><td><code>PB_PARTICIPANT_ROLE_ID</code></td><td>/splitvc参加者ロールIDです。</td></tr>
-                  <tr><td><code>PB_PARENT_CHANNEL_ID</code></td><td>PB親VCのIDです。</td></tr>
-                  <tr><td><code>PB_CHILD_CATEGORY_ID</code></td><td>PB子VCカテゴリIDです。</td></tr>
-                  <tr><td><code>PB_WAITING_VC_CATEGORY_ID</code></td><td>途中参加用待機VCを作成するカテゴリIDです。</td></tr>
-                  <tr><td><code>PB_WAITING_VC_NAME</code></td><td>自動作成する待機VC名です。</td></tr>
-                  <tr><td><code>PB_POST_SPLIT_WADAI_CHANNEL_ID</code></td><td>/splitvc後の話題・発話順送信先です。</td></tr>
-                  <tr><td><code>PB_SPLIT_START_CHANNEL_ID</code></td><td>旧互換用です。現在は告知・スタート案内送信先として <code>PB_WADAI_CHANNEL_ID</code> と統一して扱います。</td></tr>
-                  <tr><td><code>PB_GATHERING_VOICE_CHANNEL_ID</code></td><td>/kokuchi当日20:40（JST）に開放する集合VCです。環境変数で設定した場合も、スケジュール保存後と再起動後に使用されます。</td></tr>
-                  <tr><td><code>PB_SPLIT_FEEDBACK_CHANNEL_ID</code></td><td>終了後のお礼メッセージで案内する意見・苦情チャンネルです。</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
-
-          <details>
-            <summary>VC集合フォーム・フォーム・ログ</summary>
-            <div class="details-body">
-              <table>
-                <thead><tr><th>名前</th><th>説明</th></tr></thead>
-                <tbody>
-                  <tr><td><code>PB_VOICE_REMINDER_ENABLED</code></td><td>VC集合フォーム機能の有効・無効です。</td></tr>
-                  <tr><td><code>PB_VOICE_REMINDER_CHANNEL_ID</code></td><td>VC集合フォームの送信先です。</td></tr>
-                  <tr><td><code>PB_VOICE_REMINDER_PARENT_CHANNEL_ID</code></td><td>対象PB親VCです。</td></tr>
-                  <tr><td><code>PB_VOICE_REMINDER_CHILD_CATEGORY_ID</code></td><td>対象PB子VCカテゴリです。</td></tr>
-                  <tr><td><code>PB_LOG_CHANNEL_ID</code></td><td>運用ログ送信先です。</td></tr>
-                  <tr><td><code>PB_FORM_CHANNEL_ID</code></td><td>フォームボタン設置先です。</td></tr>
-                  <tr><td><code>PB_FORM_SEND_CHANNEL_ID</code></td><td>フォーム内容転送先です。</td></tr>
-                  <tr><td><code>PB_FORM_MODERATOR_ROLE_ID</code></td><td>相談・苦情フォームでメンションするロールです。</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
-
-          <details>
-            <summary>通話待機・お手軽募集</summary>
-            <div class="details-body">
-              <table>
-                <thead><tr><th>名前</th><th>説明</th></tr></thead>
-                <tbody>
-                  <tr><td><code>PB_CALL_WAIT_ENABLED</code></td><td>通話待機システムの有効・無効です。</td></tr>
-                  <tr><td><code>PB_CALL_WAIT_ROLE_ID</code></td><td>通話待機・お手軽募集で希望者へ付与するロールです。</td></tr>
-                  <tr><td><code>PB_CALL_WAIT_PROMPT_CHANNEL_ID</code></td><td>募集メッセージ、またはお手軽募集作成ボタンの送信先です。</td></tr>
-                  <tr><td><code>PB_CALL_WAIT_NOTICE_CHANNEL_ID</code></td><td>集合通知、お手軽募集本文の送信先です。</td></tr>
-                  <tr><td><code>PB_OTEBO_PREVIEW_CHANNEL_ID</code></td><td>時間指定のお手軽募集を30分前まで掲載する送信先です。</td></tr>
-                  <tr><td><code>PB_CALL_WAIT_VOICE_CATEGORY_ID</code></td><td>毎時ちょうどにVC人数を確認するカテゴリです。</td></tr>
-                  <tr><td><code>PB_CALL_WAIT_MODE</code></td><td><code>reaction</code> または <code>button</code> です。</td></tr>
-                  <tr><td><code>PB_CALL_WAIT_BOSYU_NOTICE_ENABLED</code></td><td>集合通知後に/b募集ロールへ案内するかどうかです。</td></tr>
-                  <tr><td><code>PB_OTEBO_QUICK_CONFIRM_SECONDS</code></td><td>お手軽募集の即時募集でキャンセルできる秒数です。</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
-        </section>
-
-        <section id="deploy" data-search-section>
-          <h2>Renderデプロイ</h2>
-          <ol>
-            <li>GitHubへコードをpushします。</li>
-            <li>Renderで <code>Web Service</code> を作ります。</li>
-            <li>Root Directoryは、親フォルダごとpushした場合 <code>discord-voice-grouper</code> にします。</li>
-            <li>Build Commandは <code>npm install</code>、Start Commandは <code>npm start</code> にします。</li>
-            <li>Environment Variablesへ <code>DISCORD_TOKEN</code> と <code>DISCORD_CLIENT_ID</code> を入れます。</li>
-          </ol>
-          <table>
-            <thead><tr><th>項目</th><th>値</th></tr></thead>
-            <tbody>
-              <tr><td>Service Type</td><td><code>Web Service</code></td></tr>
-              <tr><td>Runtime</td><td><code>Node</code></td></tr>
-              <tr><td>Build Command</td><td><code>npm install</code></td></tr>
-              <tr><td>Start Command</td><td><code>npm start</code></td></tr>
-              <tr><td>Health Check Path</td><td><code>/health</code></td></tr>
-            </tbody>
-          </table>
-          <div class="notice">
-            <p>Renderでは <code>.env</code> ファイルではなく、Environment Variablesに設定します。<code>PORT</code> はRenderが自動で渡します。</p>
-          </div>
-        </section>
-
-        <section id="commands" data-search-section>
-          <h2>コマンド一覧</h2>
-          <div class="command-list">
-            <div class="command"><code>/setting show</code><span>現在の設定を表示します。</span></div>
-            <div class="command"><code>/setting splitvc ...</code><span>/splitvc、PB連携、待機VC、終了通知などを設定します。</span></div>
-            <div class="command"><code>/setting bosyu ...</code><span>/bの使用チャンネルとメンションロールを設定します。</span></div>
-            <div class="command"><code>/setting reminder ...</code><span>VC集合フォーム、話題フォーム、自動振り分け提案の対象を設定します。</span></div>
-            <div class="command"><code>/setting wadai ...</code><span>/kokuchiの告知送信先と/splitvc後のスタート案内先を設定します。</span></div>
-            <div class="command"><code>/setting logs ...</code><span>運用ログ送信先を設定します。</span></div>
-            <div class="command"><code>/setting forms ...</code><span>フォーム設置先、転送先、モデレーターロールを設定します。</span></div>
-            <div class="command"><code>/setting callwait ...</code><span>通話待機システム、お手軽募集の共通ロール・送信先を設定します。</span></div>
-            <div class="command"><code>/splitvc</code><span>VCメンバーを3人組中心に分け、PB連携設定があれば転送まで行います。</span></div>
-            <div class="command"><code>/b</code><span>募集メッセージを送信し、VC名の更新も試みます。</span></div>
-            <div class="command"><code>/kokuchi</code><span>会話練習会告知を送信し、必要に応じて最初の話題を選びます。</span></div>
-            <div class="command"><code>/addwadai</code><span>話題リストへ話題を追加します。</span></div>
-            <div class="command"><code>/showwadai</code><span>登録済み話題を添え字付きで表示します。</span></div>
-            <div class="command"><code>/delwadai</code><span>添え字で話題を削除します。</span></div>
-            <div class="command"><code>/setupforms</code><span>話題提供、提案・要望、相談・苦情フォームを設置します。</span></div>
-            <div class="command"><code>/sendcallwait</code><span>通話待機システムの募集メッセージを今すぐ送信します。</span></div>
-            <div class="command"><code>/sendotebo</code><span>お手軽募集の作成ボタン付きメッセージを送信します。</span></div>
-          </div>
-        </section>
-
-        <section id="splitvc" data-search-section>
-          <h2>/splitvc</h2>
-          <p><code>/splitvc</code> は、VC内のメンバーをグループ分けし、PB連携設定が済んでいればVC転送、参加者ロール、終了通知、途中参加受付まで処理します。</p>
-          <div class="codeblock"><button class="copy">コピー</button><pre><code>/splitvc channel:一般 shuffle:true include_bots:false private:false</code></pre></div>
-          <table>
-            <thead><tr><th>オプション</th><th>省略時</th><th>説明</th></tr></thead>
-            <tbody>
-              <tr><td><code>channel</code></td><td>実行者が入っているVC</td><td>対象VCです。</td></tr>
-              <tr><td><code>shuffle</code></td><td><code>true</code></td><td>ランダムに並べ替えます。</td></tr>
-              <tr><td><code>include_bots</code></td><td><code>false</code></td><td>Botユーザーも対象に含めます。</td></tr>
-              <tr><td><code>private</code></td><td><code>false</code></td><td>結果を自分だけに表示します。</td></tr>
-            </tbody>
-          </table>
-
-          <h3>PB連携時の流れ</h3>
-          <ol>
-            <li>振り分け結果を送信します。</li>
-            <li>転送前待機後、各グループから1人をPB親VCへ移動します。</li>
-            <li>PBが作成した子VCを検出します。</li>
-            <li>同じグループの残りメンバーを子VCへ移動します。</li>
-            <li>参加者ロールを付与します。</li>
-            <li>最初の話題と発話順を送信します。</li>
-            <li>終了通知、ロール解除、参加お礼メッセージを処理します。</li>
-          </ol>
-
-          <details>
-            <summary>途中参加受付</summary>
-            <div class="details-body">
-              <ul>
-                <li>振り分け完了後、待機VCを自動作成します。</li>
-                <li>待機VCは10分後、または終了通知キャンセル時に削除します。</li>
-                <li>3人以下の子VCがあれば、待機中の人を1人補充します。</li>
-                <li>補充先がない場合、待機VCに3人集まった時点で新規子VCへ転送します。</li>
-                <li>途中参加者のロール解除は、最初の参加者と同じタイミングで一括処理します。</li>
-              </ul>
-            </div>
-          </details>
-        </section>
-
-        <section id="kokuchi" data-search-section>
-          <h2>話題・告知</h2>
-          <p><code>/kokuchi</code> は会話練習会の告知を送信します。<code>send_topic</code> の既定値は <code>false</code> で、<code>send_topic:true</code> を指定した回だけ話題リストから最初の話題をランダムに選びます。全話題が一巡するまでは重複しません。</p>
-          <div class="codeblock"><button class="copy">コピー</button><pre><code>/kokuchi weekday:火曜日 overview_channel:#概要 channel:#告知 send_topic:true</code></pre></div>
-          <h3>話題管理</h3>
-          <ul>
-            <li><code>/addwadai content:好きな季節は？</code> で追加します。</li>
-            <li><code>/showwadai</code> で一覧を表示します。</li>
-            <li><code>/delwadai target:2</code> で削除します。</li>
-          </ul>
-          <div class="notice">
-            <p><code>/kokuchi</code> で選ばれた話題は、次の <code>/splitvc</code> 後の最初の話題にも使われます。<code>send_topic:false</code> を選んだ場合は、その回の告知にも次回 <code>/splitvc</code> 後にも最初の話題を送りません。終了時には途中参加者を含むユニークな参加人数をお礼メッセージへ表示します。20:30には「30分前です！ぜひご参加ください！」を告知送信先へ送り、20:40には集合VCのeveryone接続権限を許可します。</p>
-          </div>
-        </section>
-
-        <section id="forms" data-search-section>
-          <h2>フォーム</h2>
-          <p>話題提供、提案・要望、相談・苦情の3種類を設置できます。相談・苦情だけ、設定したモデレーターロールへメンションします。</p>
-          <div class="codeblock"><button class="copy">コピー</button><pre><code>/setting forms form_channel:#フォーム設置先 form_send_channel:#フォーム転送先 moderator_role:@モデレーター
-/setupforms</code></pre></div>
-          <table>
-            <thead><tr><th>フォーム</th><th>用途</th><th>転送形式</th></tr></thead>
-            <tbody>
-              <tr><td>話題提供</td><td>会話練習会の最初の話題候補</td><td>送信者、分類、内容</td></tr>
-              <tr><td>提案・要望</td><td>サーバーやBotへの提案</td><td>送信者、分類、内容</td></tr>
-              <tr><td>相談・苦情</td><td>対人トラブルや苦情</td><td>モデレーターロール、送信者、分類、内容</td></tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section id="bosyu" data-search-section>
-          <h2>/b 募集</h2>
-          <p><code>/b</code> は募集メッセージを送信します。同じユーザーは15分以内に連続使用できません。送信後15分間は、募集内容を編集できます。</p>
-          <div class="codeblock"><button class="copy">コピー</button><pre><code>/setting bosyu bosyu_channel:#募集チャンネル bosyu_mention_role:@募集通知
-/b note:遠慮せずご参加ください！ time:30分 purpose:雑談</code></pre></div>
-          <ul>
-            <li><code>note</code> は必須です。</li>
-            <li><code>time</code> は任意です。</li>
-            <li><code>purpose</code> を指定し、実行者がVCにいる場合、そのVC名を更新しようとします。</li>
-          </ul>
-        </section>
-
-        <section id="voice-form" data-search-section>
-          <h2>VC集合フォーム</h2>
-          <p>対象PB子VCまたは監視VCに2人以上集まったときに開始し、参加者ロール付与と話題フォーム付き集合メッセージを送ります。</p>
-          <ul>
-            <li>2人未満になっても、5分以内に戻れば継続します。</li>
-            <li>2人未満になって10分後、集合メッセージと話題フォームを削除します。</li>
-            <li>話題フォームの内容は、送信者が参加中のVCチャンネルステータスへ <code>今の話題：入力内容</code> として設定します。</li>
-            <li>対象カテゴリ内のVC単体で6人以上になると、自動振り分け提案を送ります。</li>
-          </ul>
-        </section>
-
-        <section id="callwait" data-search-section>
-          <h2>通話待機システム</h2>
-          <p>毎時ちょうどに、1時間後の雑談希望者を募集します。リアクション式またはボタン式を選べます。<code>/kokuchi</code> 実行日のJST 20:00〜21:59は、定時募集と希望者確認30分後の再確認による新規募集を停止します。</p>
-          <div class="codeblock"><button class="copy">コピー</button><pre><code>/setting callwait call_wait_enabled:true call_wait_role:@通話希望者 call_wait_prompt_channel:#募集 call_wait_notice_channel:#集合通知 otebo_preview_channel:#事前掲載 call_wait_voice_category:雑談VCカテゴリ call_wait_mode:button call_wait_bosyu_notice_enabled:true
-/sendcallwait</code></pre></div>
-          <details open>
-            <summary>ボタン式の流れ</summary>
-            <div class="details-body">
-              <ol>
-                <li>10:00に、11時から雑談希望の募集ボタンを送ります。</li>
-                <li>11:00時点で2人以上が希望していれば、希望者へロールを付与します。</li>
-                <li>指定VCカテゴリ内で2人以上の参加を確認してから集合通知を送ります。</li>
-                <li>30分後、VCに2人未満なら次回募集を送ります。</li>
-              </ol>
-            </div>
-          </details>
-          <details>
-            <summary>募集を出さない条件</summary>
-            <div class="details-body">
-              <p><code>call_wait_voice_category</code> 内にBot以外の参加者が2人以上いる場合、募集は出さず、募集送信先へ「複数人が雑談中なので〇時の募集は出ません」と送ります。</p>
-            </div>
-          </details>
-        </section>
-
-        <section id="otebo" data-search-section>
-          <h2>お手軽募集システム</h2>
-          <p><code>/sendotebo</code> で、ユーザーが自分で募集を作成できるボタンを設置します。作成された募集は基本的に <code>call_wait_notice_channel</code> へ投稿されます。時間指定の募集で <code>otebo_preview_channel</code> が設定され、指定時刻まで30分以上ある場合は、30分前まで <code>otebo_preview_channel</code> に掲載し、その後 <code>call_wait_notice_channel</code> へ移動します。</p>
-          <div class="codeblock"><button class="copy">コピー</button><pre><code>/sendotebo</code></pre></div>
-          <div class="grid two">
-            <div class="card">
-              <h3>指定した時間になったら</h3>
-              <ul>
-                <li>募集者本人は参加予定者に含まれます。</li>
-                <li>本文に現在の参加予定者数を表示し、増減時に更新します。</li>
-                <li>他の人が参加予定ボタンを押します。</li>
-                <li>参加を取り消す場合は、募集メッセージ下の参加キャンセルボタンを押します。</li>
-                <li>指定時刻に2人以上ならロール付与と集合通知を行います。</li>
-                <li>2人未満なら募集メッセージを削除します。</li>
-              </ul>
-            </div>
-            <div class="card">
-              <h3>人が集まったらすぐ</h3>
-              <ul>
-                <li>募集本文に掲載終了時刻を表示します。</li>
-                <li>参加希望ボタンが押されたら、指定秒数だけキャンセルできます。</li>
-                <li>キャンセル猶予中の一時メッセージは残り秒数を毎秒更新します。</li>
-                <li>キャンセルされなければ、すぐ集合メンションします。</li>
-                <li>掲載終了まで参加希望がなければ削除します。</li>
-              </ul>
-            </div>
-          </div>
-          <div class="notice">
-            <p>募集作成者も参加予定者の一人として扱います。参加予定者が0人になった場合のみ募集メッセージを削除します。会話時間が選ばれている募集では、集合通知後20分以内に対象者が最初に2人以上集まったVCへ <code>会話時間：30分(予定)</code> または <code>会話時間：1時間(予定)</code> を設定し、会話時間 + 15分後に空へ戻します。</p>
-            <p><code>call_wait_bosyu_notice_enabled:true</code>、<code>bosyu_mention_role</code> 設定済み、メンションなし、通話時間なしのお手軽募集では、ロール付与者が同じVCへ2人以上集まった時点で募集ロールへ途中参加案内を送ります。</p>
-          </div>
-        </section>
-
-        <section id="bump" data-search-section>
-          <h2>DISBOARD bumpリマインド</h2>
-          <p>DISBOARDのbump成功メッセージを検知し、2時間後に「前回のbumpから2時間が経過しました」と通知します。現在の仕様ではbump実行者へのメンションは行いません。</p>
-        </section>
-
-        <section id="trouble" data-search-section>
-          <h2>よくあるトラブル</h2>
-          <details open>
-            <summary>/splitvc や /setting が出てこない</summary>
-            <div class="details-body">
-              <ul>
-                <li><code>npm run register</code> を実行してください。</li>
-                <li><code>DISCORD_CLIENT_ID</code> と <code>DISCORD_GUILD_ID</code> が正しいか確認してください。</li>
-                <li>Bot招待時に <code>applications.commands</code> Scopeが入っているか確認してください。</li>
-              </ul>
-            </div>
-          </details>
-          <details>
-            <summary>Renderで package.json が見つからない</summary>
-            <div class="details-body">
-              <p>RenderのRoot Directoryがずれています。親フォルダごとpushした場合は <code>discord-voice-grouper</code> をRoot Directoryに指定します。</p>
-            </div>
-          </details>
-          <details>
-            <summary>PBの子VCを検出できない</summary>
-            <div class="details-body">
-              <p><code>/setting splitvc child_category:...</code> でPB子VCカテゴリを指定してください。Botがそのカテゴリを閲覧できることも確認します。</p>
-            </div>
-          </details>
-          <details>
-            <summary>ロールを付与できない</summary>
-            <div class="details-body">
-              <p>BotにManage Roles権限があり、対象ロールがBotの最上位ロールより下にあるか確認してください。</p>
-            </div>
-          </details>
-          <details>
-            <summary>Botが起動しない</summary>
-            <div class="details-body">
-              <ul>
-                <li><code>DISCORD_TOKEN is required.</code>: 環境変数にTokenがありません。</li>
-                <li><code>Cannot find module</code>: <code>npm install</code> が実行されていない可能性があります。</li>
-                <li><code>ENOENT package.json</code>: RenderのRoot Directoryがずれています。</li>
-              </ul>
-            </div>
-          </details>
-        </section>
-
-        <section id="operations" data-search-section>
-          <h2>運用メモ</h2>
-          <ul>
-            <li>Render無料プランはスリープや再起動の影響を受けます。安定運用が必要なら常時起動環境を検討してください。</li>
-            <li><code>/setting</code> で保存した <code>data/settings.json</code> は、永続ディスクがない環境では再デプロイで消えることがあります。</li>
-            <li>確実に残したい設定は、可能な範囲でRenderのEnvironment Variablesへ入れてください。</li>
-            <li>コマンド定義を追加・変更した場合は <code>npm run register</code> が必要です。</li>
-            <li>Botの公開URL確認には <code>/health</code> を使います。</li>
-          </ul>
-          <div class="footer">
-            <p>このHTMLはREADMEを読みやすく整理した運用ガイドです。詳細な実装は <code>src/bot.js</code>、コマンド定義は <code>src/commands.js</code> を確認してください。</p>
-          </div>
-        </section>
-      </div>
-    </main>
-  </div>
-
-  <script>
-    const search = document.querySelector("#search");
-    const sections = [...document.querySelectorAll("[data-search-section]")];
-
-    search.addEventListener("input", () => {
-      const query = search.value.trim().toLowerCase();
-
-      for (const section of sections) {
-        const text = section.textContent.toLowerCase();
-        section.classList.toggle("hidden", query && !text.includes(query));
-      }
-    });
-
-    for (const button of document.querySelectorAll(".copy")) {
-      button.addEventListener("click", async () => {
-        const code = button.parentElement.querySelector("code").innerText;
-
-        try {
-          await navigator.clipboard.writeText(code);
-          button.textContent = "コピー済み";
-          setTimeout(() => {
-            button.textContent = "コピー";
-          }, 1200);
-        } catch {
-          button.textContent = "失敗";
-          setTimeout(() => {
-            button.textContent = "コピー";
-          }, 1200);
-        }
-      });
-    }
-  </script>
+    <section id="trouble">
+      <h2>トラブルシュート</h2>
+      <ul>
+        <li>パネルが出ない場合は、Botが通知チャンネルで表示・送信・埋め込み・履歴閲覧・メッセージ管理を持つこと、通知チャンネルと<code>call_wait_role</code>が設定済みであることを確認します。</li>
+        <li>募集成立後にロールが付かない場合は、Botの最上位ロールが対象ロールより上位か、Manage Rolesがあるかを確認します。</li>
+        <li>成立・VC開始・定時募集の処理中は、競合防止のためパネルが一時的に非表示になります。運用ステータスの募集モジュールで、パネル、募集、ロール世代、クリーンアップ状態を確認できます。</li>
+        <li>再起動時は確定済み通知を再送しません。不確実な送信状態は自動再送せず、運用ステータスで確認してください。</li>
+        <li>スラッシュコマンドが見えない場合は、<code>npm run register</code>を実行し、テスト中は<code>DISCORD_GUILD_ID</code>を設定します。</li>
+        <li><code>/health</code>が応答しない場合は、RenderのRoot Directory、Build Command、環境変数、MongoDBの許可IPを確認します。</li>
+      </ul>
+    </section>
+  </main>
 </body>
 </html>

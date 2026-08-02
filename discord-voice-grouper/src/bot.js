@@ -35,7 +35,7 @@ import {
   getPairKeysFromGroups,
   shuffle,
 } from "./grouping.js";
-import { cancelKokuchiTimedActions, claimCallWaitPendingNotice, deleteOteboRecruitmentIfOnlyMember, failCallWaitPendingNotice, getGuildSettings, recoverInterruptedCallWaitPendingNotices, recoverInterruptedCallWaitPrompts, recoverInterruptedKokuchiGatheringReminders, replaceNestedObject, saveGuildSettings, transitionCallWaitPrompt, transitionKokuchiGatheringReminder, transitionKokuchiTimedAction, transitionOteboRecruitment, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
+import { cancelKokuchiTimedActions, claimCallWaitPendingNotice, claimOteboRecruitmentSlot, clearOteboRecruitmentConfirmation, deleteOteboRecruitmentIfOnlyMember, failCallWaitPendingNotice, getGuildSettings, recoverInterruptedCallWaitPendingNotices, recoverInterruptedCallWaitPrompts, recoverInterruptedKokuchiGatheringReminders, releaseOteboRecruitmentSlot, replaceNestedObject, saveGuildSettings, transitionCallWaitPrompt, transitionKokuchiGatheringReminder, transitionOteboRecruitmentSlot, transitionKokuchiTimedAction, transitionOteboRecruitment, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
 import { cancelKokuchiScheduledActions, claimAction, failAction, finishAction, getPendingActions, recoverInterruptedActions, retryAction, scheduleAction, scheduleSingleGuildAction } from "./scheduled-action-store.js";
 import { consumeBosyuCooldown, deleteBosyuEditSession, getActiveBosyuEditSessions, getBosyuEditSession, getExpiredBosyuEditSessions, saveBosyuEditSession } from "./bosyu-state-store.js";
 import { SplitProcessSession } from "./models/split-process-session.js";
@@ -57,6 +57,8 @@ import { CallWaitInterest } from "./models/call-wait-interest.js";
 import { KokuchiReservation } from "./models/kokuchi-reservation.js";
 import { MongoLeaseLock } from "./models/mongo-lease-lock.js";
 import { ProfileRegistrationPanel } from "./models/profile-registration-panel.js";
+import { OteboRecruitmentPanel } from "./models/otebo-recruitment-panel.js";
+import { CallWaitRoleGeneration } from "./models/call-wait-role-generation.js";
 import { OperationalActionLog } from "./models/operational-action-log.js";
 import { OperationalHealthState } from "./models/operational-health-state.js";
 import { OperationalStatusBoard } from "./models/operational-status-board.js";
@@ -64,6 +66,17 @@ import { acquireMongoLease, releaseMongoLease } from "./mongo-lease-lock-store.j
 import { normalizeProfileValue, refreshProfileInVoice, handleProfileVoiceState, restoreProfiles, summarizeProfileError } from "./profile-service.js";
 import { buildProfileRegistrationPanelPayload, createProfileRegistrationPanelService } from "./profile-registration-panel-service.js";
 import { saveProfileRegistrationPanel } from "./profile-registration-panel-store.js";
+import { createOteboRecruitmentPanelService } from "./otebo-recruitment-panel-service.js";
+import { createCallWaitRoleService } from "./call-wait-role-service.js";
+import {
+  BUTTON_RECRUITMENT_CONFLICT_MESSAGE,
+  OTEBO_MERGED_NOTICE,
+  OTEBO_VOICE_STARTED_NOTICE,
+  formatOteboRecruitmentMessage as formatButtonRecruitmentMessage,
+  formatOteboSuccessNotice as formatButtonSuccessNotice,
+  normalizeOteboDuration as normalizeButtonDuration,
+  normalizeOteboNote as normalizeButtonNote,
+} from "./otebo-utils.js";
 import {
   canSendPublicProfile,
   canPublishProfile,
@@ -164,6 +177,7 @@ const OTEBO_JOIN_CUSTOM_ID = "otebo_join";
 const OTEBO_MEMBER_CANCEL_CUSTOM_ID = "otebo_member_cancel";
 const OTEBO_OWNER_CANCEL_CUSTOM_ID = "otebo_owner_cancel";
 const OTEBO_OWNER_CANCEL_CONFIRM_CUSTOM_ID = "otebo_owner_cancel_confirm";
+const OTEBO_BUTTON_LIFECYCLE_LEASE_PREFIX = "otebo-button-lifecycle";
 const OTEBO_TYPE_SCHEDULED = "scheduled";
 const OTEBO_TYPE_IMMEDIATE = "immediate";
 const OTEBO_DURATION_NONE = "none";
@@ -290,6 +304,64 @@ const client = new Client({
 });
 const voiceChannelControlService = createVoiceChannelControlService({ getGuildSettings, sendOperationalLog, setVoiceChannelStatus });
 const profileRegistrationPanelService = createProfileRegistrationPanelService({ getGuildSettings, sendOperationalLog });
+const callWaitRoleService = createCallWaitRoleService({
+  getGuildSettings,
+  saveGuildSettings,
+  generationModel: CallWaitRoleGeneration,
+  scheduleRemoval: ({ actionKey, type, guild, roleId, memberIds, delayMs, payload }) => schedulePersistentRoleRemoval({
+    actionKey,
+    type,
+    guild,
+    roleId,
+    memberIds,
+    delayMs,
+    timers: callWaitRoleRemovalTimers,
+    payload,
+  }),
+  removeMembers: (guild, roleId, memberIds, source) => removeCallWaitRoleFromMembers(guild, roleId, memberIds, source),
+  sendOperationalLog,
+});
+const oteboRecruitmentPanelService = createOteboRecruitmentPanelService({
+  getGuildSettings,
+  sendOperationalLog,
+  canShowPanel: isOteboRecruitmentPanelDisplayAllowed,
+});
+
+async function isOteboRecruitmentPanelDisplayAllowed(guild, settings) {
+  if (settings?.callWaitEnabled !== true) return false;
+  if (!settings?.callWaitRoleId || !settings?.callWaitNoticeChannelId) return false;
+  const callWaitRole = guild.roles.cache?.get(settings.callWaitRoleId)
+    ?? await guild.roles.fetch(settings.callWaitRoleId).catch(() => null);
+  const botMember = guild.members.me
+    ?? (typeof guild.members.fetchMe === "function"
+      ? await guild.members.fetchMe().catch(() => null)
+      : null);
+  if (
+    !callWaitRole
+    || callWaitRole.managed
+    || callWaitRole.id === guild.id
+    || callWaitRole.editable === false
+    || !botMember?.permissions?.has?.(PermissionFlagsBits.ManageRoles)
+  ) return false;
+  const activeButton = Object.values(settings?.oteboRecruitments ?? {}).some((recruitment) => (
+    recruitment
+    && recruitment.type !== OTEBO_TYPE_SCHEDULED
+    && ["creating", "active", "closing", "merging", "auto_cancel_processing", "success_processing", "success_notified", "cleanup_pending", "published_unconfirmed"].includes(recruitment.status)
+  ));
+  if (activeButton) return false;
+  if (["evaluating", "role_granting", "closing"].includes(settings?.callWaitPrompt?.lifecycleState)) return false;
+  if (["pending", "processing", "sent_unconfirmed", "failed"].includes(settings?.callWaitPendingNotice?.status)) return false;
+  if (["creating", "active", "closing", "merging", "auto_cancel_processing", "success_processing", "success_notified", "cleanup_pending", "uncertain"].includes(settings?.oteboRecruitmentSlot?.status)) return false;
+  if (["active", "scheduled", "executing"].includes(settings?.callWaitRoleGeneration?.status)) return false;
+  if (Object.values(settings?.oteboVoiceStatusSessions ?? {}).some(Boolean)) return false;
+  if ([...voiceMonitorSessions.values()].some((session) => session.guildId === guild.id)) return false;
+  if (settings?.voiceParticipantRoleId) {
+    const participantRole = guild.roles.cache?.get(settings.voiceParticipantRoleId)
+      ?? await guild.roles.fetch(settings.voiceParticipantRoleId).catch(() => null);
+    if ([...(participantRole?.members?.values?.() ?? [])].some((member) => !member.user?.bot)) return false;
+  }
+  return true;
+}
 const fukyoThemeService = createFukyoThemeService({
   getGuildSettings,
   saveGuildSettings,
@@ -350,7 +422,7 @@ client.once(Events.ClientReady, async (readyClient) => {
     discordReadyWatchdog = null;
   }
   console.log(`Logged in as ${readyClient.user.tag}`);
-  const restoreResults = await Promise.allSettled([
+  let restoreResults = await Promise.allSettled([
     recoverInterruptedCallWaitPrompts(),
     recoverInterruptedCallWaitPendingNotices(),
     recoverInterruptedKokuchiGatheringReminders(),
@@ -366,9 +438,16 @@ client.once(Events.ClientReady, async (readyClient) => {
     restoreBosyuEditSessions(),
     restoreSplitProcessSessions(),
     restoreVoiceMonitorSessions(),
+    restoreCallWaitRoleGenerations(),
     voiceChannelControlService.restore(client),
     fukyoThemeService.restore(client),
   ]);
+  // Restore all persisted recruitment, role, VC, and voice-monitor state
+  // before reconciling the Otebo panel. This prevents a startup race from
+  // briefly showing a panel while a role generation or VC session is active.
+  restoreResults = restoreResults.concat(await Promise.allSettled([
+    oteboRecruitmentPanelService.restore(readyClient),
+  ]));
   startupRestoreFailures = [];
   for (const [index, result] of restoreResults.entries()) {
     if (result.status === "rejected") {
@@ -447,6 +526,9 @@ client.on(Events.MessageCreate, async (message) => {
     void handleProfileRegistrationPanelMessage(message).catch((error) => {
       logRecoverableError("Profile registration panel message processing failed", error);
     });
+    void handleOteboRecruitmentPanelMessage(message).catch((error) => {
+      logRecoverableError("Otebo recruitment panel message processing failed", error);
+    });
   } catch (error) {
     console.error("Message processing failed", {
       guildId: message.guildId ?? null,
@@ -467,6 +549,8 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   }
   try {
     await handleVoiceStateUpdate(oldState, newState);
+    const panelSettings = await getGuildSettings(newState.guild?.id ?? oldState.guild?.id).catch(() => null);
+    if (newState.guild) await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(newState.guild, panelSettings).catch(() => null);
   } catch (error) {
     logRecoverableError("Voice participant role processing failed", error);
   }
@@ -483,6 +567,13 @@ async function handleProfileRegistrationPanelMessage(message) {
   const settings = await getGuildSettings(message.guild.id);
   if (settings?.profileIntroductionChannelId !== message.channelId) return;
   await profileRegistrationPanelService.requestProfileRegistrationPanelMove(message.guild, "human-message");
+}
+
+async function handleOteboRecruitmentPanelMessage(message) {
+  if (!message.guild || message.author?.bot || message.webhookId || message.system || message.channel?.isThread?.()) return;
+  const settings = await getGuildSettings(message.guild.id);
+  if (getCallWaitNoticeChannelId(settings) !== message.channelId) return;
+  await oteboRecruitmentPanelService.requestOteboRecruitmentPanelMove(message.guild, "human-message");
 }
 client.on(Events.ChannelCreate, async (channel) => {
   if (channel.type === ChannelType.GuildVoice) await voiceChannelControlService.ensurePanel(channel).catch((error) => console.error("VC control panel create failed:", error));
@@ -645,11 +736,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    if (interaction.commandName === "b") {
-      await handleBosyu(interaction);
-      return;
-    }
-
     if (interaction.commandName === "addwadai") {
       await handleAddWadai(interaction);
       return;
@@ -697,11 +783,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === "sendcallwait") {
       await handleSendCallWait(interaction);
-      return;
-    }
-
-    if (interaction.commandName === "sendotebo") {
-      await handleSendOtebo(interaction);
       return;
     }
 
@@ -1180,7 +1261,6 @@ async function handleSetting(interaction) {
   const childCategory = interaction.options.getChannel("child_category", false);
   const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
   const waitingVcName = interaction.options.getString("waiting_vc_name", false);
-  const bosyuChannel = interaction.options.getChannel("bosyu_channel", false);
   const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const splitFeedbackChannel = interaction.options.getChannel("split_feedback_channel", false);
   const logChannel = interaction.options.getChannel("log_channel", false);
@@ -1221,10 +1301,6 @@ async function handleSetting(interaction) {
 
   if (waitingVcName?.trim()) {
     patch.waitingVcName = waitingVcName.trim();
-  }
-
-  if (bosyuChannel) {
-    patch.bosyuChannelId = bosyuChannel.id;
   }
 
   if (bosyuMentionRole) {
@@ -1475,10 +1551,14 @@ async function runOperationalParticipantRoleRemoval(guild) {
 async function reinstallOperationalPanels(guild) {
   const settings = await getGuildSettings(guild.id);
   let profile = null;
+  let otebo = null;
   let voice = 0;
   const errors = [];
   if (settings?.profileIntroductionChannelId) {
     profile = await profileRegistrationPanelService.ensureProfileRegistrationPanel(guild).catch((error) => { errors.push(`profile: ${error.message}`); return null; });
+  }
+  if (getCallWaitNoticeChannelId(settings)) {
+    otebo = await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch((error) => { errors.push(`otebo:${error.message}`); return null; });
   }
   if (settings?.vcControlCategoryId) {
     const category = await guild.channels.fetch(settings.vcControlCategoryId).catch(() => null);
@@ -1487,7 +1567,7 @@ async function reinstallOperationalPanels(guild) {
       await voiceChannelControlService.ensurePanel(channel).then(() => { voice += 1; }).catch((error) => errors.push(`voice:${channel.id}: ${error.message}`));
     }
   }
-  return { status: errors.length ? (profile || voice ? "partial" : "failed") : "completed", result: errors.length ? (profile || voice ? "partial" : "failed") : "success", profile: Boolean(profile), voice, errors };
+  return { status: errors.length ? (profile || otebo || voice ? "partial" : "failed") : "completed", result: errors.length ? (profile || otebo || voice ? "partial" : "failed") : "success", profile: Boolean(profile), otebo: Boolean(otebo), voice, errors };
 }
 
 async function closeExpiredOperationalRecruitments(guild) {
@@ -1585,16 +1665,13 @@ async function handleKokuchiSetting(interaction) {
 async function handleCallWaitSetting(interaction) {
   const callWaitEnabled = interaction.options.getBoolean("call_wait_enabled", false);
   const callWaitRole = interaction.options.getRole("call_wait_role", false);
+  const bosyuMentionRole = interaction.options.getRole("bosyu_mention_role", false);
   const callWaitPromptChannel = interaction.options.getChannel(
     "call_wait_prompt_channel",
     false,
   );
   const callWaitNoticeChannel = interaction.options.getChannel(
     "call_wait_notice_channel",
-    false,
-  );
-  const oteboPreviewChannel = interaction.options.getChannel(
-    "otebo_preview_channel",
     false,
   );
   const callWaitVoiceCategory = interaction.options.getChannel(
@@ -1616,16 +1693,16 @@ async function handleCallWaitSetting(interaction) {
     patch.callWaitRoleId = callWaitRole.id;
   }
 
+  if (bosyuMentionRole) {
+    patch.bosyuMentionRoleId = bosyuMentionRole.id;
+  }
+
   if (callWaitPromptChannel) {
     patch.callWaitPromptChannelId = callWaitPromptChannel.id;
   }
 
   if (callWaitNoticeChannel) {
     patch.callWaitNoticeChannelId = callWaitNoticeChannel.id;
-  }
-
-  if (oteboPreviewChannel) {
-    patch.oteboPreviewChannelId = oteboPreviewChannel.id;
   }
 
   if (callWaitVoiceCategory) {
@@ -1652,6 +1729,19 @@ async function handleCallWaitSetting(interaction) {
   }
 
   const currentSettings = await getGuildSettings(interaction.guildId);
+  const prospectiveSettings = { ...currentSettings, ...patch };
+  if (
+    callWaitEnabled === true
+    || ((callWaitNoticeChannel || callWaitRole || bosyuMentionRole)
+      && prospectiveSettings.callWaitRoleId
+      && getCallWaitNoticeChannelId(prospectiveSettings))
+  ) {
+    const validation = await validateOteboSettings(interaction.guild, prospectiveSettings, { mentionBosyu: false });
+    if (!validation.ok) {
+      await replyOrFollowUp(interaction, { content: validation.reason, flags: MessageFlags.Ephemeral });
+      return;
+    }
+  }
   let settings = await saveGuildSettingsWithCurrent(
     interaction.guildId,
     currentSettings,
@@ -1693,6 +1783,10 @@ async function handleCallWaitSetting(interaction) {
       callWaitPendingNotice: null,
     });
   }
+
+  await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(interaction.guild).catch((error) => {
+    logRecoverableError("Otebo recruitment panel ensure after call-wait setting change failed", error);
+  });
 
   await replyOrFollowUp(interaction, {
     content: `通話待機システム設定を保存しました。\n\n${formatSettings(settings)}`,
@@ -3829,38 +3923,9 @@ async function handleSendOtebo(interaction) {
     return;
   }
 
-  if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
-    await replyOrFollowUp(interaction, {
-      content: "お手軽募集の作成ボタンを送るには、サーバー管理権限が必要です。",
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const settings = await getGuildSettings(interaction.guildId);
-  const channel = await resolveConfiguredTextChannel(
-    interaction.guild,
-    getCallWaitPromptChannelId(settings),
-  );
-
-  if (!channel) {
-    await replyOrFollowUp(interaction, {
-      content: "`/setting callwait call_wait_prompt_channel:送信先` を設定してください。",
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  await channel.send({
-    content: "下のボタンから募集作成できます。",
-    components: [createOteboCreateRow()],
-    allowedMentions: { parse: [] },
-  });
-
-  await replyOrFollowUp(interaction, {
-    content: `お手軽募集の作成ボタンを ${channel} に送信しました。`,
-    flags: MessageFlags.Ephemeral,
+  await interaction.editReply({
+    content: "このコマンドは廃止されました。call_wait_notice_channel の常設パネルから「募集を作成」を押してください。",
     allowedMentions: { parse: [] },
   });
 }
@@ -3875,6 +3940,14 @@ async function handleOteboButton(interaction) {
   }
 
   if (interaction.customId === OTEBO_CREATE_CUSTOM_ID) {
+    if (interaction.user?.bot) {
+      await interaction.reply({
+        content: "Botユーザーはボタン募集を作成できません。",
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
     await handleOteboCreateButton(interaction);
     return;
   }
@@ -3892,7 +3965,7 @@ async function handleOteboButton(interaction) {
   if (interaction.customId === OTEBO_DRAFT_CANCEL_CUSTOM_ID) {
     oteboDrafts.delete(getOteboDraftKey(interaction.guildId, interaction.user.id));
     await interaction.update({
-      content: "お手軽募集の作成をキャンセルしました。",
+      content: "ボタン募集の作成をキャンセルしました。",
       components: [],
     });
     return;
@@ -3932,12 +4005,31 @@ async function handleOteboButton(interaction) {
 
 async function handleOteboCreateButton(interaction) {
   const settings = await getGuildSettings(interaction.guildId);
-  const existing = findActiveOteboRecruitmentByOwner(settings, interaction.user.id);
+  const existing = findActiveButtonOteboRecruitment(settings);
 
   if (existing) {
     await interaction.reply({
-      content: "同時に作成できるお手軽募集は一人一つまでです。内容を変える場合は、既存の募集をキャンセルしてから作り直してください。",
+      content: BUTTON_RECRUITMENT_CONFLICT_MESSAGE,
       flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (settings?.oteboRecruitmentSlot?.status && ["creating", "active", "closing", "merging", "auto_cancel_processing", "success_processing", "success_notified", "cleanup_pending", "uncertain"].includes(settings.oteboRecruitmentSlot.status)) {
+    await interaction.reply({
+      content: BUTTON_RECRUITMENT_CONFLICT_MESSAGE,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (!await isOteboRecruitmentPanelDisplayAllowed(interaction.guild, settings)) {
+    await interaction.reply({
+      content: "現在はボタン募集を作成できません。進行中の募集・VC・ロール処理が終了してから、もう一度お試しください。",
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
     });
     return;
   }
@@ -3946,8 +4038,8 @@ async function handleOteboCreateButton(interaction) {
   oteboDrafts.set(getOteboDraftKey(interaction.guildId, interaction.user.id), draft);
 
   await interaction.reply({
-    content: formatOteboDraftContent(draft),
-    components: createOteboDraftRows(draft),
+    content: formatButtonOteboDraftContent(draft),
+    components: createButtonOteboDraftRows(draft),
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
@@ -3968,7 +4060,7 @@ async function handleOteboDraftSelect(interaction) {
 
   if (!draft) {
     await interaction.update({
-      content: "入力中のお手軽募集が見つかりません。もう一度、募集作成ボタンから作り直してください。",
+      content: "入力中のボタン募集が見つかりません。もう一度、募集作成ボタンから作り直してください。",
       components: [],
     });
     return;
@@ -3989,8 +4081,8 @@ async function handleOteboDraftSelect(interaction) {
   oteboDrafts.set(key, draft);
 
   await interaction.update({
-    content: formatOteboDraftContent(draft),
-    components: createOteboDraftRows(draft),
+    content: formatButtonOteboDraftContent(draft),
+    components: createButtonOteboDraftRows(draft),
     allowedMentions: { parse: [] },
   });
 }
@@ -4000,7 +4092,7 @@ async function handleOteboDraftNoteButton(interaction) {
 
   if (!draft) {
     await interaction.reply({
-      content: "入力中のお手軽募集が見つかりません。もう一度、募集作成ボタンから作り直してください。",
+      content: "入力中のボタン募集が見つかりません。もう一度、募集作成ボタンから作り直してください。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -4013,7 +4105,7 @@ async function handleOteboDraftNoteButton(interaction) {
 
   const modal = new ModalBuilder()
     .setCustomId(OTEBO_NOTE_MODAL_CUSTOM_ID)
-    .setTitle("お手軽募集");
+    .setTitle("ボタン募集");
   const noteInput = new TextInputBuilder()
     .setCustomId("note")
     .setLabel("ひとこと（任意）")
@@ -4028,13 +4120,13 @@ async function handleOteboDraftNoteButton(interaction) {
 
 async function handleOteboDraftSubmitButton(interaction) {
   await interaction.deferUpdate();
-  const result = await createOteboRecruitmentFromDraft(interaction, "");
+  const result = await createButtonOteboRecruitmentFromDraft(interaction, "");
 
   if (!result.ok) {
     await interaction.editReply({
       content: result.reason,
       components: result.keepDraft
-        ? createOteboDraftRows(result.draft)
+        ? createButtonOteboDraftRows(result.draft)
         : [],
       allowedMentions: { parse: [] },
     });
@@ -4051,7 +4143,7 @@ async function handleOteboDraftSubmitButton(interaction) {
 async function handleOteboNoteModal(interaction) {
   const note = interaction.fields.getTextInputValue("note") ?? "";
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const result = await createOteboRecruitmentFromDraft(interaction, note);
+  const result = await createButtonOteboRecruitmentFromDraft(interaction, note);
 
   if (!result.ok) {
     await interaction.editReply({
@@ -4079,7 +4171,7 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
     return {
       ok: false,
       keepDraft: false,
-      reason: "入力中のお手軽募集が見つかりません。もう一度、募集作成ボタンから作り直してください。",
+      reason: "入力中のボタン募集が見つかりません。もう一度、募集作成ボタンから作り直してください。",
     };
   }
 
@@ -4089,7 +4181,7 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
       ok: false,
       keepDraft: true,
       draft,
-      reason: "メンション・掲載終了時刻にすでに経過した時刻を指定しています。時刻を選び直してください。",
+      reason: "掲載終了時刻にすでに経過した時刻を指定しています。時刻を選び直してください。",
     };
   }
 
@@ -4100,7 +4192,7 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
     return {
       ok: false,
       keepDraft: false,
-      reason: "同時に作成できるお手軽募集は一人一つまでです。内容を変える場合は、既存の募集をキャンセルしてから作り直してください。",
+      reason: BUTTON_RECRUITMENT_CONFLICT_MESSAGE,
     };
   }
 
@@ -4148,7 +4240,7 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
   };
   const message = await sendChannel.send({
     content: formatOteboRecruitmentMessage(recruitment, settings),
-    components: [createOteboJoinRow(recruitment)],
+    components: [createButtonOteboJoinRow(recruitment)],
     allowedMentions: getOteboRecruitmentAllowedMentions(recruitment, settings),
   });
 
@@ -4177,6 +4269,142 @@ async function createOteboRecruitmentFromDraft(interaction, note) {
   };
 }
 
+async function createButtonOteboRecruitmentFromDraft(interaction, note) {
+  const key = getOteboDraftKey(interaction.guildId, interaction.user.id);
+  const draft = oteboDrafts.get(key);
+  if (!draft) {
+    return { ok: false, keepDraft: false, reason: "募集フォームの有効期限が切れています。もう一度「募集を作成」からお試しください。" };
+  }
+
+  const targetAt = new Date(draft.targetAt);
+  const availableTimeOptions = createOteboTimeOptions(new Date());
+  if (
+    !Number.isFinite(targetAt.getTime())
+    || targetAt.getTime() <= Date.now()
+    || !availableTimeOptions.some((option) => option.value === draft.targetAt)
+  ) {
+    return { ok: false, keepDraft: true, draft, reason: "掲載終了時刻は現在より後の時刻を選択してください。" };
+  }
+
+  let settings = await getGuildSettings(interaction.guildId);
+  if (settings?.callWaitEnabled !== true) {
+    return { ok: false, keepDraft: true, draft, reason: "通話待機システムが無効です。管理者に有効化を依頼してください。" };
+  }
+  if (findActiveButtonOteboRecruitment(settings)) {
+    return { ok: false, keepDraft: false, reason: BUTTON_RECRUITMENT_CONFLICT_MESSAGE };
+  }
+
+  const lease = await acquireMongoLease(`${OTEBO_BUTTON_LIFECYCLE_LEASE_PREFIX}:${interaction.guildId}`, { leaseMs: 120_000 });
+  if (!lease) return { ok: false, keepDraft: true, draft, reason: BUTTON_RECRUITMENT_CONFLICT_MESSAGE };
+
+  const slotId = createOteboRecruitmentId();
+  let claimedSlot = null;
+  try {
+    settings = await getGuildSettings(interaction.guildId);
+    if (settings?.callWaitEnabled !== true || findActiveButtonOteboRecruitment(settings)) {
+      return { ok: false, keepDraft: false, reason: BUTTON_RECRUITMENT_CONFLICT_MESSAGE };
+    }
+    const configured = await validateOteboSettings(interaction.guild, settings, draft);
+    if (!configured.ok) return { ok: false, keepDraft: true, draft, reason: configured.reason };
+
+    try {
+      claimedSlot = await claimOteboRecruitmentSlot({
+        guildId: interaction.guildId,
+        slot: {
+          slotId,
+          status: "creating",
+          ownerId: interaction.user.id,
+          sourceType: "button",
+          createdAt: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      await sendOperationalLog({ guild: interaction.guild, settings, fallbackChannel: null, content: `button recruitment slot claim failed guild=${interaction.guildId} error=${error.message}` }).catch(() => null);
+      return { ok: false, keepDraft: true, draft, reason: BUTTON_RECRUITMENT_CONFLICT_MESSAGE };
+    }
+    if (!claimedSlot) return { ok: false, keepDraft: true, draft, reason: BUTTON_RECRUITMENT_CONFLICT_MESSAGE };
+
+    const recruitment = {
+      id: createOteboRecruitmentId(),
+      ownerId: interaction.user.id,
+      sourceType: "button",
+      type: OTEBO_TYPE_IMMEDIATE,
+      targetAt: targetAt.toISOString(),
+      duration: normalizeButtonDuration(draft.duration),
+      mentionBosyu: draft.mentionBosyu === true,
+      note: normalizeButtonNote(note),
+      channelId: configured.noticeChannel.id,
+      messageId: null,
+      noticeChannelId: configured.noticeChannel.id,
+      previewChannelId: null,
+      publishedToNotice: true,
+      memberIds: [interaction.user.id],
+      pendingConfirmations: {},
+      status: "active",
+      createdAt: new Date().toISOString(),
+      quickConfirmSeconds: getOteboQuickConfirmSeconds(settings),
+    };
+    const draftMenu = {
+      applicationId: draft.menuApplicationId,
+      token: draft.menuInteractionToken,
+      messageId: draft.menuMessageId,
+    };
+    let message;
+    try {
+      message = await configured.noticeChannel.send({
+        content: formatOteboRecruitmentMessage(recruitment, settings),
+        components: [createButtonOteboJoinRow(recruitment)],
+        allowedMentions: getOteboRecruitmentAllowedMentions(recruitment, settings),
+      });
+    } catch (error) {
+      await releaseOteboRecruitmentSlot({ guildId: interaction.guildId, slotId, status: "closed", patch: { lastError: `募集メッセージ送信失敗: ${error.message}` } }).catch(() => null);
+      return { ok: false, keepDraft: true, draft, reason: "募集メッセージを送信できませんでした。設定と権限を確認してください。" };
+    }
+
+    recruitment.messageId = message.id;
+    const recruitments = { ...getOteboRecruitments(settings), [recruitment.id]: recruitment };
+    const activeSlot = {
+      ...claimedSlot.oteboRecruitmentSlot,
+      slotId,
+      recruitmentId: recruitment.id,
+      messageId: message.id,
+      channelId: configured.noticeChannel.id,
+      endAt: recruitment.targetAt,
+      status: "active",
+      updatedAt: new Date().toISOString(),
+    };
+    let nextSettings;
+    try {
+      nextSettings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
+        oteboRecruitments: recruitments,
+        oteboRecruitmentSlot: activeSlot,
+      });
+    } catch (error) {
+      await message.edit({
+        content: "この募集は保存に失敗したため無効です。管理者が状態を確認してください。",
+        components: [],
+        allowedMentions: { parse: [] },
+      }).catch(() => null);
+      await transitionOteboRecruitmentSlot({ guildId: interaction.guildId, slotId, fromStatuses: ["creating", "active"], toStatus: "cleanup_pending", patch: { lastError: `募集状態保存失敗: ${error.message}`, messageId: message.id } }).catch(() => null);
+      return { ok: false, keepDraft: false, reason: "募集状態の保存に失敗したため、募集は無効化しました。管理者に確認を依頼してください。" };
+    }
+
+    oteboDrafts.delete(key);
+    scheduleOteboRecruitmentTimers(interaction.guild, recruitment);
+    await oteboRecruitmentPanelService.removeOteboRecruitmentPanel(interaction.guild).catch((error) => logRecoverableError("Otebo panel removal after recruitment creation failed", error));
+    await sendOteboApplicantLog({
+      guild: interaction.guild,
+      settings: nextSettings,
+      action: "create",
+      userId: interaction.user.id,
+      memberIds: recruitment.memberIds,
+    });
+    return { ok: true, recruitment, draftMenu };
+  } finally {
+    await releaseMongoLease(lease).catch((error) => logRecoverableError("Failed to release button recruitment create lease", error));
+  }
+}
+
 async function handleOteboJoinButton(interaction, recruitmentId) {
   const settings = await getGuildSettings(interaction.guildId);
   const recruitment = getOteboRecruitment(settings, recruitmentId);
@@ -4184,6 +4412,23 @@ async function handleOteboJoinButton(interaction, recruitmentId) {
   if (!isActiveOteboRecruitment(recruitment, interaction.message?.id)) {
     await interaction.reply({
       content: "この募集は現在有効ではありません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.user?.bot) {
+    await interaction.reply({
+      content: "Botユーザーはボタン募集へ参加できません。",
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (recruitment.type !== OTEBO_TYPE_IMMEDIATE) {
+    await interaction.reply({
+      content: "この募集形式は現在利用できません。常設パネルからボタン募集を作成してください。",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -4281,6 +4526,7 @@ async function handleOteboImmediateJoin(interaction, settings, recruitment) {
 
   await interaction.reply({
     content: formatOteboImmediateJoinReply(confirmSeconds),
+    components: [createButtonOteboMemberCancelRow(recruitment.id)],
     flags: MessageFlags.Ephemeral,
   });
 
@@ -4327,6 +4573,7 @@ function startOteboImmediateReplyCountdown({
 
       await interaction.editReply({
         content: formatOteboImmediateJoinReply(remainingSeconds),
+        components: [createButtonOteboMemberCancelRow(recruitmentId)],
       }).catch(() => null);
 
       if (remainingSeconds <= 0) {
@@ -4342,6 +4589,9 @@ async function handleOteboMemberCancelButton(interaction, recruitmentId) {
   const settings = await getGuildSettings(interaction.guildId);
   const recruitment = getOteboRecruitment(settings, recruitmentId);
 
+  // This button is sent in an ephemeral response, so its message ID is not
+  // the public recruitment message ID. Validate the durable recruitment
+  // state instead of comparing unrelated ephemeral IDs.
   if (!isActiveOteboRecruitment(recruitment)) {
     await interaction.reply({
       content: "この募集は現在有効ではありません。",
@@ -4374,7 +4624,7 @@ async function handleOteboMemberCancelButton(interaction, recruitmentId) {
     settings,
     recruitment,
     userId: interaction.user.id,
-    response: "reply",
+    response: "update",
   });
 }
 
@@ -4382,7 +4632,7 @@ async function handleOteboOwnerCancelButton(interaction, recruitmentId) {
   const settings = await getGuildSettings(interaction.guildId);
   const recruitment = getOteboRecruitment(settings, recruitmentId);
 
-  if (!isActiveOteboRecruitment(recruitment)) {
+  if (!isActiveOteboRecruitment(recruitment, interaction.message?.id)) {
     await interaction.reply({
       content: "この募集は現在有効ではありません。",
       flags: MessageFlags.Ephemeral,
@@ -4391,6 +4641,11 @@ async function handleOteboOwnerCancelButton(interaction, recruitmentId) {
   }
 
   if (interaction.user.id !== recruitment.ownerId) {
+    await interaction.reply({ content: "募集を取り消せるのは募集作成者だけです。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+    return;
+  }
+
+  if (false) {
     await interaction.reply({
       content: "この募集をキャンセルできるのは作成者だけです。",
       flags: MessageFlags.Ephemeral,
@@ -4450,6 +4705,10 @@ async function cancelOteboParticipation({
   userId,
   response,
 }) {
+  if (recruitment?.type === OTEBO_TYPE_IMMEDIATE && recruitment.ownerId === userId && response === "editReply") {
+    await cancelButtonOteboRecruitment({ interaction, settings, recruitment });
+    return;
+  }
   const pendingConfirmations = { ...(recruitment.pendingConfirmations ?? {}) };
   delete pendingConfirmations[userId];
   clearOteboConfirmationTimer(interaction.guildId, recruitment.id, userId);
@@ -4466,7 +4725,10 @@ async function cancelOteboParticipation({
       userId,
     });
     if (deleted) {
-      await deleteOteboRecruitmentMessage(interaction.guild, recruitment);
+      await deleteOteboRecruitmentMessage(interaction.guild, recruitment).catch((error) => {
+        logRecoverableError("Failed to delete empty button recruitment", error);
+        return editOteboRecruitmentMessageClosed(interaction.guild, recruitment);
+      });
       clearOteboRecruitmentTimers(interaction.guildId, recruitment.id);
       await sendOteboApplicantLog({
         guild: interaction.guild,
@@ -4506,7 +4768,58 @@ async function cancelOteboParticipation({
   await respondOteboCancel(interaction, response);
 }
 
+async function cancelButtonOteboRecruitment({ interaction, settings, recruitment }) {
+  const lease = await acquireMongoLease(`otebo-button-lifecycle:${interaction.guildId}:${recruitment.id}`, { leaseMs: 120_000 });
+  if (!lease) {
+    await interaction.editReply({ content: "募集の処理中です。少し待ってから再度お試しください。", components: [] });
+    return;
+  }
+  try {
+    const claimedSettings = await transitionOteboRecruitment({
+      guildId: interaction.guildId,
+      recruitmentId: recruitment.id,
+      fromStatuses: ["active"],
+      toStatus: "closing",
+      patch: { closedReason: "owner_cancelled" },
+    });
+    if (!claimedSettings) {
+      await interaction.editReply({ content: "募集はすでに終了しています。", components: [] });
+      return;
+    }
+    const claimedRecruitment = getOteboRecruitment(claimedSettings, recruitment.id) ?? recruitment;
+    clearOteboRecruitmentTimers(interaction.guildId, recruitment.id);
+    await deleteOteboRecruitmentMessage(interaction.guild, claimedRecruitment).catch((error) => {
+      logRecoverableError("Failed to delete owner-cancelled button recruitment", error);
+      return editOteboRecruitmentMessageClosed(interaction.guild, claimedRecruitment);
+    });
+    const nextSettings = await deleteOteboRecruitmentState(interaction.guildId, claimedSettings, recruitment.id);
+    const slot = nextSettings?.oteboRecruitmentSlot ?? claimedSettings?.oteboRecruitmentSlot;
+    if (slot?.slotId) {
+      await releaseOteboRecruitmentSlot({ guildId: interaction.guildId, slotId: slot.slotId, status: "closed", patch: { closedReason: "owner_cancelled" } }).catch((error) => logRecoverableError("Failed to release cancelled button recruitment slot", error));
+    }
+    await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(interaction.guild).catch((error) => logRecoverableError("Failed to restore Otebo panel after owner cancellation", error));
+    await sendOteboApplicantLog({ guild: interaction.guild, settings: nextSettings, action: "cancel", userId: recruitment.ownerId, memberIds: normalizeCallWaitMemberIds(recruitment.memberIds) });
+    await interaction.editReply({ content: "募集を取り消しました。", components: [] });
+  } finally {
+    await releaseMongoLease(lease).catch((error) => logRecoverableError("Failed to release button lifecycle lease", error));
+  }
+}
+
 async function respondOteboCancel(interaction, response) {
+  if (response === "update" || response === "editReply") {
+    await interaction[response]({
+      content: "参加をキャンセルしました。",
+      components: [],
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (response === "reply") {
+    await interaction.reply({ content: "参加をキャンセルしました。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+    return;
+  }
+
   if (response === "update" || response === "editReply") {
     await interaction[response]({
       content: "参加の希望をキャンセルしました。",
@@ -6151,7 +6464,124 @@ async function formatCallWaitInterestList(guild, recruitmentId) {
   return lines.join("\n");
 }
 
+async function mergeActiveButtonRecruitmentIntoScheduled(guild, settings) {
+  const lease = await acquireMongoLease(`${OTEBO_BUTTON_LIFECYCLE_LEASE_PREFIX}:${guild.id}`, { leaseMs: 120_000 });
+  if (!lease) return { settings, creatorId: null, blocked: true };
+  try {
+    settings = await getGuildSettings(guild.id);
+    const recruitment = findActiveButtonOteboRecruitment(settings);
+    if (!recruitment) return { settings, creatorId: null, blocked: false };
+    const claimedSettings = await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId: recruitment.id,
+      fromStatuses: ["active"],
+      toStatus: "merging",
+      patch: { mergeSource: "scheduled" },
+    });
+    if (!claimedSettings) return { settings, creatorId: null, blocked: false };
+    const claimedRecruitment = getOteboRecruitment(claimedSettings, recruitment.id) ?? recruitment;
+    clearOteboRecruitmentTimers(guild.id, recruitment.id);
+    await oteboRecruitmentPanelService.removeOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to hide Otebo panel during scheduled merge", error));
+    await deleteOteboRecruitmentMessage(guild, claimedRecruitment).catch(async (error) => {
+      logRecoverableError("Failed to delete button recruitment during scheduled merge", error);
+      const channel = await resolveConfiguredTextChannel(guild, claimedRecruitment.channelId);
+      const message = channel?.messages?.fetch ? await channel.messages.fetch(claimedRecruitment.messageId).catch(() => null) : null;
+      await message?.edit({ content: "この募集は別の募集の成立により終了しました。", components: [], allowedMentions: { parse: [] } }).catch(() => null);
+    });
+    for (const memberId of Object.keys(claimedRecruitment.pendingConfirmations ?? {})) {
+      const member = await guild.members.fetch(memberId).catch(() => null);
+      await member?.send({ content: OTEBO_MERGED_NOTICE, allowedMentions: { parse: [] } }).catch(() => null);
+    }
+    const slotId = claimedSettings?.oteboRecruitmentSlot?.slotId;
+    if (slotId) await transitionOteboRecruitmentSlot({ guildId: guild.id, slotId, fromStatuses: ["active"], toStatus: "merging", patch: { recruitmentId: recruitment.id } }).catch(() => null);
+    return { settings: claimedSettings, recruitment: claimedRecruitment, creatorId: claimedRecruitment.ownerId, blocked: false };
+  } finally {
+    await releaseMongoLease(lease).catch((error) => logRecoverableError("Failed to release scheduled merge lease", error));
+  }
+}
+
 async function grantCallWaitRoleAndQueueNotice({ guild, settings, memberIds, sourceId }) {
+  const merge = await mergeActiveButtonRecruitmentIntoScheduled(guild, settings);
+  if (merge.blocked) return false;
+  settings = merge.settings;
+  const uniqueMemberIds = [...new Set([...(memberIds ?? []), merge.creatorId].filter(Boolean))];
+  if (uniqueMemberIds.length < CALL_WAIT_MIN_MEMBERS || !settings?.callWaitRoleId) return false;
+  const channel = await resolveConfiguredTextChannel(guild, getCallWaitNoticeChannelId(settings));
+  if (!channel) return false;
+  const result = await callWaitRoleService.replaceRole({
+    guild,
+    roleId: settings.callWaitRoleId,
+    memberIds: uniqueMemberIds,
+    sourceType: "scheduled",
+    sourceId,
+    removalDelayMs: CALL_WAIT_ROLE_REMOVE_MS,
+    requiredMemberCount: CALL_WAIT_MIN_MEMBERS,
+  });
+  if (!result.ok) {
+    if (merge.recruitment) {
+      await transitionOteboRecruitment({
+        guildId: guild.id,
+        recruitmentId: merge.recruitment.id,
+        fromStatuses: ["merging"],
+        toStatus: "cleanup_pending",
+        patch: { lastError: result.reason ?? "Scheduled call-wait role replacement failed" },
+      }).catch(() => null);
+      const mergeSlotId = settings?.oteboRecruitmentSlot?.slotId;
+      if (mergeSlotId) await transitionOteboRecruitmentSlot({
+        guildId: guild.id,
+        slotId: mergeSlotId,
+        fromStatuses: ["merging"],
+        toStatus: "cleanup_pending",
+        patch: { lastError: result.reason ?? "Scheduled call-wait role replacement failed" },
+      }).catch(() => null);
+    }
+    await sendOperationalLog({ guild, settings, fallbackChannel: null, content: `scheduled call-wait role replacement failed guild=${guild.id} error=${result.reason ?? "unknown"}` }).catch(() => null);
+    return false;
+  }
+  let nextSettings;
+  try {
+    nextSettings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+      callWaitPendingNotice: {
+        memberIds: result.grantedMemberIds,
+        generationId: result.generation?.generationId,
+        sourceId,
+        createdAt: new Date().toISOString(),
+        status: "pending",
+        attemptCount: 0,
+      },
+    });
+  } catch (error) {
+    await callWaitRoleService.rollbackGeneration({ guild, generationId: result.generation.generationId, reason: `scheduled call-wait state save failed: ${error.message}` }).catch(() => null);
+    if (merge.recruitment) {
+      await transitionOteboRecruitment({
+        guildId: guild.id,
+        recruitmentId: merge.recruitment.id,
+        fromStatuses: ["merging"],
+        toStatus: "cleanup_pending",
+        patch: { lastError: `Scheduled call-wait state save failed: ${error.message}` },
+      }).catch(() => null);
+      const mergeSlotId = settings?.oteboRecruitmentSlot?.slotId;
+      if (mergeSlotId) await transitionOteboRecruitmentSlot({
+        guildId: guild.id,
+        slotId: mergeSlotId,
+        fromStatuses: ["merging"],
+        toStatus: "cleanup_pending",
+        patch: { lastError: `Scheduled call-wait state save failed: ${error.message}` },
+      }).catch(() => null);
+    }
+    return false;
+  }
+  if (merge.recruitment) {
+    await deleteOteboRecruitmentState(guild.id, nextSettings, merge.recruitment.id).catch((error) => logRecoverableError("Failed to clear merged button recruitment", error));
+    clearOteboRecruitmentTimers(guild.id, merge.recruitment.id);
+    const slotId = nextSettings?.oteboRecruitmentSlot?.slotId;
+    if (slotId) await releaseOteboRecruitmentSlot({ guildId: guild.id, slotId, status: "closed", patch: { closedReason: "scheduled_merge" } }).catch((error) => logRecoverableError("Failed to close merged button slot", error));
+  }
+  await maybeSendPendingCallWaitStartNotice(guild, nextSettings);
+  return true;
+
+}
+  /* legacy per-member role path retained below for old persisted actions
   const uniqueMemberIds = [...new Set(memberIds)].filter(Boolean);
 
   if (uniqueMemberIds.length < CALL_WAIT_MIN_MEMBERS) {
@@ -6286,6 +6716,7 @@ async function grantCallWaitRoleAndQueueNotice({ guild, settings, memberIds, sou
   return true;
 }
 
+*/
 async function maybeSendPendingCallWaitStartNotice(guild, settings) {
   const pendingNotice = settings?.callWaitPendingNotice;
 
@@ -6359,12 +6790,23 @@ function normalizeCallWaitMemberIds(memberIds) {
     : [];
 }
 
+async function getNonBotMemberIds(guild, memberIds) {
+  const eligible = [];
+  for (const memberId of normalizeCallWaitMemberIds(memberIds)) {
+    const member = guild.members.cache?.get(memberId)
+      ?? await guild.members.fetch(memberId).catch(() => null);
+    if (member?.user?.bot) continue;
+    eligible.push(memberId);
+  }
+  return eligible;
+}
+
 function getCallWaitPromptChannelId(settings) {
-  return settings?.callWaitPromptChannelId ?? settings?.callWaitChannelId ?? null;
+  return settings?.callWaitPromptChannelId ?? null;
 }
 
 function getCallWaitNoticeChannelId(settings) {
-  return settings?.callWaitNoticeChannelId ?? settings?.callWaitChannelId ?? null;
+  return settings?.callWaitNoticeChannelId ?? null;
 }
 
 async function scheduleCallWaitRoleRemoval({ guild, roleId, memberIds, sourceId }) {
@@ -6453,6 +6895,39 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
   const claimed = await claimAction(actionKey);
   if (!claimed) return;
   try {
+    if (payload?.generationId) {
+      const generationResult = await callWaitRoleService.executeGenerationRemoval({
+        guild,
+        generationId: payload.generationId,
+      });
+      if (generationResult.status === "busy") {
+        const retryAt = new Date(Date.now() + 5_000);
+        const retried = await retryAction(actionKey, {
+          executeAt: retryAt,
+          lastError: "call_wait_role replacement is in progress",
+        }).catch((error) => {
+          logRecoverableError("Failed to retry call-wait role generation removal", error);
+          return null;
+        });
+        if (retried) {
+          const retryTimer = setTimeout(() => {
+            callWaitRoleRemovalTimers.delete(actionKey);
+            void executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds, payload })
+              .catch((error) => logRecoverableError("Failed to retry call-wait role generation removal", error));
+          }, 5_000);
+          callWaitRoleRemovalTimers.set(actionKey, retryTimer);
+        } else {
+          await failAction(actionKey, "call_wait_role replacement remained busy").catch((error) => logRecoverableError("Failed to persist call-wait role generation retry failure", error));
+        }
+        return;
+      }
+      if (generationResult.status === "failed") throw generationResult.error ?? new Error("call_wait_role generation removal failed");
+      if (["completed", "superseded", "ignored"].includes(generationResult.status)) {
+        await completeCallWaitRoleGenerationLifecycle(guild, payload.generationId);
+      }
+      await finishAction(actionKey);
+      return;
+    }
     const session = payload?.sessionId
       ? await SplitProcessSession.findOne({ sessionId: payload.sessionId }).lean()
       : null;
@@ -6539,6 +7014,23 @@ async function executeScheduledRoleRemoval({ actionKey, guild, roleId, memberIds
   }
 }
 
+async function completeCallWaitRoleGenerationLifecycle(guild, generationId) {
+  let settings = await getGuildSettings(guild.id);
+  if (settings?.callWaitPendingNotice?.generationId === generationId) {
+    settings = await saveGuildSettingsWithCurrent(guild.id, settings, { callWaitPendingNotice: null });
+  }
+  for (const recruitment of Object.values(getOteboRecruitments(settings))) {
+    if (recruitment?.roleGenerationId !== generationId) continue;
+    if (!["success_notified", "cleanup_pending", "voice_started_notified", "auto_cancelled"].includes(recruitment.status)) continue;
+    await deleteOteboRecruitmentState(guild.id, settings, recruitment.id).catch((error) => logRecoverableError("Failed to clear completed button recruitment", error));
+    clearOteboRecruitmentTimers(guild.id, recruitment.id);
+    const slotId = settings?.oteboRecruitmentSlot?.slotId;
+    if (slotId) await releaseOteboRecruitmentSlot({ guildId: guild.id, slotId, status: "closed", patch: { closedReason: "role_generation_completed" } }).catch((error) => logRecoverableError("Failed to close button recruitment slot", error));
+    settings = await getGuildSettings(guild.id);
+  }
+  await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to restore Otebo panel after role generation cleanup", error));
+}
+
 async function executeSplitFinishNotice({ actionKey, guild, payload }) {
   const claimed = await claimAction(actionKey);
   if (!claimed) return;
@@ -6599,6 +7091,8 @@ async function restoreScheduledActions() {
       continue;
     }
     const timers = action.type === "otebo_role_remove" ? oteboRecruitmentTimers : callWaitRoleRemovalTimers;
+    const previousTimer = timers.get(action.actionKey);
+    if (previousTimer) clearTimeout(previousTimer);
     const timer = setTimeout(() => {
       timers.delete(action.actionKey);
       void executeScheduledRoleRemoval({ actionKey: action.actionKey, guild, roleId: action.roleId, memberIds: action.memberIds, payload: action.payload })
@@ -7664,136 +8158,10 @@ function formatJstTime(date) {
   ).padStart(2, "0")}`;
 }
 
-function createOteboCreateRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(OTEBO_CREATE_CUSTOM_ID)
-      .setLabel("募集作成")
-      .setStyle(ButtonStyle.Primary),
-  );
-}
-
 function createOteboDraftRows(draft) {
-  const timeOptions = createOteboTimeOptions(new Date());
-  let selectedTargetAt = draft.targetAt;
-  const selectedType =
-    draft.type === OTEBO_TYPE_IMMEDIATE ? OTEBO_TYPE_IMMEDIATE : OTEBO_TYPE_SCHEDULED;
-  const selectedDuration = normalizeOteboDuration(draft.duration);
-  const selectedMention = draft.mentionBosyu === true ? "yes" : "no";
-
-  if (!timeOptions.some((option) => option.value === selectedTargetAt)) {
-    selectedTargetAt = timeOptions.defaultTargetAt.toISOString();
-    draft.targetAt = selectedTargetAt;
-  }
-
-  return [
-    new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:type`)
-        .setPlaceholder("募集タイプ")
-        .addOptions(
-          {
-            label:
-              selectedType === OTEBO_TYPE_SCHEDULED
-                ? "募集タイプ：指定した時間になったら"
-                : "指定した時間になったら",
-            value: OTEBO_TYPE_SCHEDULED,
-            default: selectedType === OTEBO_TYPE_SCHEDULED,
-          },
-          {
-            label:
-              selectedType === OTEBO_TYPE_IMMEDIATE
-                ? "募集タイプ：人が集まったらすぐ"
-                : "人が集まったらすぐ",
-            value: OTEBO_TYPE_IMMEDIATE,
-            default: selectedType === OTEBO_TYPE_IMMEDIATE,
-          },
-        ),
-    ),
-    new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:target_at`)
-        .setPlaceholder("メンション・掲載終了時刻")
-        .addOptions(
-          timeOptions.map((option) => ({
-            label:
-              option.value === selectedTargetAt
-                ? `メンション・掲載終了時刻：${option.label}`
-                : option.label,
-            value: option.value,
-            default: option.value === selectedTargetAt,
-          })),
-        ),
-    ),
-    new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:duration`)
-        .setPlaceholder("通話時間")
-        .addOptions(
-          {
-            label:
-              selectedDuration === OTEBO_DURATION_NONE
-                ? "通話時間：設定しない"
-                : "設定しない",
-            value: OTEBO_DURATION_NONE,
-            default: selectedDuration === OTEBO_DURATION_NONE,
-          },
-          {
-            label:
-              selectedDuration === OTEBO_DURATION_30
-                ? "通話時間：30分間だけ"
-                : "30分間だけ",
-            value: OTEBO_DURATION_30,
-            default: selectedDuration === OTEBO_DURATION_30,
-          },
-          {
-            label:
-              selectedDuration === OTEBO_DURATION_60
-                ? "通話時間：1時間だけ"
-                : "1時間だけ",
-            value: OTEBO_DURATION_60,
-            default: selectedDuration === OTEBO_DURATION_60,
-          },
-        ),
-    ),
-    new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:mention`)
-        .setPlaceholder("@通話へのメンション")
-        .addOptions(
-          {
-            label:
-              selectedMention === "no"
-                ? "@通話へのメンション：しない"
-                : "しない",
-            value: "no",
-            default: selectedMention === "no",
-          },
-          {
-            label:
-              selectedMention === "yes"
-                ? "@通話へのメンション：する"
-                : "する",
-            value: "yes",
-            default: selectedMention === "yes",
-          },
-        ),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(OTEBO_DRAFT_NOTE_CUSTOM_ID)
-        .setLabel("ひとこと入力して送信")
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(OTEBO_DRAFT_SUBMIT_CUSTOM_ID)
-        .setLabel("ひとことなしで送信")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(OTEBO_DRAFT_CANCEL_CUSTOM_ID)
-        .setLabel("キャンセル")
-        .setStyle(ButtonStyle.Danger),
-    ),
-  ];
+  // Retired callers receive the same current panel without the removed mode
+  // selector or the old duration wording.
+  return createButtonOteboDraftRows(draft);
 }
 
 function createOteboTimeOptions(now) {
@@ -7811,6 +8179,82 @@ function createOteboTimeOptions(now) {
 
   options.defaultTargetAt = defaultTargetAt;
   return options;
+}
+
+function createButtonOteboDraftRows(draft) {
+  const timeOptions = createOteboTimeOptions(new Date());
+  let selectedTargetAt = draft.targetAt;
+  const selectedDuration = normalizeButtonDuration(draft.duration);
+  const selectedMention = draft.mentionBosyu === true ? "yes" : "no";
+
+  if (!timeOptions.some((option) => option.value === selectedTargetAt)) {
+    selectedTargetAt = timeOptions.defaultTargetAt.toISOString();
+    draft.targetAt = selectedTargetAt;
+  }
+
+  return [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:target_at`)
+        .setPlaceholder("掲載終了時刻")
+        .addOptions(timeOptions.map((option) => ({
+          label: option.value === selectedTargetAt ? `掲載終了時刻：${option.label}` : option.label,
+          value: option.value,
+          default: option.value === selectedTargetAt,
+        }))),
+    ),
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:duration`)
+        .setPlaceholder("予定通話時間")
+        .addOptions(
+          { label: "なし", value: OTEBO_DURATION_NONE, default: selectedDuration === OTEBO_DURATION_NONE },
+          { label: "30分", value: OTEBO_DURATION_30, default: selectedDuration === OTEBO_DURATION_30 },
+          { label: "1時間", value: OTEBO_DURATION_60, default: selectedDuration === OTEBO_DURATION_60 },
+        ),
+    ),
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`${OTEBO_DRAFT_SELECT_CUSTOM_ID}:mention`)
+        .setPlaceholder("@通話へのメンション")
+        .addOptions(
+          { label: "しない", value: "no", default: selectedMention === "no" },
+          { label: "する", value: "yes", default: selectedMention === "yes" },
+        ),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(OTEBO_DRAFT_NOTE_CUSTOM_ID)
+        .setLabel("ひとことを入力して送信")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(OTEBO_DRAFT_SUBMIT_CUSTOM_ID)
+        .setLabel("ひとことなしで送信")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(OTEBO_DRAFT_CANCEL_CUSTOM_ID)
+        .setLabel("キャンセル")
+        .setStyle(ButtonStyle.Danger),
+    ),
+  ];
+}
+
+function formatButtonOteboDraftContent(draft) {
+  const targetAt = new Date(draft.targetAt);
+  const duration = normalizeButtonDuration(draft.duration) === OTEBO_DURATION_30
+    ? "30分"
+    : normalizeButtonDuration(draft.duration) === OTEBO_DURATION_60
+      ? "1時間"
+      : "なし";
+  return [
+    "ボタン募集の内容を選択してください。",
+    "",
+    `掲載終了時刻：${Number.isFinite(targetAt.getTime()) ? formatJstTime(targetAt) : "未選択"}`,
+    `予定通話時間：${duration}`,
+    `@通話へのメンション：${draft.mentionBosyu ? "する" : "しない"}`,
+    "",
+    "ひとことを添える場合は「ひとことを入力して送信」を押してください。",
+  ].join("\n");
 }
 
 function getNextQuarterHourStart(date) {
@@ -7831,39 +8275,23 @@ function createDefaultOteboDraft(guildId, userId) {
   return {
     guildId,
     userId,
-    type: OTEBO_TYPE_SCHEDULED,
+    type: OTEBO_TYPE_IMMEDIATE,
     targetAt: timeOptions.defaultTargetAt.toISOString(),
     duration: OTEBO_DURATION_NONE,
-    mentionBosyu: true,
+    mentionBosyu: false,
     createdAt: new Date().toISOString(),
   };
 }
 
 function formatOteboDraftContent(draft) {
-  const targetAt = new Date(draft.targetAt);
-  const typeLabel =
-    draft.type === OTEBO_TYPE_IMMEDIATE
-      ? "人が集まったらすぐ"
-      : "指定した時間になったら";
-  const durationLabel = getOteboDurationLabel(draft.duration, "設定なし");
-  const mentionLabel = draft.mentionBosyu ? "する" : "しない";
-
-  return [
-    "お手軽募集の内容を選択してください。",
-    "",
-    `募集タイプ: ${typeLabel}`,
-    `メンション・掲載終了時刻: ${Number.isFinite(targetAt.getTime()) ? formatJstTime(targetAt) : "未選択"}`,
-    `通話時間: ${durationLabel}`,
-    `@通話へのメンション: ${mentionLabel}`,
-    "",
-    "ひとことを入れる場合は「ひとこと入力して送信」を押してください。",
-  ].join("\n");
+  // Keep the retired helper aligned with the current no-mode-selection UI.
+  return formatButtonOteboDraftContent(draft);
 }
 
 function formatOteboOwnerCancelMessage() {
   return [
-    "お手軽募集を使用していただきありがとうございます！",
-    "キャンセルは募集メッセージ下のキャンセルボタンから行えます。",
+    "ボタン募集を作成しました。",
+    "募集の取り消しは公開メッセージの「募集を取り消す」から行えます。",
   ].join("\n");
 }
 
@@ -7889,19 +8317,27 @@ async function updateOteboDraftMenuAfterModal(draftMenu) {
 }
 
 function createOteboJoinRow(recruitment) {
+  return createButtonOteboJoinRow(recruitment);
+}
+
+function createButtonOteboJoinRow(recruitment) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`${OTEBO_JOIN_CUSTOM_ID}:${recruitment.id}`)
-      .setLabel(recruitment.type === OTEBO_TYPE_IMMEDIATE ? "参加希望" : "参加を予定")
+      .setLabel("参加希望")
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
-      .setCustomId(`${OTEBO_MEMBER_CANCEL_CUSTOM_ID}:${recruitment.id}`)
-      .setLabel("参加をキャンセル")
+      .setCustomId(`${OTEBO_OWNER_CANCEL_CUSTOM_ID}:${recruitment.id}`)
+      .setLabel("募集を取り消す")
       .setStyle(ButtonStyle.Secondary),
   );
 }
 
 function createOteboMemberCancelRow(recruitmentId) {
+  return createButtonOteboMemberCancelRow(recruitmentId);
+}
+
+function createButtonOteboMemberCancelRow(recruitmentId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`${OTEBO_MEMBER_CANCEL_CUSTOM_ID}:${recruitmentId}`)
@@ -7920,6 +8356,16 @@ function createOteboOwnerCancelConfirmRow(recruitmentId) {
 }
 
 function formatOteboRecruitmentMessage(recruitment, settings) {
+  return formatButtonRecruitmentMessage({
+    closingAt: recruitment?.targetAt,
+    duration: recruitment?.duration,
+    mentionRoleId: settings?.bosyuMentionRoleId,
+    mentionEnabled: recruitment?.mentionBosyu === true,
+    note: recruitment?.note,
+  });
+
+}
+  /* legacy scheduled formatting retained below for persisted old records
   const targetAt = new Date(recruitment.targetAt);
   const time = formatJstTime(targetAt);
   const mention =
@@ -7949,6 +8395,7 @@ function formatOteboRecruitmentMessage(recruitment, settings) {
   ].filter((line) => line !== null).join("\n");
 }
 
+*/
 async function editOteboRecruitmentMessage(guild, settings, recruitment) {
   if (!recruitment?.channelId || !recruitment?.messageId) {
     return;
@@ -7968,7 +8415,7 @@ async function editOteboRecruitmentMessage(guild, settings, recruitment) {
 
   await message.edit({
     content: formatOteboRecruitmentMessage(recruitment, settings),
-    components: [createOteboJoinRow(recruitment)],
+    components: [createButtonOteboJoinRow(recruitment)],
     allowedMentions: getOteboRecruitmentAllowedMentions(recruitment, settings),
   }).catch((error) => {
     console.error(`Failed to edit otebo recruitment message: ${error.message}`);
@@ -7991,8 +8438,12 @@ function shouldMentionBosyuInOteboRecruitment(recruitment, settings) {
 }
 
 function formatOteboStartNoticeMessage(roleId, recruitment) {
+  return formatButtonSuccessNotice({ roleId, duration: recruitment?.duration, note: recruitment?.note });
+
+}
+  /* legacy formatting retained below for old records
   const lines = [
-    `<@&${roleId}> お手軽募集の参加予定者が集まりました！VCへの参加お願いします！`,
+    `<@&${roleId}> ボタン募集の参加予定者が集まりました！VCへの参加お願いします！`,
   ];
   const durationText = getOteboScheduledDurationText(recruitment?.duration);
   const note = normalizeOteboNote(recruitment?.note);
@@ -8008,6 +8459,7 @@ function formatOteboStartNoticeMessage(roleId, recruitment) {
   return lines.join("\n");
 }
 
+*/
 function getOteboScheduledDurationText(duration) {
   if (normalizeOteboDuration(duration) === OTEBO_DURATION_30) {
     return "30分間";
@@ -8032,25 +8484,17 @@ function getOteboImmediateDurationPrefix(duration) {
   return "";
 }
 
-function getOteboDurationLabel(duration, noneLabel) {
-  if (normalizeOteboDuration(duration) === OTEBO_DURATION_30) {
-    return "30分間だけ";
-  }
-
-  if (normalizeOteboDuration(duration) === OTEBO_DURATION_60) {
-    return "1時間だけ";
-  }
-
-  return noneLabel;
-}
-
 function normalizeOteboDuration(duration) {
+  return normalizeButtonDuration(duration);
+
   return duration === OTEBO_DURATION_30 || duration === OTEBO_DURATION_60
     ? duration
     : OTEBO_DURATION_NONE;
 }
 
 function normalizeOteboNote(note) {
+  return normalizeButtonNote(note);
+
   return String(note ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
@@ -8080,6 +8524,45 @@ async function validateOteboSettings(guild, settings, draft) {
   if (!settings?.callWaitRoleId || !getCallWaitNoticeChannelId(settings)) {
     return {
       ok: false,
+      reason: "call_wait_role と call_wait_notice_channel を設定してください。",
+    };
+  }
+  if (draft?.mentionBosyu === true && !settings?.bosyuMentionRoleId) {
+    return {
+      ok: false,
+      reason: "@通話へのメンションを使うには bosyu_mention_role を設定してください。",
+    };
+  }
+  const noticeChannel = await resolveConfiguredTextChannel(guild, getCallWaitNoticeChannelId(settings));
+  const role = await guild.roles.fetch(settings.callWaitRoleId).catch(() => null);
+  const botMember = guild.members.me ?? await guild.members.fetchMe().catch(() => null);
+  const permissions = noticeChannel?.permissionsFor?.(botMember);
+  const requiredPermissions = [
+    PermissionFlagsBits.ViewChannel,
+    PermissionFlagsBits.SendMessages,
+    PermissionFlagsBits.EmbedLinks,
+    PermissionFlagsBits.ReadMessageHistory,
+    PermissionFlagsBits.ManageMessages,
+  ];
+  if (!noticeChannel || !permissions || !requiredPermissions.every((permission) => permissions.has(permission))) {
+    return {
+      ok: false,
+      reason: "call_wait_notice_channel で閲覧・送信・埋め込み・履歴参照・メッセージ管理の権限が必要です。",
+    };
+  }
+  if (!role || role.managed || role.editable === false || !botMember?.permissions?.has?.(PermissionFlagsBits.ManageRoles)) {
+    return {
+      ok: false,
+      reason: "call_wait_role が見つからないか、BotのManage Roles権限またはロール階層が不足しています。",
+    };
+  }
+  return { ok: true, noticeChannel, previewChannel: null, role };
+
+}
+  /* legacy scheduled validation retained below for old records
+  if (!settings?.callWaitRoleId || !getCallWaitNoticeChannelId(settings)) {
+    return {
+      ok: false,
       reason: "`/setting callwait call_wait_role:ロール call_wait_notice_channel:送信先` を設定してください。",
     };
   }
@@ -8087,7 +8570,7 @@ async function validateOteboSettings(guild, settings, draft) {
   if (draft.mentionBosyu === true && !settings?.bosyuMentionRoleId) {
     return {
       ok: false,
-      reason: "`@通話へのメンション` を使うには `/setting bosyu bosyu_mention_role:ロール` を設定してください。",
+      reason: "`@通話へのメンション` を使うには `/setting callwait bosyu_mention_role:ロール` を設定してください。",
     };
   }
 
@@ -8104,7 +8587,7 @@ async function validateOteboSettings(guild, settings, draft) {
   if (!noticeChannel) {
     return {
       ok: false,
-      reason: "お手軽募集の送信先チャンネルを取得できません。`/setting callwait call_wait_notice_channel:送信先` を確認してください。",
+      reason: "ボタン募集の送信先チャンネルを取得できません。`/setting callwait call_wait_notice_channel:送信先` を確認してください。",
     };
   }
 
@@ -8123,6 +8606,7 @@ async function validateOteboSettings(guild, settings, draft) {
   };
 }
 
+*/
 function getOteboRecruitments(settings) {
   return settings?.oteboRecruitments &&
     typeof settings.oteboRecruitments === "object" &&
@@ -8158,6 +8642,14 @@ function findActiveOteboRecruitmentByOwner(settings, ownerId) {
       recruitment?.status === "active" &&
       recruitment.ownerId === ownerId,
   );
+}
+
+function findActiveButtonOteboRecruitment(settings) {
+  return Object.values(getOteboRecruitments(settings)).find((recruitment) => (
+    recruitment
+    && recruitment.type !== OTEBO_TYPE_SCHEDULED
+    && ["creating", "active", "closing", "merging", "auto_cancel_processing", "success_processing", "success_notified", "cleanup_pending", "published_unconfirmed"].includes(recruitment.status)
+  )) ?? null;
 }
 
 async function saveOteboRecruitmentState(guildId, currentSettings, recruitment) {
@@ -8226,8 +8718,36 @@ async function restoreOteboRecruitmentTimers() {
     try {
     const settings = await getGuildSettings(guild.id);
 
+    const slot = settings?.oteboRecruitmentSlot;
+    const slotRecruitment = slot?.recruitmentId
+      ? getOteboRecruitment(settings, slot.recruitmentId)
+      : null;
+    if (
+      slot?.status
+      && ["creating", "active", "closing", "merging", "auto_cancel_processing", "success_processing", "success_notified", "cleanup_pending", "uncertain"].includes(slot.status)
+      && !slotRecruitment
+    ) {
+      await transitionOteboRecruitmentSlot({
+        guildId: guild.id,
+        slotId: slot.slotId,
+        fromStatuses: [slot.status],
+        toStatus: "uncertain",
+        patch: { lastError: "Bot restarted while button recruitment state was incomplete; automatic resend disabled" },
+      }).catch((error) => console.error(`Failed to mark uncertain button recruitment slot for guild ${guild.id}: ${error.message}`));
+    }
+
     for (const recruitment of Object.values(getOteboRecruitments(settings))) {
       if (recruitment?.status === "publishing") {
+        await transitionOteboRecruitment({
+          guildId: guild.id,
+          recruitmentId: recruitment.id,
+          fromStatuses: ["publishing"],
+          toStatus: "published_unconfirmed",
+          patch: { lastError: "Bot restarted while a legacy scheduled publication was processing; automatic resend disabled" },
+        }).catch((error) => console.error(`Failed to mark uncertain legacy otebo publication ${recruitment.id}: ${error.message}`));
+        continue;
+        /* legacy recovery path intentionally disabled to prevent duplicate notices */
+        /*
         const recoveredSettings = await transitionOteboRecruitment({
           guildId: guild.id,
           recruitmentId: recruitment.id,
@@ -8243,8 +8763,16 @@ async function restoreOteboRecruitmentTimers() {
           scheduleOteboRecruitmentTimers(guild, recovered);
         }
         continue;
+        */
       }
       if (["success_processing", "success_notified", "cleanup_pending"].includes(recruitment?.status)) {
+        if (recruitment.roleGenerationId) {
+          continue;
+        }
+        console.error(`Button recruitment success state has no role generation; automatic notice replay disabled guild=${guild.id} recruitment=${recruitment.id}`);
+        continue;
+        /* legacy per-recruitment role recovery intentionally disabled */
+        /*
         const memberIds = normalizeCallWaitMemberIds(
           recruitment.participantRoleGrantedMemberIds ?? recruitment.memberIds,
         );
@@ -8266,6 +8794,7 @@ async function restoreOteboRecruitmentTimers() {
           });
         }
         continue;
+        */
       }
       if (recruitment?.status === "active") {
         scheduleOteboRecruitmentTimers(guild, recruitment);
@@ -8287,8 +8816,18 @@ async function restoreOteboRecruitmentTimers() {
   }
 }
 
+async function restoreCallWaitRoleGenerations() {
+  for (const guild of client.guilds.cache.values()) {
+    await callWaitRoleService.restore(guild).catch((error) => {
+      console.error(`Failed to reconcile call_wait_role generations for guild ${guild.id}: ${error.message}`);
+    });
+  }
+}
+
 function scheduleOteboRecruitmentTimers(guild, recruitment) {
   clearOteboRecruitmentTimers(guild.id, recruitment.id);
+
+  if (recruitment?.type !== OTEBO_TYPE_IMMEDIATE) return;
 
   if (shouldScheduleOteboNoticePublish(recruitment)) {
     const publishAt = getOteboNoticePublishAt(recruitment);
@@ -8412,7 +8951,7 @@ async function processOteboNoticePublish(guildId, recruitmentId) {
   try {
     message = await noticeChannel.send({
       content: formatOteboRecruitmentMessage(nextRecruitment, claimedSettings),
-      components: [createOteboJoinRow(nextRecruitment)],
+      components: [createButtonOteboJoinRow(nextRecruitment)],
       allowedMentions: getOteboRecruitmentAllowedMentions(nextRecruitment, claimedSettings),
     });
   } catch (error) {
@@ -8529,7 +9068,8 @@ async function processOteboImmediateConfirmation(guildId, recruitmentId, memberI
     return;
   }
 
-  if (normalizeCallWaitMemberIds(recruitment.memberIds).length >= CALL_WAIT_MIN_MEMBERS) {
+  const eligibleMemberIds = await getNonBotMemberIds(guild, recruitment.memberIds);
+  if (eligibleMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
     await finishOteboRecruitmentSuccess({
       guild,
       settings,
@@ -8538,13 +9078,24 @@ async function processOteboImmediateConfirmation(guildId, recruitmentId, memberI
     return;
   }
 
-  const pendingConfirmations = { ...(recruitment.pendingConfirmations ?? {}) };
-  delete pendingConfirmations[memberId];
-  const nextRecruitment = {
-    ...recruitment,
-    pendingConfirmations,
-  };
-  await saveOteboRecruitmentState(guild.id, settings, nextRecruitment);
+  const storedExpiresAt = recruitment.pendingConfirmations?.[memberId];
+  if (!storedExpiresAt) return;
+  const clearedSettings = await clearOteboRecruitmentConfirmation({
+    guildId: guild.id,
+    recruitmentId,
+    messageId: recruitment.messageId,
+    userId: memberId,
+    expiresAt: storedExpiresAt,
+  });
+  if (!clearedSettings) return;
+  const clearedRecruitment = getOteboRecruitment(clearedSettings, recruitmentId) ?? recruitment;
+  const targetAt = new Date(clearedRecruitment.targetAt);
+  if (Number.isFinite(targetAt.getTime()) && targetAt.getTime() <= Date.now()) {
+    // The deadline may have observed a still-pending confirmation and exited.
+    // Re-run the durable deadline path after the confirmation is cleared so a
+    // one-member recruitment cannot remain active forever.
+    await processOteboDeadline(guild.id, recruitmentId);
+  }
 }
 
 async function processOteboDeadline(guildId, recruitmentId) {
@@ -8567,9 +9118,39 @@ async function processOteboDeadline(guildId, recruitmentId) {
   }
 
   const memberIds = normalizeCallWaitMemberIds(recruitment.memberIds);
+  const eligibleMemberIds = await getNonBotMemberIds(guild, memberIds);
+
+  if (recruitment.type === OTEBO_TYPE_IMMEDIATE) {
+    const pendingCount = Object.keys(recruitment.pendingConfirmations ?? {}).length;
+    if (eligibleMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
+      if (pendingCount > 0) return;
+      const finished = await finishOteboRecruitmentSuccess({ guild, settings, recruitment });
+      if (finished) return;
+      return;
+    }
+    const closing = await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId,
+      fromStatuses: ["active"],
+      toStatus: "closing",
+      patch: { closedReason: "expired" },
+    });
+    if (!closing) return;
+    await deleteOteboRecruitmentMessage(guild, recruitment).catch(async (error) => {
+      logRecoverableError("Failed to delete expired button recruitment", error);
+      await editOteboRecruitmentMessageClosed(guild, recruitment);
+    });
+    const nextSettings = await deleteOteboRecruitmentState(guild.id, closing, recruitment.id);
+    clearOteboRecruitmentTimers(guild.id, recruitment.id);
+    const slotId = nextSettings?.oteboRecruitmentSlot?.slotId;
+    if (slotId) await releaseOteboRecruitmentSlot({ guildId: guild.id, slotId, status: "closed", patch: { closedReason: "expired" } }).catch((error) => logRecoverableError("Failed to release expired button recruitment slot", error));
+    await sendOteboApplicantLog({ guild, settings: nextSettings, action: "reset", memberIds: [] });
+    await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to restore Otebo panel after expiry", error));
+    return;
+  }
 
   if (recruitment.type === OTEBO_TYPE_SCHEDULED) {
-    if (memberIds.length >= CALL_WAIT_MIN_MEMBERS) {
+    if (eligibleMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
       await finishOteboRecruitmentSuccess({
         guild,
         settings,
@@ -8578,7 +9159,10 @@ async function processOteboDeadline(guildId, recruitmentId) {
       return;
     }
 
-    await deleteOteboRecruitmentMessage(guild, recruitment);
+    await deleteOteboRecruitmentMessage(guild, recruitment).catch(async (error) => {
+      logRecoverableError("Failed to delete expired scheduled recruitment", error);
+      await editOteboRecruitmentMessageClosed(guild, recruitment);
+    });
     const nextSettings = await deleteOteboRecruitmentState(
       guild.id,
       settings,
@@ -8599,7 +9183,10 @@ async function processOteboDeadline(guildId, recruitmentId) {
     return;
   }
 
-  await deleteOteboRecruitmentMessage(guild, recruitment);
+  await deleteOteboRecruitmentMessage(guild, recruitment).catch(async (error) => {
+    logRecoverableError("Failed to delete expired recruitment", error);
+    await editOteboRecruitmentMessageClosed(guild, recruitment);
+  });
   const nextSettings = await deleteOteboRecruitmentState(
     guild.id,
     settings,
@@ -8626,11 +9213,20 @@ async function releaseOteboSuccessClaim(guild, recruitmentId, error) {
     patch: { lastError: error?.message ?? String(error) },
   });
   const restored = restoredSettings && getOteboRecruitment(restoredSettings, recruitmentId);
-  if (restored?.status === "active") scheduleOteboRecruitmentTimers(guild, restored);
+  if (restored?.status === "active") {
+    scheduleOteboRecruitmentTimers(guild, restored);
+    await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch((panelError) => {
+      logRecoverableError("Failed to restore Otebo panel after unsuccessful success processing", panelError);
+    });
+  }
   return restoredSettings;
 }
 
 async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
+  return finishButtonOteboRecruitmentSuccess({ guild, settings, recruitment });
+
+}
+  /* legacy per-recruitment role path retained below for old persisted records
   const memberIds = normalizeCallWaitMemberIds(recruitment.memberIds);
 
   if (memberIds.length < CALL_WAIT_MIN_MEMBERS || !settings?.callWaitRoleId) {
@@ -8667,7 +9263,7 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
     memberIds,
     sourceType: "otebo",
     sourceId: recruitment.id,
-    reason: "お手軽募集の集合通知",
+    reason: "ボタン募集の集合通知",
   });
 
   if (roleMemberIds.length < CALL_WAIT_MIN_MEMBERS) {
@@ -8800,10 +9396,147 @@ async function finishOteboRecruitmentSuccess({ guild, settings, recruitment }) {
   }
 }
 
+*/
+async function finishButtonOteboRecruitmentSuccess({ guild, settings, recruitment }) {
+  let memberIds = await getNonBotMemberIds(guild, recruitment?.memberIds);
+  if (memberIds.length < CALL_WAIT_MIN_MEMBERS || !settings?.callWaitRoleId) return false;
+  const successLease = await acquireMongoLease(`otebo-success:${guild.id}:${recruitment.id}`, { leaseMs: 120_000 });
+  if (!successLease) return false;
+  try {
+    const claimedSettings = await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId: recruitment.id,
+      fromStatuses: ["active"],
+      toStatus: "success_processing",
+    });
+    if (!claimedSettings) return false;
+    settings = claimedSettings;
+    recruitment = getOteboRecruitment(settings, recruitment.id);
+    if (!recruitment) return false;
+    memberIds = await getNonBotMemberIds(guild, recruitment.memberIds);
+    if (memberIds.length < CALL_WAIT_MIN_MEMBERS) {
+      await releaseOteboSuccessClaim(
+        guild,
+        recruitment.id,
+        new Error("参加者が成立人数を下回ったため、成立処理を取り消しました。"),
+      );
+      return false;
+    }
+    await oteboRecruitmentPanelService.removeOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to hide Otebo panel during success processing", error));
+
+    const channel = await resolveConfiguredTextChannel(guild, getCallWaitNoticeChannelId(settings));
+    if (!channel) {
+      await releaseOteboSuccessClaim(guild, recruitment.id, new Error("call_wait_notice_channel is unavailable"));
+      return false;
+    }
+    const roleResult = await callWaitRoleService.replaceRole({
+      guild,
+      roleId: settings.callWaitRoleId,
+      memberIds,
+      sourceType: "button",
+      sourceId: recruitment.id,
+      reason: "ボタン募集成立通知",
+      removalDelayMs: OTEBO_ROLE_REMOVE_MS,
+      requiredMemberCount: CALL_WAIT_MIN_MEMBERS,
+    });
+    if (!roleResult.ok) {
+      await releaseOteboSuccessClaim(guild, recruitment.id, new Error(roleResult.reason ?? "call_wait_role の付与に失敗しました。"));
+      return false;
+    }
+
+    let notice;
+    try {
+      notice = await channel.send({
+        content: formatOteboStartNoticeMessage(settings.callWaitRoleId, recruitment),
+        allowedMentions: { roles: [settings.callWaitRoleId] },
+      });
+    } catch (error) {
+      await callWaitRoleService.rollbackGeneration({ guild, generationId: roleResult.generation.generationId, reason: "ボタン募集成立通知の送信失敗" }).catch(() => null);
+      await releaseOteboSuccessClaim(guild, recruitment.id, error);
+      return false;
+    }
+
+    const notifiedAt = new Date();
+    const notifiedSettings = await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId: recruitment.id,
+      fromStatuses: ["success_processing"],
+      toStatus: "success_notified",
+      patch: {
+        successNoticeSentAt: notifiedAt.toISOString(),
+        successNoticeMessageId: notice.id,
+        participantRoleGrantedMemberIds: roleResult.grantedMemberIds,
+        roleGenerationId: roleResult.generation.generationId,
+        lastError: null,
+      },
+    });
+    if (!notifiedSettings) {
+      console.error(`Button recruitment success notice was sent but state is uncertain: ${recruitment.id}`);
+      await sendOperationalLog({ guild, settings, fallbackChannel: null, content: `button recruitment success state uncertain guild=${guild.id} recruitment=${recruitment.id} generation=${roleResult.generation.generationId}` });
+      return false;
+    }
+    settings = notifiedSettings;
+    recruitment = getOteboRecruitment(settings, recruitment.id) ?? recruitment;
+
+    await deleteOteboRecruitmentMessage(guild, recruitment).catch(async (error) => {
+      logRecoverableError("Failed to delete completed button recruitment", error);
+      const messageChannel = await resolveConfiguredTextChannel(guild, recruitment.channelId);
+      const message = messageChannel?.messages?.fetch
+        ? await messageChannel.messages.fetch(recruitment.messageId).catch(() => null)
+        : null;
+      await message?.edit({
+        content: "この募集は成立しました。",
+        components: [],
+        allowedMentions: { parse: [] },
+      }).catch(() => null);
+    });
+
+    const voiceStatusSessions = { ...getOteboVoiceStatusSessions(settings) };
+    const voiceStatusSession = createOteboVoiceStatusSession({ recruitment, memberIds: roleResult.grantedMemberIds, notifiedAt });
+    if (voiceStatusSession) voiceStatusSessions[voiceStatusSession.id] = voiceStatusSession;
+    const savedSettings = await saveGuildSettingsWithCurrent(guild.id, settings, {
+      oteboRecruitments: { ...getOteboRecruitments(settings), [recruitment.id]: { ...recruitment, roleGenerationId: roleResult.generation.generationId } },
+      oteboRecruitmentSlot: {
+        ...(settings.oteboRecruitmentSlot ?? {}),
+        status: "success_notified",
+        recruitmentId: recruitment.id,
+        generationId: roleResult.generation.generationId,
+        updatedAt: new Date().toISOString(),
+      },
+      ...(voiceStatusSession ? { oteboVoiceStatusSessions: voiceStatusSessions } : {}),
+    });
+    await oteboRecruitmentPanelService.removeOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to hide Otebo panel after success", error));
+    clearOteboRecruitmentTimers(guild.id, recruitment.id);
+    await sendOteboApplicantLog({ guild, settings: savedSettings, action: "notify", memberIds: roleResult.grantedMemberIds });
+    if (voiceStatusSession) {
+      scheduleOteboVoiceStatusDeadline(guild, voiceStatusSession);
+      await processOteboVoiceStatusSessions(guild, savedSettings);
+    }
+    return true;
+  } finally {
+    await releaseMongoLease(successLease).catch((error) => logRecoverableError("Failed to release button success lease", error));
+  }
+}
+
 async function deleteOteboRecruitmentMessage(guild, recruitment) {
-  await deleteCallWaitMessage(guild, {
-    channelId: recruitment.channelId,
-    messageId: recruitment.messageId,
+  if (!recruitment?.channelId || !recruitment?.messageId) return { deleted: true, missing: true };
+  const channel = await resolveConfiguredTextChannel(guild, recruitment.channelId);
+  if (!channel?.messages?.fetch) throw new Error("Button recruitment channel is unavailable");
+  const message = await channel.messages.fetch(recruitment.messageId).catch((error) => {
+    if (error?.code === 10008 || error?.code === "10008") return null;
+    throw error;
+  });
+  if (!message) return { deleted: true, missing: true };
+  await message.delete();
+  return { deleted: true, missing: false };
+}
+
+async function editOteboRecruitmentMessageClosed(guild, recruitment, content = "このボタン募集は終了しました。") {
+  if (!recruitment?.channelId || !recruitment?.messageId) return;
+  const channel = await resolveConfiguredTextChannel(guild, recruitment.channelId).catch(() => null);
+  const message = await channel?.messages?.fetch?.(recruitment.messageId).catch(() => null);
+  await message?.edit({ content, components: [], allowedMentions: { parse: [] } }).catch((error) => {
+    logRecoverableError("Failed to edit closed button recruitment message", error);
   });
 }
 
@@ -8885,7 +9618,7 @@ async function scheduleOteboRoleRemoval({ guild, roleId, memberIds, recruitmentI
       guild,
       roleId,
       memberIds,
-      reason: "お手軽募集の20分経過による自動解除",
+      reason: "ボタン募集の20分経過による自動解除",
     }).catch((error) => {
       console.error(`Failed to remove otebo role: ${error.message}`, error);
     });
@@ -8969,7 +9702,7 @@ async function processOteboVoiceStatusSessions(guild, settings) {
     await setVoiceChannelStatus(
       voiceChannel,
       statusText,
-      "お手軽募集の参加予定者がVCに集まったため",
+      "ボタン募集の参加者がVCに集まったため",
     ).then(() => {
       const statusSetAt = new Date();
       sessions[session.id] = {
@@ -9035,7 +9768,7 @@ async function clearOteboVoiceStatusSession(guild, session) {
   await setVoiceChannelStatus(
     channel,
     "",
-    "お手軽募集で設定した会話時間ステータスの自動解除",
+    "ボタン募集で設定した会話時間ステータスの自動解除",
   ).catch((error) => {
     console.error(`Failed to clear otebo voice status: ${error.message}`);
   });
@@ -9112,6 +9845,7 @@ async function processOteboVoiceStatusClear(guildId, sessionId) {
   await saveGuildSettingsWithCurrent(guild.id, settings, {
     oteboVoiceStatusSessions: sessions,
   });
+  await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to restore Otebo panel after voice status cleanup", error));
 }
 
 async function processOteboVoiceStatusDeadline(guildId, sessionId) {
@@ -9145,6 +9879,7 @@ async function processOteboVoiceStatusDeadline(guildId, sessionId) {
   await saveGuildSettingsWithCurrent(guild.id, settings, {
     oteboVoiceStatusSessions: sessions,
   });
+  await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to restore Otebo panel after voice status deadline", error));
 }
 
 async function sendOteboApplicantLog({
@@ -9175,7 +9910,7 @@ async function sendOteboApplicantLog({
     settings,
     fallbackChannel: null,
     content: [
-      `お手軽募集システム: ${actionLabel}`,
+      `ボタン募集システム: ${actionLabel}`,
       `操作ユーザー: ${userId ? `<@${userId}>` : "システム"}`,
       "現在の参加予定者:",
       list,
@@ -10405,10 +11140,112 @@ async function stopVoiceMonitorSessionIfStillUnderfilled(
 
 async function startVoiceMonitorSession(session, voiceChannel, members, settings, options = {}) {
   await ensureSessionMembersHaveRole(session, voiceChannel, members);
+  await handleOteboVoiceStartedRecruitment(voiceChannel.guild, settings).catch((error) => {
+    logRecoverableError("Button recruitment auto-cancel on VC start failed", error);
+  });
   if (!options.suppressStartNotice) {
     await sendVoiceMonitorStartNotice(voiceChannel, settings).catch((error) => {
       logRecoverableError("Voice monitor start notice failed", error);
     });
+  }
+}
+
+async function handleOteboVoiceStartedRecruitment(guild, settings) {
+  const lease = await acquireMongoLease(`${OTEBO_BUTTON_LIFECYCLE_LEASE_PREFIX}:${guild.id}`, { leaseMs: 120_000 });
+  if (!lease) return false;
+  try {
+    settings = await getGuildSettings(guild.id);
+    const recruitment = findActiveButtonOteboRecruitment(settings);
+    if (!recruitment) return false;
+    const claimedSettings = await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId: recruitment.id,
+      fromStatuses: ["active"],
+      toStatus: "auto_cancel_processing",
+      patch: { closedReason: "voice_started" },
+    });
+    if (!claimedSettings) return false;
+    const claimedRecruitment = getOteboRecruitment(claimedSettings, recruitment.id) ?? recruitment;
+    clearOteboRecruitmentTimers(guild.id, recruitment.id);
+    await oteboRecruitmentPanelService.removeOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to hide Otebo panel during VC-start cancellation", error));
+    await deleteOteboRecruitmentMessage(guild, claimedRecruitment).catch(async (error) => {
+      logRecoverableError("Failed to delete button recruitment after VC start", error);
+      await editOteboRecruitmentMessageClosed(guild, claimedRecruitment, OTEBO_VOICE_STARTED_NOTICE);
+    });
+    for (const memberId of Object.keys(claimedRecruitment.pendingConfirmations ?? {})) {
+      const member = await guild.members.fetch(memberId).catch(() => null);
+      await member?.send({ content: OTEBO_VOICE_STARTED_NOTICE, allowedMentions: { parse: [] } }).catch(() => null);
+    }
+    const roleResult = await callWaitRoleService.replaceRole({
+      guild,
+      roleId: claimedSettings.callWaitRoleId,
+      memberIds: [claimedRecruitment.ownerId],
+      sourceType: "voice_started_invite",
+      sourceId: claimedRecruitment.id,
+      reason: "VC開始によるボタン募集自動取消",
+      removalDelayMs: OTEBO_ROLE_REMOVE_MS,
+      requiredMemberCount: 1,
+    });
+    if (!roleResult.ok) {
+      await sendOperationalLog({ guild, settings: claimedSettings, fallbackChannel: null, content: `button recruitment auto-cancel role replacement failed guild=${guild.id} recruitment=${claimedRecruitment.id} error=${roleResult.reason ?? "unknown"}` });
+      await transitionOteboRecruitment({
+        guildId: guild.id,
+        recruitmentId: claimedRecruitment.id,
+        fromStatuses: ["auto_cancel_processing"],
+        toStatus: "auto_cancelled",
+        patch: { lastError: roleResult.reason ?? "call_wait_role replacement failed" },
+      }).catch(() => null);
+      await deleteOteboRecruitmentState(guild.id, claimedSettings, claimedRecruitment.id).catch(() => null);
+      const slotId = claimedSettings?.oteboRecruitmentSlot?.slotId;
+      if (slotId) await releaseOteboRecruitmentSlot({ guildId: guild.id, slotId, status: "closed", patch: { closedReason: "voice_started_role_failed" } }).catch(() => null);
+      await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch(() => null);
+      return false;
+    }
+    try {
+      const noticeChannel = await resolveConfiguredTextChannel(guild, getCallWaitNoticeChannelId(claimedSettings));
+      if (!noticeChannel) throw new Error("call_wait_notice_channel is unavailable");
+      await noticeChannel.send({
+        content: `<@&${claimedSettings.callWaitRoleId}> ${OTEBO_VOICE_STARTED_NOTICE}`,
+        allowedMentions: { roles: [claimedSettings.callWaitRoleId] },
+      });
+    } catch (error) {
+      await callWaitRoleService.rollbackGeneration({ guild, generationId: roleResult.generation.generationId, reason: "VC開始通知の送信失敗" }).catch(() => null);
+      await transitionOteboRecruitment({ guildId: guild.id, recruitmentId: claimedRecruitment.id, fromStatuses: ["auto_cancel_processing"], toStatus: "auto_cancelled", patch: { lastError: `VC開始通知送信失敗: ${error.message}` } }).catch(() => null);
+      await deleteOteboRecruitmentState(guild.id, claimedSettings, claimedRecruitment.id).catch(() => null);
+      const slotId = claimedSettings?.oteboRecruitmentSlot?.slotId;
+      if (slotId) await releaseOteboRecruitmentSlot({ guildId: guild.id, slotId, status: "closed", patch: { closedReason: "voice_started_notice_failed" } }).catch(() => null);
+      await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch(() => null);
+      await sendOperationalLog({ guild, settings: claimedSettings, fallbackChannel: null, content: `button recruitment VC auto-cancel notice failed guild=${guild.id} recruitment=${claimedRecruitment.id} error=${error.message}` });
+      return false;
+    }
+    const notifiedSettings = await transitionOteboRecruitment({
+      guildId: guild.id,
+      recruitmentId: claimedRecruitment.id,
+      fromStatuses: ["auto_cancel_processing"],
+      toStatus: "voice_started_notified",
+      patch: {
+        roleGenerationId: roleResult.generation.generationId,
+        participantRoleGrantedMemberIds: roleResult.grantedMemberIds,
+        successNoticeSentAt: new Date().toISOString(),
+      },
+    });
+    if (!notifiedSettings) {
+      console.error(`Button recruitment VC auto-cancel state is uncertain: ${claimedRecruitment.id}`);
+      return false;
+    }
+    await saveGuildSettingsWithCurrent(guild.id, notifiedSettings, {
+      oteboRecruitmentSlot: {
+        ...(notifiedSettings.oteboRecruitmentSlot ?? {}),
+        status: "success_notified",
+        recruitmentId: claimedRecruitment.id,
+        generationId: roleResult.generation.generationId,
+      },
+    });
+    await sendOperationalLog({ guild, settings: notifiedSettings, fallbackChannel: null, content: `button recruitment auto-canceled because VC started guild=${guild.id} recruitment=${claimedRecruitment.id}` });
+    await oteboRecruitmentPanelService.removeOteboRecruitmentPanel(guild).catch((error) => logRecoverableError("Failed to hide Otebo panel after VC auto-cancel", error));
+    return true;
+  } finally {
+    await releaseMongoLease(lease).catch((error) => logRecoverableError("Failed to release VC auto-cancel lease", error));
   }
 }
 
@@ -10605,6 +11442,18 @@ async function sendVoiceMonitorStartNotice(voiceChannel, settings) {
     return;
   }
 
+  const noticeChannel = await resolveConfiguredTextChannel(voiceChannel.guild, getCallWaitNoticeChannelId(settings));
+  if (!noticeChannel) return;
+  const mentionRoleId = settings?.bosyuMentionRoleId;
+  await noticeChannel.send({
+    content: `${mentionRoleId ? `<@&${mentionRoleId}> ` : ""}<#${voiceChannel.id}> でVCが始まりました。`,
+    allowedMentions: mentionRoleId ? { roles: [mentionRoleId] } : { parse: [] },
+  });
+  return;
+
+}
+  /* legacy bosyu-channel fallback retained below only for old source compatibility
+
   const bosyuChannel = await resolveConfiguredTextChannel(
     voiceChannel.guild,
     settings?.bosyuChannelId,
@@ -10626,6 +11475,7 @@ async function sendVoiceMonitorStartNotice(voiceChannel, settings) {
   });
 }
 
+*/
 async function deleteVoiceMonitorTopicForms(session) {
   for (const [formId, topicForm] of session.topicForms.entries()) {
     if (topicForm.disableTimer) {
@@ -10831,6 +11681,10 @@ async function stopVoiceMonitorSession(session, guild, voiceChannel, settings) {
       });
     }
   }
+
+  await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(guild).catch((error) => {
+    logRecoverableError("Failed to reconcile Otebo panel after voice monitor cleanup", error);
+  });
 
   // ノーティフィケーションは不要のため送信しない
 }
@@ -13449,7 +14303,48 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
     );
   }
 
+  function formatCurrentSettings(settings) {
+    if (!settings) return "設定はまだ保存されていません。";
+    return [
+      "【splitvc】",
+      `参加者ロール: ${settings.tempRoleId ? `<@&${settings.tempRoleId}>` : "未設定"}`,
+      `PB親VC: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
+      `待機VCカテゴリ: ${settings.waitingVcCategoryId ? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
+      `待機VC名: ${settings.waitingVcName || DEFAULT_WAITING_VC_NAME}`,
+      `転送待機: ${getNonNegativeInteger(settings.transferWaitSeconds, DEFAULT_TRANSFER_WAIT_SECONDS)}秒`,
+      `終了通知待機: ${getNonNegativeInteger(settings.noticeWaitMinutes, DEFAULT_NOTICE_WAIT_MINUTES)}分`,
+      `ロール解除待機: ${getNonNegativeInteger(settings.roleRemoveWaitMinutes, DEFAULT_ROLE_REMOVE_WAIT_MINUTES)}分`,
+      "",
+      "【VC集合】",
+      `有効: ${settings.voiceReminderEnabled === false ? "無効" : "有効"}`,
+      `対象VC親: ${getVoiceReminderParentChannelIds(settings).length ? getVoiceReminderParentChannelIds(settings).map((id) => `<#${id}>`).join(" ") : "未設定"}`,
+      `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
+      "",
+      "【kokuchi】",
+      `開催時刻: ${normalizeKokuchiEventTime(settings.kokuchiEventTime) ?? "21:00"}`,
+      `告知・スタート案内: ${getKokuchiAnnouncementChannelId(settings) ? `<#${getKokuchiAnnouncementChannelId(settings)}>` : "未設定"}`,
+      `集合VC: ${settings.gatheringVoiceChannelId ? `<#${settings.gatheringVoiceChannelId}>` : "未設定"}`,
+      "",
+      "【フォーム・運用】",
+      `フォーム設置先: ${settings.formChannelId ? `<#${settings.formChannelId}>` : "未設定"}`,
+      `フォーム転送先: ${settings.formSendChannelId ? `<#${settings.formSendChannelId}>` : "未設定"}`,
+      `運用ログ: ${settings.logChannelId ? `<#${settings.logChannelId}>` : "未設定"}`,
+      "",
+      "【定時募集・ボタン募集】",
+      `有効: ${settings.callWaitEnabled === true ? "有効" : "無効"}`,
+      `募集方式: ボタン式`,
+      `通話希望者ロール: ${settings.callWaitRoleId ? `<@&${settings.callWaitRoleId}>` : "未設定"}`,
+      `募集作成用チャンネル: ${getCallWaitPromptChannelId(settings) ? `<#${getCallWaitPromptChannelId(settings)}>` : "未設定"}`,
+      `常設パネル・集合通知: ${getCallWaitNoticeChannelId(settings) ? `<#${getCallWaitNoticeChannelId(settings)}>` : "未設定"}`,
+      `募集通知ロール: ${settings.bosyuMentionRoleId ? `<@&${settings.bosyuMentionRoleId}>` : "未設定"}`,
+      `定時募集間隔: ${getCallWaitIntervalMinutes(settings)}分（JST 0:00基準）`,
+      `参加確認キャンセル猶予: ${getOteboQuickConfirmSeconds(settings)}秒`,
+    ].join("\n");
+  }
+
   function formatLegacySettings(settings) {
+    return formatCurrentSettings(settings);
+    /*
     if (!settings) {
       return "PB連携設定はまだ保存されていません。";
     }
@@ -13503,11 +14398,12 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       `参加希望者ロール: ${settings.callWaitRoleId ? `<@&${settings.callWaitRoleId}>` : "未設定"}`,
       `募集メッセージ送信先: ${getCallWaitPromptChannelId(settings) ? `<#${getCallWaitPromptChannelId(settings)}>` : "未設定"}`,
       `集合通知送信先: ${getCallWaitNoticeChannelId(settings) ? `<#${getCallWaitNoticeChannelId(settings)}>` : "未設定"}`,
-      `お手軽募集の30分前までの掲載先: ${settings.oteboPreviewChannelId ? `<#${settings.oteboPreviewChannelId}>` : "未設定"}`,
+      `定時募集メッセージ送信先: ${getCallWaitPromptChannelId(settings) ? `<#${getCallWaitPromptChannelId(settings)}>` : "未設定"}`,
       `参加確認VCカテゴリ: ${settings.callWaitVoiceCategoryId ? `<#${settings.callWaitVoiceCategoryId}>` : "未設定"}`,
       `募集間隔: ${getCallWaitIntervalMinutes(settings)}分（JST 0:00基準）`,
-      `お手軽募集の即時募集キャンセル猶予: ${getOteboQuickConfirmSeconds(settings)}秒`,
+      `ボタン募集の参加確認キャンセル猶予: ${getOteboQuickConfirmSeconds(settings)}秒`,
     ].join("\n");
+    */
   }
 
   function formatSettings(settings) {
@@ -14022,6 +14918,8 @@ async function getPbChildChannelName(voiceChannel, settings, guild) {
       SplitProcessSession.createIndexes(),
       SplitReview.createIndexes(),
       SplitReviewDraft.createIndexes(),
+      OteboRecruitmentPanel.createIndexes(),
+      CallWaitRoleGeneration.createIndexes(),
       OperationalStatusBoard.createIndexes(),
       OperationalHealthState.createIndexes(),
       OperationalActionLog.createIndexes(),
