@@ -18,13 +18,24 @@ export function createEveryonePermissionSnapshot({ channelId, guildId, overwrite
 
 export function getRestorePermissionPatch({ snapshot, overwrite, permissions }) {
   const patch = {};
-  if (getPermissionOverwriteState(overwrite, permissions.ViewChannel) === true) {
+  if (!snapshot || !permissions || !isPermissionState(snapshot.viewChannel) || !isPermissionState(snapshot.connect)) return patch;
+  if (getPermissionOverwriteState(overwrite, permissions.ViewChannel) !== snapshot.viewChannel) {
     patch.ViewChannel = snapshot.viewChannel;
   }
-  if (getPermissionOverwriteState(overwrite, permissions.Connect) === true) {
+  if (getPermissionOverwriteState(overwrite, permissions.Connect) !== snapshot.connect) {
     patch.Connect = snapshot.connect;
   }
   return patch;
+}
+
+export function permissionSnapshotMatches({ snapshot, overwrite, permissions }) {
+  if (!snapshot || !permissions || !isPermissionState(snapshot.viewChannel) || !isPermissionState(snapshot.connect)) return false;
+  return getPermissionOverwriteState(overwrite, permissions.ViewChannel) === snapshot.viewChannel
+    && getPermissionOverwriteState(overwrite, permissions.Connect) === snapshot.connect;
+}
+
+function isPermissionState(value) {
+  return value === null || typeof value === "boolean";
 }
 
 export function getJstScheduledTime(date, hour, minute) {
@@ -52,13 +63,16 @@ export async function editEveryoneConnectPermission({
   canConnect,
   reason,
 }) {
-  const updatedChannel = await channel.permissionOverwrites.edit(
+  await channel.permissionOverwrites.edit(
     guildId,
     { ViewChannel: canConnect, Connect: canConnect },
     { reason },
   );
 
-  return Boolean(updatedChannel);
+  // Discord.js may return an undefined value for a mocked or otherwise
+  // successful overwrite edit. The absence of an exception is the success
+  // signal; the caller performs the durable event-state confirmation next.
+  return true;
 }
 
 export function resolveKokuchiGatheringVoiceChannelId(

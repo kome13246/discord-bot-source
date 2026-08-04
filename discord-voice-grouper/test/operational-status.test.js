@@ -85,14 +85,211 @@ test("kokuchi強制終了は権限復元失敗時にイベント状態を解除�
     cancelTimedActions: async () => ({ canceled: 1, errors: [] }),
     cancelScheduledActions: async () => ({ canceled: 1, errors: [] }),
     restoreGatheringVcPermission: async () => false,
+    getGatheringVcRestoreState: async () => ({ gatheringVcRestorePending: true, gatheringVcRestoreStatus: "pending" }),
     healthModel: { findOneAndUpdate: async () => null, updateOne: async () => null },
     reservationModel: model,
   });
   const result = await service.forceTerminate({ guild: { id: "guild-id" }, actorUserId: "admin-id" });
-  assert.equal(result.status, "partial");
+  assert.equal(result.status, "canceled");
+  assert.equal(result.result, "success");
   assert.equal(savedPatches[0].kokuchiEventId, undefined);
   assert.equal(savedPatches[0].gatheringVcRestorePending, undefined);
-  assert.equal(result.permissionRestored, "failed");
+  assert.equal(result.permissionRestored, "pending");
+});
+
+test("集合VCの手動復元は現在の告知がなくても未復元イベントを対象にできる", async () => {
+  const pending = {
+    _id: "restore-db-id",
+    reservationId: "old-event-id",
+    guildId: "guild-id",
+    status: "canceled",
+    gatheringVcRestorePending: true,
+    gatheringVcRestoreStatus: "failed",
+  };
+  const calls = [];
+  const model = {
+    find: (filter) => ({
+      sort: () => ({
+        lean: async () => filter.gatheringVcRestorePending ? [pending] : [],
+      }),
+    }),
+  };
+  const service = createKokuchiRecoveryService({
+    getGuildSettings: async () => ({ kokuchiEventId: null }),
+    saveGuildSettings: async (_guildId, patch) => patch,
+    acquireMongoLease: async () => ({ lockKey: "lease", ownerId: "owner" }),
+    releaseMongoLease: async () => {},
+    reservationModel: model,
+    getGatheringVcRestoreState: async ({ eventId }) => ({ reservationId: eventId, gatheringVcRestorePending: true, gatheringVcRestoreStatus: "failed" }),
+    restoreGatheringVcPermission: async (_guild, _settings, options) => { calls.push(options.eventId); return true; },
+  });
+  const result = await service.restorePermission({ guild: { id: "guild-id" } });
+  assert.equal(result.status, "restored");
+  assert.deepEqual(calls, ["old-event-id"]);
+});
+
+test("canceled retry_wait events remain explicit restoration candidates", async () => {
+  const pending = {
+    _id: "restore-db-id",
+    reservationId: "canceled-event-id",
+    guildId: "guild-id",
+    status: "canceled",
+    kokuchiStatus: "canceled",
+    gatheringVcRestorePending: false,
+    gatheringVcRestoreStatus: "retry_wait",
+    gatheringVcPermissionBeforeOpen: { channelId: "vc", guildId: "guild-id", viewChannel: true, connect: null },
+    gatheringVcUnlockChannelId: "vc",
+  };
+  const calls = [];
+  const model = {
+    find: (filter) => ({
+      sort: () => ({
+        lean: async () => filter.$or ? [pending] : [],
+      }),
+    }),
+  };
+  const service = createKokuchiRecoveryService({
+    getGuildSettings: async () => ({ kokuchiEventId: null }),
+    saveGuildSettings: async (_guildId, patch) => patch,
+    acquireMongoLease: async () => ({ lockKey: "lease", ownerId: "owner" }),
+    releaseMongoLease: async () => {},
+    reservationModel: model,
+    getGatheringVcRestoreState: async ({ reservation }) => reservation,
+    restoreGatheringVcPermission: async (_guild, _settings, options) => { calls.push(options.eventId); return true; },
+  });
+  const result = await service.restorePermission({ guild: { id: "guild-id" } });
+  assert.equal(result.status, "restored");
+  assert.deepEqual(calls, ["canceled-event-id"]);
+});
+
+test("a canceled event with a missing snapshot supports state-only clearing", async () => {
+  const reservation = {
+    _id: "restore-db-id",
+    reservationId: "canceled-event-id",
+    guildId: "guild-id",
+    status: "canceled",
+    kokuchiStatus: "canceled",
+    gatheringVcRestorePending: false,
+    gatheringVcRestoreStatus: "retry_wait",
+    gatheringVcPermissionBeforeOpen: null,
+  };
+  let updateFilter;
+  const model = {
+    findOne: async () => reservation,
+    findOneAndUpdate: async (filter) => { updateFilter = filter; return { ...reservation, gatheringVcRestoreStatus: "restored", gatheringVcRestorePending: false }; },
+  };
+  const service = createKokuchiRecoveryService({
+    getGuildSettings: async () => ({ kokuchiEventId: "new-event-id", gatheringVcStateEventId: "new-event-id" }),
+    saveGuildSettings: async (_guildId, patch) => patch,
+    acquireMongoLease: async () => ({ lockKey: "lease", ownerId: "owner" }),
+    releaseMongoLease: async () => {},
+    reservationModel: model,
+    healthModel: { findOne: async () => null, updateOne: async () => ({ matchedCount: 1 }) },
+  });
+  const result = await service.clearStateOnly({
+    guild: { id: "guild-id" },
+    targetId: "canceled-event-id",
+    confirmed: true,
+    reason: "Administrator confirmed the current Discord permissions.",
+  });
+  assert.equal(result.status, "cleared");
+  assert.match(result.warnings[0], /スナップショット欠損/);
+  assert.equal(updateFilter._id, "restore-db-id");
+  assert.deepEqual(result.after.settings, { kokuchiEventId: "new-event-id", gatheringVcStateEventId: "new-event-id" });
+});
+
+test("別イベントの未復元状態はステータス上で孤立状態として新規kokuchiをブロックする", async () => {
+  const oldEvent = {
+    reservationId: "old-event-id",
+    guildId: "guild-id",
+    status: "sent",
+    kokuchiStatus: "completed",
+    gatheringVcRestorePending: true,
+    gatheringVcRestoreStatus: "retry_wait",
+    gatheringVcRestoreNextRetryAt: new Date(Date.now() + 30_000),
+    gatheringVcRestoreLastError: "temporary Discord failure",
+  };
+  const models = emptyModels();
+  models.KokuchiReservation = {
+    find: () => ({ sort: () => ({ lean: async () => [oldEvent] }) }),
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({
+      kokuchiEventId: "new-event-id",
+      gatheringVcStateEventId: "new-event-id",
+      gatheringVcRestorePending: false,
+    }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  const snapshot = await service.getOperationalStatusSnapshot({ id: "guild-id", channels: { cache: new Map() } });
+  const kokuchi = snapshot.modules.kokuchi;
+  assert.equal(kokuchi.details.newKokuchiBlocked, true);
+  assert.equal(kokuchi.details.gatheringVcRestore.eventId, "old-event-id");
+  assert.equal(kokuchi.issues.some((item) => item.code === "orphaned_restore_state" && item.blocking), true);
+  assert.equal(kokuchi.availableActions.includes("kokuchi_force_terminate"), false);
+});
+
+test("restore status and error details never fall back to a different current event", async () => {
+  const oldEvent = {
+    reservationId: "old-event-id",
+    guildId: "guild-id",
+    status: "canceled",
+    kokuchiStatus: "canceled",
+    gatheringVcRestorePending: true,
+    gatheringVcRestoreStatus: "retry_wait",
+    gatheringVcRestoreLastError: "old event retry error",
+    gatheringVcRestoreNextRetryAt: new Date(Date.now() + 30_000),
+    gatheringVcPermissionBeforeOpen: { channelId: "old-vc", guildId: "guild-id", viewChannel: true, connect: null },
+    gatheringVcUnlockChannelId: "old-vc",
+  };
+  const models = emptyModels();
+  models.KokuchiReservation = {
+    find: () => ({ sort: () => ({ lean: async () => [oldEvent] }) }),
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({
+      kokuchiEventId: "new-event-id",
+      gatheringVcStateEventId: "new-event-id",
+      gatheringVcRestorePending: false,
+      gatheringVcRestoreStatus: "not_required",
+      gatheringVcRestoreLastError: "new event error must not leak",
+    }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  const snapshot = await service.getOperationalStatusSnapshot({ id: "guild-id", channels: { cache: new Map() } });
+  const restore = snapshot.modules.kokuchi.details.gatheringVcRestore;
+  assert.equal(restore.eventId, "old-event-id");
+  assert.equal(restore.lastError, "old event retry error");
+  assert.notEqual(restore.lastError, "new event error must not leak");
+});
+
+test("pending=false retry_wait records are errors and expose state-only recovery when the snapshot is missing", async () => {
+  const inconsistent = {
+    reservationId: "event-id",
+    guildId: "guild-id",
+    status: "canceled",
+    kokuchiStatus: "canceled",
+    gatheringVcRestorePending: false,
+    gatheringVcRestoreStatus: "retry_wait",
+    gatheringVcPermissionBeforeOpen: null,
+  };
+  const models = emptyModels();
+  models.KokuchiReservation = {
+    find: () => ({ sort: () => ({ lean: async () => [inconsistent] }) }),
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({ kokuchiEventId: "event-id", gatheringVcStateEventId: "event-id" }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  const snapshot = await service.getOperationalStatusSnapshot({ id: "guild-id", channels: { cache: new Map() } });
+  assert.equal(snapshot.modules.kokuchi.issues.some((item) => item.code === "restore_state_inconsistent" && item.blocking), true);
+  assert.equal(snapshot.modules.kokuchi.availableActions.includes("kokuchi_clear_state"), true);
 });
 
 test("kokuchi状態のみ解除は強制終了失敗後かつ権限スナップショットなしに限定する", async () => {

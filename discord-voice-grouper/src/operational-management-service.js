@@ -34,8 +34,9 @@ function actionResult(result) {
 }
 
 function resultText(result) {
+  const warnings = result?.warnings?.length ? `\n注意: ${result.warnings.map(clean).join(" / ")}` : "";
   const errors = result?.errors?.length ? `\nエラー: ${result.errors.map(clean).join(" / ")}` : "";
-  return `${result?.status ?? "完了"}${result?.permissionRestored ? ` / 集合VC権限: ${result.permissionRestored}` : ""}${errors}`;
+  return `${result?.status ?? "完了"}${result?.permissionRestored ? ` / 集合VC権限: ${result.permissionRestored}` : ""}${warnings}${errors}`;
 }
 
 async function reply(interaction, payload) {
@@ -169,10 +170,11 @@ export function createOperationalManagementService({
     return reply(interaction, { content: "現在の状態を実行直前に再取得してkokuchiを強制終了します。投稿済み告知・送信済み通知・splitvc・参加者ロールは変更しません。60秒以内に再確認してください。", components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`${PREFIX}:confirm_force:${interaction.guildId}:${token}`).setLabel("強制終了を実行").setStyle(ButtonStyle.Danger))], flags: MessageFlags.Ephemeral });
   }
 
-  async function showClearModal(interaction) {
+  async function showClearModal(interaction, targetId = null) {
     if (!(await requireAdministrator(interaction))) return;
     const modal = new ModalBuilder().setCustomId(`${PREFIX}:clear_modal:${interaction.guildId}`).setTitle("kokuchi状態だけ解除");
     const reason = new TextInputBuilder().setCustomId("reason").setLabel("実権限を確認した理由").setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500).setPlaceholder("集合VCの実際の権限を確認し、必要な手動修正を完了した理由");
+    modal.setCustomId(`${PREFIX}:clear_modal:${interaction.guildId}:${targetId ?? ""}`);
     return interaction.showModal(modal.addComponents(new ActionRowBuilder().addComponents(reason)));
   }
 
@@ -183,8 +185,8 @@ export function createOperationalManagementService({
     }
     if (action === "kokuchi_cancel") return recoveryService.normalCancel({ guild: interaction.guild, actorUserId: interaction.user.id, targetId });
     if (action === "kokuchi_force_terminate") return recoveryService.forceTerminate({ guild: interaction.guild, actorUserId: interaction.user.id, targetId });
-    if (action === "restore_gathering_vc") return recoveryService.restorePermission({ guild: interaction.guild, actorUserId: interaction.user.id });
-    if (action === "kokuchi_clear_state") return recoveryService.clearStateOnly({ guild: interaction.guild, actorUserId: interaction.user.id, confirmed: true, reason: "Administrator confirmed the gathering VC permissions before state-only recovery." });
+    if (action === "restore_gathering_vc") return recoveryService.restorePermission({ guild: interaction.guild, actorUserId: interaction.user.id, targetId });
+    if (action === "kokuchi_clear_state") return recoveryService.clearStateOnly({ guild: interaction.guild, actorUserId: interaction.user.id, targetId, confirmed: true, reason: "Administrator confirmed the gathering VC permissions before state-only recovery." });
     if (action === "remove_participant_roles") return actions.removeParticipantRoles?.(interaction.guild, interaction) ?? { status: "failed", errors: ["参加者ロール解除処理が接続されていません。"] };
     if (action === "reinstall_panels") return actions.reinstallPanels?.(interaction.guild, interaction) ?? { status: "failed", errors: ["パネル再設置処理が接続されていません。"] };
     if (action === "close_expired_recruitments") return actions.closeExpiredRecruitments?.(interaction.guild, interaction) ?? { status: "failed", errors: ["期限切れ募集終了処理が接続されていません。"] };
@@ -258,13 +260,17 @@ export function createOperationalManagementService({
       if (operation === "kokuchi_target_select") {
         if (!(await requireManageGuild(interaction))) return true;
         const action = parts[3];
-        if (!["kokuchi_cancel", "kokuchi_force_terminate"].includes(action)) return false;
+        if (!["kokuchi_cancel", "kokuchi_force_terminate", "kokuchi_clear_state", "restore_gathering_vc"].includes(action)) return false;
         const current = await snapshot(interaction.guild);
         const targetId = interaction.values?.[0];
         const candidate = current.modules?.kokuchi?.details?.candidates?.find((item) => item.reservationId === targetId);
         if (!candidate) return reply(interaction, { content: "選択した開催回は最新状態に存在しません。もう一度管理メニューを開いてください。", flags: MessageFlags.Ephemeral });
         if (action === "kokuchi_force_terminate") {
           await showForceConfirmation(interaction, targetId);
+          return true;
+        }
+        if (action === "kokuchi_clear_state") {
+          await showClearModal(interaction, targetId);
           return true;
         }
         await interaction.deferUpdate();
@@ -277,13 +283,23 @@ export function createOperationalManagementService({
         const action = interaction.values?.[0];
         if (action === "kokuchi_force_terminate" || action === "kokuchi_clear_state") {
           if (action === "kokuchi_clear_state") {
-            await showClearModal(interaction);
+            const current = await snapshot(interaction.guild);
+            const candidates = current.modules?.kokuchi?.details?.candidates ?? [];
+            if (candidates.length > 1) await showKokuchiTargetMenu(interaction, current, action);
+            else await showClearModal(interaction, candidates[0]?.reservationId ?? null);
           } else {
             const current = await snapshot(interaction.guild);
             if ((current.modules?.kokuchi?.details?.candidates?.length ?? 0) > 1) await showKokuchiTargetMenu(interaction, current, action);
             else await showForceConfirmation(interaction);
           }
           return true;
+        }
+        if (action === "restore_gathering_vc") {
+          const current = await snapshot(interaction.guild);
+          if ((current.modules?.kokuchi?.details?.candidates?.length ?? 0) > 1) {
+            await showKokuchiTargetMenu(interaction, current, action);
+            return true;
+          }
         }
         if (action === "kokuchi_cancel") {
           const current = await snapshot(interaction.guild);
@@ -302,8 +318,9 @@ export function createOperationalManagementService({
     if (interaction.isModalSubmit() && operation === "clear_modal") {
       if (!(await requireAdministrator(interaction))) return true;
       const reason = interaction.fields.getTextInputValue("reason");
+      const targetId = parts[3] || null;
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const result = await recoveryService.clearStateOnly({ guild: interaction.guild, actorUserId: interaction.user.id, confirmed: true, reason });
+      const result = await recoveryService.clearStateOnly({ guild: interaction.guild, actorUserId: interaction.user.id, targetId, confirmed: true, reason });
       const auditResult = await audit(interaction, "kokuchi_clear_state", result, result.before ?? null, result.after ?? await snapshot(interaction.guild).catch(() => null));
       if (auditResult.auditStatus !== "recorded") {
         result.errors = [...(result.errors ?? []), `Operational audit recording status: ${auditResult.auditStatus}`];

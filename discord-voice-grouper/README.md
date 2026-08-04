@@ -18,7 +18,7 @@
 - 参加者ロールを対象メンバーへ付与できます。
 - PBの親VCへ代表者を移動し、PBが作成した子VCへ同じグループの残りメンバーを移動できます。
 - 25分後に参加者ロールへメンションして終了通知を送信できます。
-- 終了通知の3分後に参加者ロールを解除できます。
+- 終了通知の150分後に参加者ロールを解除できます（設定で変更可能）。
 - 転送前待機、終了通知前待機、通知後ロール解除待機をコマンドで変更できます。
 - PBが作成した子VCがすべて削除されたら、終了通知を自動キャンセルして参加者ロールを解除できます。
 - DISBOARDの `/bump` 成功メッセージを検知し、2時間後に実行者へリマインドできます。
@@ -45,6 +45,7 @@
 - `call_wait_notice_channel` に常設の「募集を作成」ボタンを置き、ユーザーがその場で「人が集まったらすぐ」の匿名募集を作成できます。
 - ボタン募集は作成者を初期参加者として扱い、別の参加者が参加希望して確認時間を過ぎると、2人以上で集合通知を送ります。
 - ボタン募集の掲載終了時刻、予定通話時間、`@通話` へのメンション、ひとことを作成画面で指定できます。
+- VC未参加者・長期不参加者へ、JST 17:00の日次判定で案内DMを送り、DMからイベント30分前のリマインダーを登録できます。
 
 ## グループ分けのルール
 
@@ -203,7 +204,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 # PB_FORM_MODERATOR_ROLE_ID=123456789012345678
 # PB_TRANSFER_WAIT_SECONDS=30
 # PB_NOTICE_WAIT_MINUTES=25
-# PB_ROLE_REMOVE_WAIT_MINUTES=3
+# PB_ROLE_REMOVE_WAIT_MINUTES=150
 # PB_CALL_WAIT_ENABLED=true
 # PB_CALL_WAIT_ROLE_ID=123456789012345678
 # PB_CALL_WAIT_PROMPT_CHANNEL_ID=123456789012345678
@@ -246,7 +247,7 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `PB_FORM_MODERATOR_ROLE_ID` | 任意 | 相談・苦情フォームでメンションするモデレーターロールIDです。 |
 | `PB_TRANSFER_WAIT_SECONDS` | 任意 | 転送開始までの待機秒数です。未設定時は30秒です。 |
 | `PB_NOTICE_WAIT_MINUTES` | 任意 | 終了通知までの待機分数です。未設定時は25分です。 |
-| `PB_ROLE_REMOVE_WAIT_MINUTES` | 任意 | 終了通知後のロール解除待機分数です。未設定時は3分です。 |
+| `PB_ROLE_REMOVE_WAIT_MINUTES` | 任意 | 終了通知後のロール解除待機分数です。未設定時は150分です。 |
 | `PB_CALL_WAIT_ENABLED` | 任意 | 通話待機システムの有効・無効です。`true` で有効化します。 |
 | `PB_CALL_WAIT_ROLE_ID` | 任意 | 通話待機・ボタン募集で参加希望者に付与するロールIDです。 |
 | `PB_CALL_WAIT_PROMPT_CHANNEL_ID` | 任意 | 通話待機システムの募集メッセージを送るチャンネルIDです。 |
@@ -562,13 +563,18 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 `/setting set` は使わず、次のように機能別サブコマンドで設定します。
 
 ```text
-/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ kokuchi_overview_channel:告知概要チャンネル waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:3
+/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ kokuchi_overview_channel:告知概要チャンネル waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:150
 /setting zatudan voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_parent_channel:PB親VC voice_reminder_parent_channel_2:PB親VC2 voice_reminder_child_category:PB子VCカテゴリ
 /setting kokuchi announcement_channel:告知・スタート案内送信先 event_time:21:00 gathering_voice_channel:集合VC mention_role:@告知ロール
 /setting logs log_channel:運用ログ
 /setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
 /setting callwait call_wait_enabled:true call_wait_interval_minutes:45 call_wait_role:@通話希望者 call_wait_prompt_channel:募集作成用チャンネル call_wait_notice_channel:常設パネル・集合通知チャンネル call_wait_voice_category:VCカテゴリ otebo_quick_confirm_seconds:30 bosyu_mention_role:@募集通知
+/setting vc_dm enabled:true panel_channel:対象確認パネル target_category:対象VCカテゴリ target_channels:VCのIDをカンマ区切り excluded_channels:対象外VCのIDをカンマ区切り
 ```
+
+`/setting vc_dm` の対象VCは、カテゴリ指定または個別VC指定で設定します。対象VCへ3分以上連続して参加すると有効参加として記録され、対象確認パネルから外れます。AFK、集合VC、待機VCカテゴリ、VCコントロールカテゴリ、PB親VC、明示した対象外VCは自動的に対象外です。管理者はパネルのユーザー選択メニューから、既参加者としての除外・除外取消を行えます。パネルを置くチャンネルには、Botの閲覧・メッセージ送信・メッセージ履歴閲覧権限が必要です。
+
+新規参加者DMは加入後7日目以降の最初の日次判定、長期不参加者DMは最後の有効VC参加または移行時基準日から30日目以降の日次判定で、対象イベント（火曜・土曜、`kokuchi` の開催時刻）を案内します。VC DMを有効にする前に`/setting kokuchi event_time`を設定してください。DM送信記録、リマインダー、日次実行、移行状態はMongoDBへ保存され、再起動後も復元されます。VC DMを無効化した場合、未送信リマインダーは保留され、再有効化時に復元されます。DMを受け取れない場合は再送せず、送信障害だけを再試行します。
 
 `child_category` は任意です。
 設定すると、PBが作った子VCをそのカテゴリ内だけから探します。
@@ -613,7 +619,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | --- | --- | --- | --- |
 | `transfer_wait_seconds` | 秒 | 30 | 振り分け後、VC転送を始めるまでの待機時間です。 |
 | `notice_wait_minutes` | 分 | 25 | 終了通知を送るまでの待機時間です。 |
-| `role_remove_wait_minutes` | 分 | 3 | 終了通知を送った後、参加者ロールを解除するまでの待機時間です。 |
+| `role_remove_wait_minutes` | 分 | 150 | 終了通知を送った後、参加者ロールを解除するまでの待機時間です。 |
 
 いずれも `0` を指定できます。
 `0` の場合、その待機は行わずすぐ次の処理へ進みます。
@@ -944,7 +950,7 @@ PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も�
 6. 転送と参加者ロール付与が終わった後、集合VCのeveryone接続権限を不可に戻します。
 7. 最初の話題とグループごとの発話順を送信します。
 8. 25分後に参加者ロールへメンションして終了通知を送信します。
-9. 終了通知の3分後に参加者ロールを解除します。
+9. 終了通知の150分後に参加者ロールを解除します（設定で変更可能）。
 10. `announcement_channel` で指定した告知・スタート案内送信先に、参加のお礼と次回案内を送信します。
 
 最初の話題と発話順の送信先は `/setting splitvc post_split_wadai_channel:...` で指定できます。

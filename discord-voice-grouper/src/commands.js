@@ -99,7 +99,7 @@ export const settingCommand = new SlashCommandBuilder()
       .addIntegerOption((option) =>
         option
           .setName("role_remove_wait_minutes")
-          .setDescription("終了通知後のロール解除待機分数。省略時は3分")
+          .setDescription("終了通知後のロール解除待機分数。省略時は150分")
           .setMinValue(0)
           .setRequired(false),
       ),
@@ -179,6 +179,35 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) => option.setName("gathering_voice_channel").setDescription("開催時に使用する集合VC").addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice).setRequired(false))
       .addRoleOption((option) => option.setName("mention_role").setDescription("告知時に追加するメンションロール").setRequired(false))
       .addRoleOption((option) => option.setName("remove_mention_role").setDescription("告知メンションから外すロール").setRequired(false)),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("vc_dm")
+      .setDescription("VC未参加・長期不参加者向けDM機能を設定します")
+      .addBooleanOption((option) => option
+        .setName("enabled")
+        .setDescription("機能全体を有効または無効にします")
+        .setRequired(false))
+      .addChannelOption((option) => option
+        .setName("panel_channel")
+        .setDescription("管理者専用の対象確認パネルを置くチャンネル")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(false))
+      .addChannelOption((option) => option
+        .setName("target_category")
+        .setDescription("3分参加判定の対象VCカテゴリ")
+        .addChannelTypes(ChannelType.GuildCategory)
+        .setRequired(false))
+      .addStringOption((option) => option
+        .setName("target_channels")
+        .setDescription("対象VCのIDをカンマ区切りで指定（カテゴリ指定時は任意）")
+        .setMaxLength(1000)
+        .setRequired(false))
+      .addStringOption((option) => option
+        .setName("excluded_channels")
+        .setDescription("対象外VCのIDをカンマ区切りで指定")
+        .setMaxLength(1000)
+        .setRequired(false)),
   )
   .addSubcommand((subcommand) =>
     subcommand

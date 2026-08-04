@@ -48,6 +48,10 @@ export function mergeGuildSettingsWithEnvironmentDefaults(
 /** Backward-compatible, idempotent read-time normalization. */
 export function normalizeGuildSettings(settings = {}) {
   const result = { ...settings };
+  const normalizedRoleRemoveWaitMinutes = Number(result.roleRemoveWaitMinutes);
+  result.roleRemoveWaitMinutes = Number.isInteger(normalizedRoleRemoveWaitMinutes) && normalizedRoleRemoveWaitMinutes >= 0
+    ? normalizedRoleRemoveWaitMinutes
+    : 150;
   result.fukyoThemeChannelId = typeof result.fukyoThemeChannelId === "string" && result.fukyoThemeChannelId
     ? result.fukyoThemeChannelId : null;
   result.fukyoWeeklyThemeEnabled = result.fukyoWeeklyThemeEnabled === true;
@@ -59,9 +63,17 @@ export function normalizeGuildSettings(settings = {}) {
   result.callWaitIntervalMinutes = [30, 45, 60].includes(Number(result.callWaitIntervalMinutes))
     ? Number(result.callWaitIntervalMinutes)
     : 30;
-  const eventTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(result.kokuchiEventTime ?? "")
-    ? result.kokuchiEventTime
+  // Existing kokuchi features intentionally fall back to 21:00 when no
+  // schedule has been stored. VC DM must still be able to distinguish that
+  // compatibility fallback from an explicitly configured event_time.
+  const rawKokuchiEventTime = result.kokuchiEventTime;
+  const eventTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(rawKokuchiEventTime ?? "")
+    ? rawKokuchiEventTime
     : null;
+  const hasConfiguredEventTime = typeof result.kokuchiEventTimeConfigured === "boolean"
+    ? result.kokuchiEventTimeConfigured
+    : Boolean(eventTime);
+  result.kokuchiEventTimeConfigured = hasConfiguredEventTime && Boolean(eventTime);
   if (!eventTime) {
     result.kokuchiEventTime = "21:00";
   }
@@ -88,6 +100,17 @@ export function normalizeGuildSettings(settings = {}) {
   // Keep the old singular field available to older code and environment
   // configurations while making the array the canonical representation.
   result.voiceReminderParentChannelId = result.voiceReminderParentChannelIds[0] ?? null;
+  result.vcDmEnabled = result.vcDmEnabled === true;
+  for (const field of ["vcDmTargetChannelIds", "vcDmExcludedChannelIds"]) {
+    result[field] = [...new Set(
+      (Array.isArray(result[field]) ? result[field] : [])
+        .filter((channelId) => typeof channelId === "string" && /^\d{5,25}$/.test(channelId)),
+    )];
+  }
+  result.vcDmPanelChannelId = typeof result.vcDmPanelChannelId === "string" && /^\d{5,25}$/.test(result.vcDmPanelChannelId)
+    ? result.vcDmPanelChannelId : null;
+  result.vcDmTargetCategoryId = typeof result.vcDmTargetCategoryId === "string" && /^\d{5,25}$/.test(result.vcDmTargetCategoryId)
+    ? result.vcDmTargetCategoryId : null;
   return result;
 }
 
@@ -109,6 +132,32 @@ export async function patchGuildSettings(guildId, patch) {
 
 export async function saveGuildSettings(guildId, patch) {
   return patchGuildSettings(guildId, patch);
+}
+
+/**
+ * Update the settings mirror for one kokuchi event only. This guard is
+ * important for delayed splitvc/restore callbacks: an older event must not
+ * overwrite the state of a newer event in the same GuildSettings document.
+ */
+export async function patchGuildSettingsForKokuchiEvent({ guildId, kokuchiEventId, set = {}, unset = {} }) {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error("MongoDB is unavailable; event-scoped guild settings cannot be saved.");
+  }
+  if (!guildId || !kokuchiEventId) return null;
+  const cleanSet = removeUndefined(set);
+  const cleanUnset = Object.fromEntries(Object.keys(unset).map((key) => [key, 1]));
+  const update = {};
+  if (Object.keys(cleanSet).length > 0) update.$set = cleanSet;
+  if (Object.keys(cleanUnset).length > 0) update.$unset = cleanUnset;
+  if (!Object.keys(update).length) return getGuildSettings(guildId);
+  const saved = await GuildSettings.findOneAndUpdate(
+    { guildId, $or: [{ kokuchiEventId }, { gatheringVcStateEventId: kokuchiEventId }] },
+    update,
+    { returnDocument: "after", runValidators: true, lean: true },
+  );
+  if (!saved) return null;
+  const { _id, __v, guildId: ignoredGuildId, ...settings } = saved;
+  return normalizeGuildSettings({ ...settings, guildId });
 }
 
 const OTEBO_RECRUITMENT_SLOT_ACTIVE_STATES = [
@@ -435,6 +484,7 @@ export async function transitionOteboRecruitment({
 
 export async function transitionKokuchiGatheringReminder({
   guildId,
+  kokuchiEventId = null,
   fromStates,
   toState,
   patch = {},
@@ -446,6 +496,7 @@ export async function transitionKokuchiGatheringReminder({
   return GuildSettings.findOneAndUpdate(
     {
       guildId,
+      ...(kokuchiEventId ? { kokuchiEventId } : {}),
       ...(fromStates?.length
         ? { kokuchiGatheringReminderState: { $in: fromStates } }
         : {}),
@@ -469,6 +520,7 @@ const kokuchiTimedActionStateKeys = new Set([
 
 export async function transitionKokuchiTimedAction({
   guildId,
+  kokuchiEventId = null,
   stateKey,
   fromStates,
   toState,
@@ -484,6 +536,7 @@ export async function transitionKokuchiTimedAction({
   return GuildSettings.findOneAndUpdate(
     {
       guildId,
+      ...(kokuchiEventId ? { kokuchiEventId } : {}),
       ...(fromStates?.length ? { [stateKey]: { $in: fromStates } } : {}),
     },
     {
@@ -507,13 +560,13 @@ export async function cancelKokuchiTimedActions({ guildId, kokuchiEventId }) {
       {
         $set: {
           kokuchiPreNoticeState: {
-            $cond: [{ $in: ["$kokuchiPreNoticeState", ["pending", "failed"]] }, "canceled", "$kokuchiPreNoticeState"],
+            $cond: [{ $in: ["$kokuchiPreNoticeState", ["pending", "failed", "processing"]] }, "canceled", "$kokuchiPreNoticeState"],
           },
           gatheringVcUnlockState: {
-            $cond: [{ $in: ["$gatheringVcUnlockState", ["pending", "failed"]] }, "canceled", "$gatheringVcUnlockState"],
+            $cond: [{ $in: ["$gatheringVcUnlockState", ["pending", "failed", "processing"]] }, "canceled", "$gatheringVcUnlockState"],
           },
           kokuchiGatheringReminderState: {
-            $cond: [{ $in: ["$kokuchiGatheringReminderState", ["pending", "failed"]] }, "canceled", "$kokuchiGatheringReminderState"],
+            $cond: [{ $in: ["$kokuchiGatheringReminderState", ["pending", "failed", "sending"]] }, "canceled", "$kokuchiGatheringReminderState"],
           },
           kokuchiTimedActionsCanceledAt: new Date(),
         },
