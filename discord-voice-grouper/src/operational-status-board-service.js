@@ -94,11 +94,12 @@ export function buildOperationalStatusPayload(snapshot) {
 
   const operationsEmbed = new EmbedBuilder()
     .setTitle("自動投稿・パネル・VC")
-    .setColor([modules.automation, modules.panels, modules.voice].some((module) => ["error", "unknown"].includes(module?.severity)) ? severityColor.error : severityColor.info)
+    .setColor([modules.automation, modules.panels, modules.voice, modules.vcDm].some((module) => ["error", "unknown"].includes(module?.severity)) ? severityColor.error : severityColor.info)
     .addFields(
       moduleField(modules.automation),
       moduleField(modules.panels),
       moduleField(modules.voice),
+      ...(modules.vcDm ? [moduleField(modules.vcDm)] : []),
     )
     .setFooter({ text: OPERATIONAL_STATUS_MARKER });
 

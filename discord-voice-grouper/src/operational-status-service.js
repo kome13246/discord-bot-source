@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { BumpReminder } from "./models/bump-reminder.js";
+import { PermissionFlagsBits } from "discord.js";
 import { BosyuEditSession } from "./models/bosyu-state.js";
 import { CallWaitInterest } from "./models/call-wait-interest.js";
 import { FukyoThemeState } from "./models/fukyo-theme-state.js";
@@ -15,13 +16,21 @@ import { SplitProcessSession } from "./models/split-process-session.js";
 import { VoiceChannelControl } from "./models/voice-channel-control.js";
 import { VoiceExitSchedule } from "./models/voice-exit-schedule.js";
 import { VoiceParticipantRoleGrant } from "./models/voice-participant-role-grant.js";
+import { getPermissionOverwriteState } from "./kokuchi-utils.js";
+import {
+  classifyGatheringVcRestoreBlock,
+  GATHERING_VC_RESTORE_BLOCKING_STATUS_VALUES,
+  isGatheringVcRestoreBlocking,
+  normalizeGatheringVcRestoreStatus,
+  normalizeKokuchiStatus,
+} from "./kokuchi-event-state.js";
 
 const ACTIVE_KOKUCHI_STATUSES = ["pending", "processing", "canceling", "cancel_partial", "sent", "published_unconfirmed", "failed"];
 const ACTIVE_SPLIT_STATUSES = ["active", "finish_notice_pending", "role_remove_pending", "cleaning_up", "feedback_open"];
 const OBSERVED_SPLIT_STATUSES = [...ACTIVE_SPLIT_STATUSES, "failed", "cleanup_required"];
 const ACTIVE_ACTION_STATUSES = ["pending", "running"];
 const EXPIRED_PROMPT_STATES = ["active", "open", "pending", "processing", "evaluating", "role_granting", "failed"];
-const MODULE_KEYS = ["system", "kokuchi", "splitvc", "recruitment", "automation", "panels", "voice"];
+const MODULE_KEYS = ["system", "kokuchi", "splitvc", "recruitment", "automation", "panels", "voice", "vcDm"];
 
 const defaultModels = {
   BumpReminder,
@@ -85,8 +94,8 @@ async function verifyPanelMessage(guild, channelId, messageId) {
   }
 }
 
-function issue(code, message, blocking = false) {
-  return { code, message, blocking };
+function issue(code, message, blocking = false, severity = null) {
+  return { code, message, blocking, severity: severity ?? (blocking ? "error" : "warning") };
 }
 
 function makeModule({ key, label, summary, details = {}, issues = [], unknown = false, disabled = false, inProgress = false, availableActions = [] }) {
@@ -95,8 +104,8 @@ function makeModule({ key, label, summary, details = {}, issues = [], unknown = 
     ? "unknown"
     : blocking
       ? "error"
-      : issues.length > 0
-        ? "warning"
+        : issues.length > 0
+        ? issues.some((item) => item.severity === "warning") ? "warning" : "info"
         : inProgress
           ? "info"
           : disabled
@@ -137,6 +146,7 @@ async function collectSnapshot(guild, dependencies) {
     client,
     getStartupState = () => ({}),
     getVoiceMonitorSessions = () => [],
+    getVcDmStatus,
     models,
     getDatabaseStatus: getDatabaseStatusOverride,
   } = dependencies;
@@ -196,26 +206,75 @@ async function collectSnapshot(guild, dependencies) {
 
   try {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
+    const currentId = settings?.kokuchiEventId;
     const reservations = await readMany(models.KokuchiReservation, {
       guildId: guild.id,
-      status: { $in: ACTIVE_KOKUCHI_STATUSES },
+      $or: [
+        ...(currentId ? [{ reservationId: currentId }] : []),
+        { status: { $in: ACTIVE_KOKUCHI_STATUSES } },
+        { gatheringVcRestorePending: true },
+        { gatheringVcRestoreStatus: { $in: GATHERING_VC_RESTORE_BLOCKING_STATUS_VALUES } },
+      ],
     }, { updatedAt: -1 });
-    const currentId = settings?.kokuchiEventId;
     const current = currentId
       ? reservations.find((item) => item.reservationId === currentId)
       : reservations.length === 1 ? reservations[0] : null;
     const ambiguousCandidates = !current && reservations.length > 1;
+    const pendingRestoreEvents = reservations.filter((item) => item.gatheringVcRestorePending === true || isGatheringVcRestoreBlocking(normalizeGatheringVcRestoreStatus(item)));
+    const currentRestoreStatus = normalizeGatheringVcRestoreStatus(current ?? {});
+    const restoreEvent = current
+      && (current.gatheringVcRestorePending === true || isGatheringVcRestoreBlocking(currentRestoreStatus))
+      ? current
+      : pendingRestoreEvents.find((item) => item.reservationId === currentId)
+        ?? pendingRestoreEvents[0]
+        ?? null;
+    const restoreEventId = restoreEvent?.reservationId
+      ?? settings?.gatheringVcStateEventId
+      ?? currentId
+      ?? null;
+    const restoreRecord = restoreEvent ?? (restoreEventId === currentId ? current : null);
     const kokuchiIssues = [];
     const actions = [];
+    const restoreSettings = restoreEventId && settings?.gatheringVcStateEventId === restoreEventId ? settings : null;
+    const restoreStatus = normalizeGatheringVcRestoreStatus(restoreRecord ?? restoreSettings ?? {});
     const states = {
+      kokuchiStatus: normalizeKokuchiStatus(current?.kokuchiStatus ?? current?.status),
       preNotice: settings?.kokuchiPreNoticeState ?? null,
       gatheringUnlock: settings?.gatheringVcUnlockState ?? null,
       gatheringReminder: settings?.kokuchiGatheringReminderState ?? null,
-      restorePending: settings?.gatheringVcRestorePending === true,
+      restorePending: restoreEvent?.gatheringVcRestorePending === true || isGatheringVcRestoreBlocking(restoreStatus),
+      restoreStatus,
+      restoreAttemptCount: restoreRecord?.gatheringVcRestoreAttemptCount ?? restoreSettings?.gatheringVcRestoreAttemptCount ?? 0,
+      restoreFailureCode: restoreRecord?.gatheringVcRestoreFailureCode ?? restoreSettings?.gatheringVcRestoreFailureCode ?? null,
+      restoreNextRetryAt: restoreRecord?.gatheringVcRestoreNextRetryAt ?? restoreSettings?.gatheringVcRestoreNextRetryAt ?? null,
+      restoreLastError: restoreRecord?.gatheringVcRestoreLastError ?? restoreSettings?.gatheringVcRestoreLastError ?? null,
     };
-    if (settings?.gatheringVcRestorePending === true) {
-      kokuchiIssues.push(issue("gathering_vc_restore_pending", "集合VCの権限復元待ちです。新規kokuchiを停止しています。", true));
-      actions.push("restore_gathering_vc");
+    const restoreChannelId = restoreRecord?.gatheringVcUnlockChannelId
+      ?? (restoreSettings ? settings?.gatheringVcUnlockChannelId : null);
+    const savedRestoreSnapshot = restoreRecord?.gatheringVcPermissionBeforeOpen
+      ?? (restoreSettings ? settings?.gatheringVcPermissionBeforeOpen : null);
+    let currentRestorePermission = null;
+    if (restoreChannelId && typeof guild.channels?.fetch === "function") {
+      const restoreChannel = guild.channels.cache?.get(restoreChannelId)
+        ?? await guild.channels.fetch(restoreChannelId).catch(() => null);
+      const everyoneOverwrite = restoreChannel?.permissionOverwrites?.cache?.get(guild.id) ?? null;
+      if (restoreChannel) {
+        currentRestorePermission = {
+          viewChannel: everyoneOverwrite ? getPermissionOverwriteState(everyoneOverwrite, PermissionFlagsBits.ViewChannel) : null,
+          connect: everyoneOverwrite ? getPermissionOverwriteState(everyoneOverwrite, PermissionFlagsBits.Connect) : null,
+        };
+      }
+    }
+    const restoreBlock = classifyGatheringVcRestoreBlock({ eventId: currentId, event: restoreEvent ?? current, settings });
+    if (restoreBlock) {
+      const nextRetryAt = asDate(states.restoreNextRetryAt);
+      const restoreMessage = [
+        restoreBlock.message,
+        nextRetryAt ? `次回復元予定: ${nextRetryAt.toLocaleString("ja-JP")}` : null,
+        states.restoreLastError ? `最終復元エラー: ${truncate(states.restoreLastError, 240)}` : null,
+      ].filter(Boolean).join(" ");
+      kokuchiIssues.push(issue(restoreBlock.code, restoreMessage, restoreBlock.severity === "error", restoreBlock.severity));
+      if (restoreBlock.severity !== "info") actions.push("restore_gathering_vc");
     }
     if (["sent_unconfirmed", "unconfirmed", "published_unconfirmed"].some((value) => Object.values(states).includes(value)) || current?.status === "published_unconfirmed") {
       kokuchiIssues.push(issue("unconfirmed", "送信結果未確認の状態があります。再送は自動で行いません。", false));
@@ -230,10 +289,15 @@ async function collectSnapshot(guild, dependencies) {
       kokuchiIssues.push(issue("orphaned_event", "GuildSettingsに現在開催回が残っていますが予約レコードを特定できません。", true));
     }
     if (ambiguousCandidates) kokuchiIssues.push(issue("ambiguous_reservations", "複数の開催回候補があるため、候補を選択してから復旧操作を実行してください。", true));
-    if (current || settings?.kokuchiEventId || settings?.gatheringVcRestorePending || ambiguousCandidates) actions.push("kokuchi_cancel", "kokuchi_force_terminate");
-    if (settings?.gatheringVcRestorePending
-      && !settings?.gatheringVcPermissionBeforeOpen
-      && health?.lastRecoveryFailureAction === "kokuchi_force_terminate") actions.push("kokuchi_clear_state");
+    const currentKokuchiStatus = normalizeKokuchiStatus(current?.kokuchiStatus ?? current?.status);
+    const eventCanBeCanceled = ["scheduled", "running", "canceling"].includes(currentKokuchiStatus)
+      || ["pending", "processing", "sent"].includes(current?.status);
+    if (eventCanBeCanceled || ambiguousCandidates) actions.push("kokuchi_cancel");
+    if (eventCanBeCanceled) actions.push("kokuchi_force_terminate");
+    if (["restore_snapshot_missing", "restore_state_inconsistent"].includes(restoreBlock?.code)
+      && restoreRecord
+      && (restoreRecord.gatheringVcRestorePending === true || isGatheringVcRestoreBlocking(states.restoreStatus))
+      && !savedRestoreSnapshot) actions.push("kokuchi_clear_state");
     modules.kokuchi = makeModule({
       key: "kokuchi",
       label: "kokuchi",
@@ -244,18 +308,42 @@ async function collectSnapshot(guild, dependencies) {
         reservation: current ? {
           reservationId: current.reservationId,
           status: current.status,
+          kokuchiStatus: normalizeKokuchiStatus(current.kokuchiStatus ?? current.status),
           publicationStatus: current.publicationStatus,
           postProcessingStatus: current.postProcessingStatus,
           reminderStatus: current.reminderStatus,
+          gatheringVcRestoreStatus: normalizeGatheringVcRestoreStatus(current),
+          gatheringVcRestoreEventId: current.gatheringVcRestoreEventId ?? null,
+          gatheringVcRestoreEventRevision: current.gatheringVcRestoreEventRevision ?? null,
+          gatheringVcUnlockChannelId: current.gatheringVcUnlockChannelId ?? null,
+          gatheringVcPermissionBeforeOpen: current.gatheringVcPermissionBeforeOpen ?? null,
+          gatheringVcCurrentPermission: restoreEventId === current?.reservationId ? currentRestorePermission : null,
+          gatheringVcRestoreAttemptCount: current.gatheringVcRestoreAttemptCount ?? 0,
+          gatheringVcRestoreFailureCode: current.gatheringVcRestoreFailureCode ?? null,
+          gatheringVcRestoreNextRetryAt: current.gatheringVcRestoreNextRetryAt ?? null,
+          gatheringVcRestoreLastError: current.gatheringVcRestoreLastError ?? null,
         } : null,
         states,
+        gatheringVcRestore: {
+          eventId: restoreEventId,
+          channelId: restoreChannelId,
+          currentPermission: currentRestorePermission,
+          savedSnapshot: savedRestoreSnapshot,
+          status: states.restoreStatus,
+          attemptCount: states.restoreAttemptCount,
+          failureCode: states.restoreFailureCode,
+          nextRetryAt: states.restoreNextRetryAt,
+          lastError: states.restoreLastError,
+          restoreEventId: restoreRecord?.gatheringVcRestoreEventId ?? restoreEventId,
+          restoreEventRevision: restoreRecord?.gatheringVcRestoreEventRevision ?? null,
+        },
         candidateCount: reservations.length,
-        candidates: reservations.slice(0, 25).map((item) => ({ reservationId: item.reservationId, eventAt: item.eventAt, status: item.status })),
-        newKokuchiBlocked: Boolean(settings?.gatheringVcRestorePending || kokuchiIssues.some((item) => item.blocking)),
+        candidates: reservations.slice(0, 25).map((item) => ({ reservationId: item.reservationId, eventAt: item.eventAt, status: item.status, kokuchiStatus: normalizeKokuchiStatus(item.kokuchiStatus ?? item.status), gatheringVcRestoreStatus: normalizeGatheringVcRestoreStatus(item) })),
+        newKokuchiBlocked: Boolean(isGatheringVcRestoreBlocking(states.restoreStatus) || ["scheduled", "running", "canceling"].includes(currentKokuchiStatus) || kokuchiIssues.some((item) => item.blocking)),
       },
       issues: kokuchiIssues,
       disabled: !settings?.kokuchiAnnouncementChannelId && !current && !settings?.kokuchiEventId,
-      inProgress: Boolean(current && ["pending", "processing", "sent"].includes(current.status)),
+      inProgress: Boolean(current && ["scheduled", "running", "canceling"].includes(normalizeKokuchiStatus(current.kokuchiStatus ?? current.status))),
       availableActions: actions,
     });
   } catch (error) {
@@ -430,6 +518,9 @@ async function collectSnapshot(guild, dependencies) {
     const staleMonitors = activeMonitors.filter((session) => ageMs(session.waitingMonitorHeartbeatAt ?? session.updatedAt) > 3 * 60 * 1000);
     if (staleMonitors.length) issues.push(issue("voice_monitor_stale", `VC監視ハートビートが3分以上更新されていないセッションが${staleMonitors.length}件あります。`, true));
     const inMemoryVoiceMonitors = (getVoiceMonitorSessions() ?? []).filter((session) => session?.guildId === guild.id);
+    for (let index = issues.length - 1; index >= 0; index -= 1) {
+      if (issues[index].code === "gathering_vc_restore_pending") issues.splice(index, 1);
+    }
     modules.voice = makeModule({
       key: "voice",
       label: "VC・ロール",
@@ -439,7 +530,6 @@ async function collectSnapshot(guild, dependencies) {
       disabled: grants.length === 0 && schedules.length === 0 && !settings?.gatheringVcRestorePending,
       inProgress: grants.length > 0 || schedules.length > 0 || activeSessions.length > 0,
       availableActions: [
-        ...(settings?.gatheringVcRestorePending ? ["restore_gathering_vc"] : []),
         ...(failedGrants.length ? ["remove_participant_roles"] : []),
       ],
     });
@@ -448,9 +538,24 @@ async function collectSnapshot(guild, dependencies) {
     modules.voice = makeModule({ key: "voice", label: "VC・ロール", summary: "状態を取得できません。", issues: [issue("read_failed", truncate(error?.message ?? error), true)], unknown: true });
   }
 
+  if (getVcDmStatus) {
+    try {
+      modules.vcDm = await getVcDmStatus(guild);
+    } catch (error) {
+      unknownModule = true;
+      modules.vcDm = makeModule({
+        key: "vcDm",
+        label: "VC未参加者DM",
+        summary: "VC未参加者DMの状態を取得できません。",
+        issues: [issue("read_failed", truncate(error?.message ?? error), true)],
+        unknown: true,
+      });
+    }
+  }
+
   if (settingsReadFailed) {
     const settingsIssue = issue("settings_unavailable", `GuildSettings could not be read${settingsReadError ? `: ${settingsReadError}` : ""}`, true);
-    for (const key of ["kokuchi", "recruitment", "automation", "panels", "voice"]) {
+    for (const key of ["kokuchi", "recruitment", "automation", "panels", "voice", "vcDm"]) {
       const module = modules[key];
       if (!module) continue;
       module.issues = [...(module.issues ?? []), settingsIssue];
@@ -482,13 +587,13 @@ async function collectSnapshot(guild, dependencies) {
   return snapshot;
 }
 
-export function createOperationalStatusService({ getGuildSettings, client, getStartupState, getVoiceMonitorSessions, models: injectedModels = {}, getDatabaseStatus: getDatabaseStatusOverride } = {}) {
+export function createOperationalStatusService({ getGuildSettings, client, getStartupState, getVoiceMonitorSessions, getVcDmStatus, models: injectedModels = {}, getDatabaseStatus: getDatabaseStatusOverride } = {}) {
   const models = { ...defaultModels, ...injectedModels };
   if (Object.keys(injectedModels).length > 0) {
     if (!("OteboRecruitmentPanel" in injectedModels)) models.OteboRecruitmentPanel = null;
     if (!("CallWaitRoleGeneration" in injectedModels)) models.CallWaitRoleGeneration = null;
   }
-  const dependencies = { getGuildSettings, client, getStartupState, getVoiceMonitorSessions, models, getDatabaseStatus: getDatabaseStatusOverride };
+  const dependencies = { getGuildSettings, client, getStartupState, getVoiceMonitorSessions, getVcDmStatus, models, getDatabaseStatus: getDatabaseStatusOverride };
 
   async function getOperationalStatusSnapshot(guild) {
     if (!guild?.id) throw new Error("A guild is required to build an operational status snapshot.");

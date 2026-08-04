@@ -4,6 +4,10 @@ const schema = new mongoose.Schema(
   {
     sessionId: { type: String, required: true, unique: true },
     guildId: { type: String, required: true },
+    // Captured when /splitvc starts. A split may close the gathering VC only
+    // when this exact event and lifecycle generation are still valid.
+    kokuchiEventId: String,
+    kokuchiEventRevision: { type: Number, min: 0 },
     ownerId: String,
     sourceChannelId: String,
     operationChannelId: String,

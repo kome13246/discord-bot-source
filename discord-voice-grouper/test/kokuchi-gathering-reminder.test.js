@@ -32,6 +32,13 @@ test("告知後キャンセルは開催回単位でタイマーと永続アク�
   assert.match(actionStore, /async function cancelKokuchiScheduledActions/);
   assert.match(store, /returnDocument: "before"/);
   assert.match(actionStore, /ScheduledAction\.findOneAndUpdate/);
+  assert.match(actionStore, /status: \{ \$in: \["pending", "failed", "running"\] \}/);
+  assert.match(handler, /\$inc: \{ lifecycleRevision: 1 \}/);
+  assert.match(source, /function getKokuchiActionGuard/);
+  assert.match(source, /beforeDiscord/);
+  assert.match(source, /afterRoleRemovalGuard/);
+  assert.match(source, /finalGuard/);
+  assert.match(source, /stopInvalidKokuchiAction/);
 });
 
 test("集合リマインダーは設定値を使い、送信前に原子的に確保する", async () => {
@@ -56,6 +63,27 @@ test("告知時刻から算出した処理は再起動時に未確認として�
   assert.match(botSource, /stateKey: "gatheringVcUnlockState"[\s\S]*toState: "processing"/);
 });
 
+test("processing中のkokuchi通知タイマーはclaim・Discord直前・完了確定前にイベントrevisionを再確認する", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const preNotice = source.slice(source.indexOf("async function sendKokuchiPreNotice"), source.indexOf("async function migrateKokuchiEventState"));
+  const reminder = source.slice(source.indexOf("async function sendKokuchiGatheringReminder"), source.indexOf("async function applyGatheringVcUnlock"));
+  const reservationReminder = source.slice(source.indexOf("async function sendKokuchiReservationReminder"), source.indexOf("async function processKokuchiReservation"));
+  for (const handler of [preNotice, reminder, reservationReminder]) {
+    assert.match(handler, /beforeDiscord/);
+    assert.match(handler, /afterDiscord/);
+    assert.match(handler, /expectedRevision/);
+    assert.match(handler, /canceled/);
+  }
+});
+
+test("イベントIDなしの旧集合VC設定を新しいkokuchiイベントへ移行フォールバックしない", async () => {
+  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const migration = source.slice(source.indexOf("async function migrateKokuchiEventState"), source.indexOf("async function restorePendingGatheringVcPermissions"));
+  assert.match(migration, /if \(!hasLegacyCurrentIdentity\) continue/);
+  assert.doesNotMatch(migration, /canAdoptLegacyOpenedState/);
+  assert.doesNotMatch(migration, /pendingBelongsToCurrentEvent/);
+});
+
 test("immediate and reserved kokuchi pass their own event identity to publication", async () => {
   const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
   const handle = source.slice(source.indexOf("async function handleKokuchi(interaction)"), source.indexOf("async function publishImmediateKokuchi"));
@@ -72,7 +100,8 @@ test("kokuchi prevents a new event while a prior event still owns timed work", a
   const handle = source.slice(source.indexOf("function hasActiveKokuchiEvent"), source.indexOf("async function publishImmediateKokuchi"));
 
   assert.match(handle, /gatheringVcRestorePending === true/);
-  assert.match(handle, /status: \{ \$in: \["canceling", "cancel_partial"\] \}/);
+  assert.match(handle, /kokuchiStatus/);
+  assert.match(handle, /getKokuchiExecutionBlockReason/);
   assert.match(handle, /前回のkokuchiに関連する処理がまだ完了していません/);
 });
 

@@ -112,7 +112,7 @@ export async function getPendingActions() {
   return ScheduledAction.find({ status: "pending" }).lean();
 }
 
-/** Cancels only pending/failed actions belonging to one kokuchi event. */
+/** Cancels queued or currently claimed actions belonging to one kokuchi event. */
 export async function cancelKokuchiScheduledActions({ guildId, kokuchiEventId }) {
   if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is required to cancel persistent actions.");
   const actions = await ScheduledAction.find({ guildId, "payload.kokuchiEventId": kokuchiEventId }).lean();
@@ -123,12 +123,12 @@ export async function cancelKokuchiScheduledActions({ guildId, kokuchiEventId })
       result.alreadyCanceled += 1;
       continue;
     }
-    if (!["pending", "failed"].includes(action.status)) {
+    if (!["pending", "failed", "running"].includes(action.status)) {
       result.alreadyCompleted += 1;
       continue;
     }
     const canceled = await ScheduledAction.findOneAndUpdate(
-      { _id: action._id, status: { $in: ["pending", "failed"] } },
+      { _id: action._id, status: { $in: ["pending", "failed", "running"] } },
       { $set: { status: "canceled", completedAt: new Date() } },
       { returnDocument: "before", lean: true },
     );
@@ -138,7 +138,7 @@ export async function cancelKokuchiScheduledActions({ guildId, kokuchiEventId })
     }
     const current = await ScheduledAction.findById(action._id).lean();
     if (current?.status === "canceled") result.alreadyCanceled += 1;
-    else if (current && !["pending", "failed"].includes(current.status)) result.alreadyCompleted += 1;
+    else if (current && !["pending", "failed", "running"].includes(current.status)) result.alreadyCompleted += 1;
     else {
       result.failed += 1;
       result.errors.push(`ScheduledAction ${action.actionKey} could not be canceled.`);
