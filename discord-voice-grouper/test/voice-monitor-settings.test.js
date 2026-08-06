@@ -1,3 +1,4 @@
+import { readBotImplementationSource } from "./source-under-test.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -18,7 +19,6 @@ test("voice reminder parent settings normalize to a deduplicated array", () => {
     "parent-a",
   );
 });
-
 test("zatudan exposes multiple PB parent VC selectors", () => {
   const zatudan = settingCommand.options.find((option) => option.name === "zatudan");
   const optionNames = zatudan?.options?.map((option) => option.name) ?? [];
@@ -35,7 +35,7 @@ test("zatudan exposes multiple PB parent VC selectors", () => {
 });
 
 test("voice monitor admission uses the configured child category instead of active split sessions", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const monitorSection = source.slice(
     source.indexOf("async function isVoiceChannelMonitored"),
     source.indexOf("function getVoiceReminderParentChannelIds"),

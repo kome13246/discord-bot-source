@@ -1,3 +1,4 @@
+import { readBotImplementationSource } from "./source-under-test.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -15,7 +16,7 @@ test("告知時刻と集合通知のメンション先は /setting kokuchi で�
 });
 
 test("告知後キャンセルは開催回単位でタイマーと永続アクションを停止する", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const store = await readFile(new URL("../src/settings-store.js", import.meta.url), "utf8");
   const actionStore = await readFile(new URL("../src/scheduled-action-store.js", import.meta.url), "utf8");
 
@@ -42,7 +43,7 @@ test("告知後キャンセルは開催回単位でタイマーと永続アク�
 });
 
 test("集合リマインダーは設定値を使い、送信前に原子的に確保する", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
 
   assert.doesNotMatch(source, /KOKUCHI_GATHERING_REMINDER_ROLE_IDS/);
   assert.doesNotMatch(source, /KOKUCHI_GATHERING_REMINDER_VOICE_CHANNEL_ID/);
@@ -53,7 +54,7 @@ test("集合リマインダーは設定値を使い、送信前に原子的に�
 
 test("告知時刻から算出した処理は再起動時に未確認として扱い、重複再送しない", async () => {
   const source = await readFile(new URL("../src/settings-store.js", import.meta.url), "utf8");
-  const botSource = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const botSource = await readBotImplementationSource();
 
   assert.match(source, /recoverInterruptedKokuchiGatheringReminders/);
   assert.match(source, /kokuchiGatheringReminderState: "unconfirmed"/);
@@ -64,7 +65,7 @@ test("告知時刻から算出した処理は再起動時に未確認として�
 });
 
 test("processing中のkokuchi通知タイマーはclaim・Discord直前・完了確定前にイベントrevisionを再確認する", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const preNotice = source.slice(source.indexOf("async function sendKokuchiPreNotice"), source.indexOf("async function migrateKokuchiEventState"));
   const reminder = source.slice(source.indexOf("async function sendKokuchiGatheringReminder"), source.indexOf("async function applyGatheringVcUnlock"));
   const reservationReminder = source.slice(source.indexOf("async function sendKokuchiReservationReminder"), source.indexOf("async function processKokuchiReservation"));
@@ -77,7 +78,7 @@ test("processing中のkokuchi通知タイマーはclaim・Discord直前・完了
 });
 
 test("イベントIDなしの旧集合VC設定を新しいkokuchiイベントへ移行フォールバックしない", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const migration = source.slice(source.indexOf("async function migrateKokuchiEventState"), source.indexOf("async function restorePendingGatheringVcPermissions"));
   assert.match(migration, /if \(!hasLegacyCurrentIdentity\) continue/);
   assert.doesNotMatch(migration, /canAdoptLegacyOpenedState/);
@@ -85,7 +86,7 @@ test("イベントIDなしの旧集合VC設定を新しいkokuchiイベントへ
 });
 
 test("immediate and reserved kokuchi pass their own event identity to publication", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const handle = source.slice(source.indexOf("async function handleKokuchi(interaction)"), source.indexOf("async function publishImmediateKokuchi"));
   const process = source.slice(source.indexOf("async function processKokuchiReservation"), source.indexOf("async function resumeKokuchiPostProcessing"));
 
@@ -96,8 +97,8 @@ test("immediate and reserved kokuchi pass their own event identity to publicatio
 });
 
 test("kokuchi prevents a new event while a prior event still owns timed work", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
-  const handle = source.slice(source.indexOf("function hasActiveKokuchiEvent"), source.indexOf("async function publishImmediateKokuchi"));
+  const source = await readBotImplementationSource();
+  const handle = source.slice(source.indexOf("function hasActiveKokuchiEvent"), source.indexOf("async function getKokuchiActionGuard"));
 
   assert.match(handle, /gatheringVcRestorePending === true/);
   assert.match(handle, /kokuchiStatus/);
@@ -106,7 +107,7 @@ test("kokuchi prevents a new event while a prior event still owns timed work", a
 });
 
 test("split cancellation restores pending gathering VC permissions and remove-role classifies each member once", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const close = source.slice(source.indexOf("async function closeSplitWithoutFeedback"), source.indexOf("async function sendClaimedSplitFinishNotice"));
   const remove = source.slice(source.indexOf("async function handleRemoveRole"), source.indexOf("async function handleKokuchiSetting"));
 
@@ -118,7 +119,7 @@ test("split cancellation restores pending gathering VC permissions and remove-ro
 });
 
 test("kokuchi publication keeps only the fixed role mention while the five-minute reminder uses configured role mentions", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const publication = source.slice(source.indexOf("async function publishKokuchi"), source.indexOf("async function scheduleKokuchiReservation"));
   const reminder = source.slice(source.indexOf("async function sendKokuchiGatheringReminder"), source.indexOf("async function applyGatheringVcUnlock"));
   const message = source.slice(source.indexOf("function formatKokuchiMessage"), source.indexOf("function formatSplitStartAnnouncement"));

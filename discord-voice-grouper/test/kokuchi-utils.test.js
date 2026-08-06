@@ -1,3 +1,4 @@
+import { readBotImplementationSource } from "./source-under-test.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -25,7 +26,6 @@ test("集合VCの開放時刻は/kokuchi実行日のJST指定時刻を正しく�
     "2026-01-02T11:40:00.000Z",
   );
 });
-
 test("環境変数の集合VC設定は/kokuchiのスケジュール保存後も維持する", () => {
   const merged = mergeGuildSettingsWithEnvironmentDefaults(
     { gatheringVoiceChannelId: "environment-voice" },
@@ -166,7 +166,7 @@ test("only the matching opened kokuchi event and split session may create restor
 });
 
 test("集合VCは分割直後に拒否し、ロール解除後または再起動復元で復元する", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const close = source.slice(source.indexOf("async function closeGatheringVcAfterSplit"), source.indexOf("async function setGatheringVcConnectPermission"));
 
   assert.match(close, /canConnect: false/);
@@ -241,7 +241,7 @@ test("終了お礼は途中参加を含むユニーク参加人数を表示で�
 });
 
 test("/remove role marks removed temporary-role grants as removed", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const handler = source.slice(source.indexOf("async function handleRemoveRole"), source.indexOf("async function handleKokuchiSetting"));
 
   assert.match(handler, /VoiceParticipantRoleGrant\.updateMany/);
@@ -250,7 +250,7 @@ test("/remove role marks removed temporary-role grants as removed", async () => 
 });
 
 test("role-removal wait defaults are 150 minutes and explicit saved values are preserved", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const env = await readFile(new URL("../.env.example", import.meta.url), "utf8");
   const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
   const commands = await readFile(new URL("../src/commands.js", import.meta.url), "utf8");

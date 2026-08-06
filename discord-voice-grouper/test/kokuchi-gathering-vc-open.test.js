@@ -1,3 +1,4 @@
+import { readBotImplementationSource } from "./source-under-test.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
@@ -21,7 +22,6 @@ test("DB preparation failure prevents the Discord gathering-VC edit", async () =
   assert.equal(result.status, "not_prepared");
   assert.equal(discordCalls, 0);
 });
-
 test("a non-single DB match prevents the Discord gathering-VC edit", async () => {
   let discordCalls = 0;
   const result = await runGatheringVcOpenTransaction({
@@ -178,7 +178,7 @@ test("restoring the same snapshot is idempotent and verifies an empty patch befo
 });
 
 test("the bot integration persists the recovery record before Discord and separates compensation from finalization", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const open = source.slice(source.indexOf("async function setGatheringVcConnectPermission"), source.indexOf("async function compensateGatheringVcCloseAfterPersistenceMismatch"));
 
   assert.match(open, /runGatheringVcOpenTransaction/);
@@ -196,7 +196,7 @@ test("the bot integration persists the recovery record before Discord and separa
 });
 
 test("post-processing and cancellation completion preserve snapshot references while restoration is blocking", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const resume = source.slice(source.indexOf("async function resumeKokuchiPostProcessing"), source.indexOf("function createKokuchiCancellationComponents"));
   const cancellation = source.slice(source.indexOf("async function completeKokuchiCancellation"), source.indexOf("async function restoreKokuchiReservations"));
 
