@@ -1,3 +1,4 @@
+import { readBotImplementationSource } from "./source-under-test.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
@@ -11,7 +12,6 @@ test("退出予定はサーバー・利用者単位で一意に永続化し、�
   assert.deepEqual(VoiceExitSchedule.schema.path("status").enumValues, ["scheduled", "executing"]);
   assert.equal(VoiceExitNoticeDeletion.schema.path("deleteAt").instance, "Date");
 });
-
 test("新規の退出予定保存も通常オブジェクトを返す", async () => {
   const store = await readFile(new URL("../src/voice-exit-schedule-store.js", import.meta.url), "utf8");
   assert.match(store, /const created = await VoiceExitSchedule\.create\([\s\S]*?return created\.toObject\(\);/);
@@ -59,7 +59,7 @@ test("VC外では有効なscheduled予定のキャンセルメニューだけを
 });
 
 test("退出予定通知の保持設定は未設定でも「残す」と表示する", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   assert.match(source, /voiceExitScheduleKeepMessage !== false \? "はい" : "いいえ"/);
   assert.match(source, /category、notify_role、exit_schedule_keep_message のいずれかを指定してください。/);
 });

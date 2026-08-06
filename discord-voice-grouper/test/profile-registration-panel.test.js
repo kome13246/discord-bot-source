@@ -1,3 +1,4 @@
+import { readBotImplementationSource } from "./source-under-test.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
@@ -49,7 +50,6 @@ test("profile registration panel payload has the specified text, button, and no 
   assert.equal(payload.components[0].components[0].data.label, "プロフィールを登録・編集");
   assert.deepEqual(payload.allowedMentions, { parse: [] });
 });
-
 test("panel replacement saves the new state before deleting the old panel", async () => {
   const events = [];
   const messages = new Map();
@@ -205,7 +205,10 @@ test("a debounced request resolves the superseded request and moves only once", 
 });
 
 test("bot integration shares the setup payload, restores modal values, and ignores unsafe message triggers", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = [
+    await readBotImplementationSource(),
+    await readFile(new URL("../src/features/profile.js", import.meta.url), "utf8"),
+  ].join("\n");
   assert.match(source, /interaction\.reply\(buildProfileRegistrationPanelPayload\(\)\)/);
   assert.match(source, /const message = await interaction\.fetchReply\(\);[\s\S]*?saveProfileRegistrationPanel\(\{[\s\S]*?messageId: message\.id/);
   assert.match(source, /UserProfile\.findOne\(\{ guildId: interaction\.guildId, userId: interaction\.user\.id \}\)\.lean\(\)/);

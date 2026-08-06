@@ -1,3 +1,4 @@
+import { readBotImplementationSource } from "./source-under-test.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -12,9 +13,8 @@ test("/kokuchi と /setting splitvc は旧話題オプションを登録しな�
   assert.equal(kokuchi.options?.some((option) => option.name === "send_topic"), false);
   assert.equal(splitvc?.options?.some((option) => option.name === "post_split_wadai_channel"), false);
 });
-
 test("子VC話題ボタンとフォーム転送は指定された表示・通知制御を使う", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
 
   assert.match(source, /const SPLIT_RANDOM_TOPIC = "split_random_topic"/);
   assert.match(source, /\$\{SPLIT_RANDOM_TOPIC\}:\$\{childChannel\.id\}/);
@@ -28,7 +28,7 @@ test("子VC話題ボタンとフォーム転送は指定された表示・通知
 });
 
 test("/kokuchi は話題を抽選・保存せず、告知文に話題を含めない", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
   const kokuchiStart = source.indexOf("async function handleKokuchi");
   const kokuchiEnd = source.indexOf("async function restoreGatheringVcUnlockSchedules");
   const kokuchiSource = source.slice(kokuchiStart, kokuchiEnd);
@@ -39,7 +39,7 @@ test("/kokuchi は話題を抽選・保存せず、告知文に話題を含め�
 });
 
 test("子VCの話題パネルは追加メンバーの転送前に設置する", async () => {
-  const source = await readFile(new URL("../src/bot.js", import.meta.url), "utf8");
+  const source = await readBotImplementationSource();
 
   assert.match(
     source,
