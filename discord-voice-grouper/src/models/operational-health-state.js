@@ -22,6 +22,13 @@ const schema = new mongoose.Schema({
     default: "unknown",
   },
   lastSnapshotError: { type: String, default: null },
+  lastBoardPublishStatus: {
+    type: String,
+    enum: ["success", "partial", "failed", "unknown"],
+    default: "unknown",
+  },
+  lastBoardPublishAt: { type: Date, default: null },
+  lastBoardPublishError: { type: String, default: null },
   lastRecoveryFailureAt: { type: Date, default: null },
   lastRecoveryFailureAction: { type: String, default: null },
   lastRecoveryFailureReason: { type: String, default: null },

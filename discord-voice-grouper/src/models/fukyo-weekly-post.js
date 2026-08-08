@@ -17,6 +17,8 @@ const schema = new mongoose.Schema(
 );
 
 schema.index({ guildId: 1, weekKey: 1 }, { unique: true });
+schema.index({ guildId: 1, createdAt: -1 });
+schema.index({ finishedAt: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60, partialFilterExpression: { status: { $in: ["completed", "skipped", "failed"] } } });
 
 export const FukyoWeeklyPost = mongoose.models.FukyoWeeklyPost
   ?? mongoose.model("FukyoWeeklyPost", schema);

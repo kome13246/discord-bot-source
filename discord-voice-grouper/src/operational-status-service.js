@@ -31,6 +31,14 @@ const OBSERVED_SPLIT_STATUSES = [...ACTIVE_SPLIT_STATUSES, "failed", "cleanup_re
 const ACTIVE_ACTION_STATUSES = ["pending", "running"];
 const EXPIRED_PROMPT_STATES = ["active", "open", "pending", "processing", "evaluating", "role_granting", "failed"];
 const MODULE_KEYS = ["system", "kokuchi", "splitvc", "recruitment", "automation", "panels", "voice", "vcDm"];
+const INCIDENT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_STATUS_RECORDS = 100;
+const STATUS_QUERY_TIMEOUT_MS = 5_000;
+const SNAPSHOT_BUILD_TIMEOUT_MS = 20_000;
+const PANEL_PRESENT_CACHE_MS = 5 * 60_000;
+const PANEL_MISSING_CACHE_MS = 60_000;
+const PANEL_UNKNOWN_CACHE_MS = 30_000;
+const PANEL_VERIFY_CONCURRENCY = 5;
 
 const defaultModels = {
   BumpReminder,
@@ -65,37 +73,108 @@ function ageMs(value, now = Date.now()) {
   return date ? Math.max(0, now - date.getTime()) : null;
 }
 
+function formatJstDateTime(value) {
+  const date = asDate(value);
+  if (!date) return "日時不明";
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 async function resolveQuery(query) {
   if (!query) return [];
   return typeof query.lean === "function" ? query.lean() : query;
 }
 
-async function readMany(model, filter = {}, sort = null) {
+function withTimeout(value, timeoutMs, label) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(value),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      timer.unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function readMany(model, filter = {}, sort = null, limit = MAX_STATUS_RECORDS) {
   if (!model?.find) return [];
   let query = model.find(filter);
   if (sort && typeof query.sort === "function") query = query.sort(sort);
-  return (await resolveQuery(query)) ?? [];
+  if (limit && typeof query.limit === "function") query = query.limit(limit);
+  if (typeof query.maxTimeMS === "function") query = query.maxTimeMS(STATUS_QUERY_TIMEOUT_MS);
+  return (await withTimeout(resolveQuery(query), STATUS_QUERY_TIMEOUT_MS + 1_000, "Operational status query")) ?? [];
 }
 
 async function readOne(model, filter = {}) {
   if (!model?.findOne) return null;
-  return resolveQuery(model.findOne(filter));
+  let query = model.findOne(filter);
+  if (typeof query?.maxTimeMS === "function") query = query.maxTimeMS(STATUS_QUERY_TIMEOUT_MS);
+  return withTimeout(resolveQuery(query), STATUS_QUERY_TIMEOUT_MS + 1_000, "Operational status query");
 }
 
-async function verifyPanelMessage(guild, channelId, messageId) {
+async function readCount(model, filter = {}) {
+  if (!model?.countDocuments) return null;
+  let query = model.countDocuments(filter);
+  if (typeof query?.maxTimeMS === "function") query = query.maxTimeMS(STATUS_QUERY_TIMEOUT_MS);
+  return withTimeout(query, STATUS_QUERY_TIMEOUT_MS + 1_000, "Operational status count");
+}
+
+function isDiscordMissingError(error) {
+  return [10003, 10008].includes(Number(error?.code)) || error?.status === 404;
+}
+
+async function verifyPanelMessage(guild, channelId, messageId, cache = null) {
   if (!guild?.channels?.fetch || !channelId || !messageId) return { checked: false, exists: false, channelId, messageId };
+  const cacheKey = `${guild.id}:${channelId}:${messageId}`;
+  const cached = cache?.get(cacheKey);
+  if (cached?.expiresAt > Date.now()) return cached.value;
+  let result;
   try {
-    const channel = guild.channels.cache?.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
-    if (!channel?.messages?.fetch) return { checked: true, exists: false, channelId, messageId };
-    const message = channel.messages.cache?.get(messageId) ?? await channel.messages.fetch(messageId).catch(() => null);
-    return { checked: true, exists: Boolean(message), channelId, messageId };
+    let channel = guild.channels.cache?.get(channelId) ?? null;
+    if (!channel) channel = await guild.channels.fetch(channelId);
+    if (!channel?.messages?.fetch) {
+      result = { checked: true, exists: false, status: "missing", channelId, messageId };
+    } else {
+      let message = channel.messages.cache?.get(messageId) ?? null;
+      if (!message) message = await channel.messages.fetch(messageId);
+      result = { checked: true, exists: Boolean(message), status: message ? "present" : "missing", channelId, messageId };
+    }
   } catch (error) {
-    return { checked: true, exists: false, channelId, messageId, error: truncate(error?.message ?? error) };
+    result = isDiscordMissingError(error)
+      ? { checked: true, exists: false, status: "missing", channelId, messageId }
+      : { checked: true, exists: null, status: "unknown", channelId, messageId, error: truncate(error?.message ?? error) };
   }
+  if (cache) {
+    const ttl = result.status === "present" ? PANEL_PRESENT_CACHE_MS : result.status === "missing" ? PANEL_MISSING_CACHE_MS : PANEL_UNKNOWN_CACHE_MS;
+    if (cache.size >= 2_000) cache.delete(cache.keys().next().value);
+    cache.set(cacheKey, { value: result, expiresAt: Date.now() + ttl });
+  }
+  return result;
 }
 
-function issue(code, message, blocking = false, severity = null) {
-  return { code, message, blocking, severity: severity ?? (blocking ? "error" : "warning") };
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
+function issue(code, message, blocking = false, severity = null, rootCauseId = null) {
+  return { code, message, blocking, severity: severity ?? (blocking ? "error" : "warning"), ...(rootCauseId ? { rootCauseId } : {}) };
 }
 
 function makeModule({ key, label, summary, details = {}, issues = [], unknown = false, disabled = false, inProgress = false, availableActions = [] }) {
@@ -129,7 +208,7 @@ async function getDatabaseStatus(getDatabaseStatusOverride) {
   if (mongoose.connection.readyState !== 1) return { status: "disconnected", error: "MongoDB connection is not ready" };
   try {
     const admin = mongoose.connection.db?.admin?.();
-    if (admin?.ping) await admin.ping();
+    if (admin?.ping) await withTimeout(admin.ping(), STATUS_QUERY_TIMEOUT_MS, "MongoDB ping");
     return { status: "connected", error: null };
   } catch (error) {
     return { status: "degraded", error: truncate(error?.message ?? error) };
@@ -140,7 +219,7 @@ function isReady(client) {
   return Boolean(client?.isReady?.() ?? client?.readyAt);
 }
 
-async function collectSnapshot(guild, dependencies) {
+async function collectSnapshot(guild, dependencies, options = {}) {
   const {
     getGuildSettings,
     client,
@@ -149,19 +228,34 @@ async function collectSnapshot(guild, dependencies) {
     getVcDmStatus,
     models,
     getDatabaseStatus: getDatabaseStatusOverride,
+    panelPresenceCache,
   } = dependencies;
   const db = { ...(await getDatabaseStatus(getDatabaseStatusOverride)) };
   const now = new Date();
-  const health = db.status === "disconnected" ? null : await readOne(models.OperationalHealthState, { guildId: guild.id }).catch(() => null);
-  const board = db.status === "disconnected" ? null : await readOne(models.OperationalStatusBoard, { guildId: guild.id }).catch(() => null);
+  let healthReadError = null;
+  let boardReadError = null;
+  const health = db.status === "disconnected" ? null : await readOne(models.OperationalHealthState, { guildId: guild.id }).catch((error) => {
+    healthReadError = truncate(error?.message ?? error);
+    return null;
+  });
+  const board = db.status === "disconnected" ? null : await readOne(models.OperationalStatusBoard, { guildId: guild.id }).catch((error) => {
+    boardReadError = truncate(error?.message ?? error);
+    return null;
+  });
   const startup = getStartupState() ?? {};
   const systemIssues = [];
   if (!isReady(client)) systemIssues.push(issue("discord_not_ready", "Discord接続がreadyではありません。", true));
   if (db.status !== "connected") systemIssues.push(issue("database_unavailable", `MongoDB状態: ${db.status}${db.error ? ` (${db.error})` : ""}`, true));
+  if (healthReadError) systemIssues.push(issue("health_state_read_failed", `運用ヘルス状態を取得できません: ${healthReadError}`, true));
+  if (boardReadError) systemIssues.push(issue("board_state_read_failed", `ステータスボード設定を取得できません: ${boardReadError}`, true));
   if (startup.restoreFailed || ["failed", "partial"].includes(health?.startupRestoreStatus)) {
     systemIssues.push(issue("startup_restore_failed", "起動時復元処理に失敗または一部失敗があります。", false));
   }
-  if (board?.lastSuccessfulRefreshAt && ageMs(board.lastSuccessfulRefreshAt, now.getTime()) > 2 * 60 * 60 * 1000) {
+  const boardPublishError = board?.lastRefreshError ?? health?.lastBoardPublishError ?? null;
+  if (!options.suppressBoardDeliveryIssues && boardPublishError) {
+    systemIssues.push(issue("board_refresh_failed", `ステータスボードの前回更新に失敗しています: ${truncate(boardPublishError, 300)}`, false));
+  }
+  if (!options.suppressBoardDeliveryIssues && board?.lastSuccessfulRefreshAt && ageMs(board.lastSuccessfulRefreshAt, now.getTime()) > 2 * 60 * 60 * 1000) {
     systemIssues.push(issue("board_refresh_stale", "ステータスボードの最終成功更新が2時間を超えています。", false));
   }
   const system = makeModule({
@@ -177,6 +271,9 @@ async function collectSnapshot(guild, dependencies) {
       startupRestoreFailures: health?.startupRestoreFailures ?? [],
       lastDatabaseCheckAt: health?.lastDatabaseCheckAt ?? null,
       statusBoard: board ? { channelId: board.channelId, messageId: board.messageId, lastSuccessfulRefreshAt: board.lastSuccessfulRefreshAt, lastRefreshError: board.lastRefreshError } : null,
+      boardPublishStatus: health?.lastBoardPublishStatus ?? null,
+      boardPublishAt: health?.lastBoardPublishAt ?? null,
+      boardPublishError: health?.lastBoardPublishError ?? null,
       lastSnapshotAt: now.toISOString(),
       attentionCount: systemIssues.filter((item) => item.blocking).length,
       recommendationCount: systemIssues.filter((item) => !item.blocking).length,
@@ -195,10 +292,11 @@ async function collectSnapshot(guild, dependencies) {
     settingsReadError = truncate(error?.message ?? error);
     const settingsIssue = issue("settings_unavailable", `GuildSettingsを取得できません: ${truncate(error?.message ?? error)}`, true);
     systemIssues.push(settingsIssue);
-    system.issues.push(settingsIssue);
     system.blocking = true;
     system.severity = "error";
     system.summary = truncate(`${system.summary} ${settingsIssue.message}`);
+    system.details.attentionCount = system.issues.filter((item) => item.blocking).length;
+    system.details.recommendationCount = system.issues.filter((item) => !item.blocking).length;
   }
 
   const modules = { system };
@@ -215,7 +313,7 @@ async function collectSnapshot(guild, dependencies) {
         { gatheringVcRestorePending: true },
         { gatheringVcRestoreStatus: { $in: GATHERING_VC_RESTORE_BLOCKING_STATUS_VALUES } },
       ],
-    }, { updatedAt: -1 });
+    }, { updatedAt: -1 }, 50);
     const current = currentId
       ? reservations.find((item) => item.reservationId === currentId)
       : reservations.length === 1 ? reservations[0] : null;
@@ -270,7 +368,7 @@ async function collectSnapshot(guild, dependencies) {
       const nextRetryAt = asDate(states.restoreNextRetryAt);
       const restoreMessage = [
         restoreBlock.message,
-        nextRetryAt ? `次回復元予定: ${nextRetryAt.toLocaleString("ja-JP")}` : null,
+        nextRetryAt ? `次回復元予定: ${formatJstDateTime(nextRetryAt)}` : null,
         states.restoreLastError ? `最終復元エラー: ${truncate(states.restoreLastError, 240)}` : null,
       ].filter(Boolean).join(" ");
       kokuchiIssues.push(issue(restoreBlock.code, restoreMessage, restoreBlock.severity === "error", restoreBlock.severity));
@@ -301,7 +399,7 @@ async function collectSnapshot(guild, dependencies) {
     modules.kokuchi = makeModule({
       key: "kokuchi",
       label: "kokuchi",
-      summary: current ? `${current.status} / ${current.eventAt ? new Date(current.eventAt).toLocaleString("ja-JP") : "開催日時未設定"}` : ambiguousCandidates ? `複数の開催回候補 ${reservations.length}件。候補選択が必要です。` : settings?.kokuchiEventId ? "現在開催回の孤立状態を検出" : "待機中です。",
+      summary: current ? `${current.status} / ${current.eventAt ? formatJstDateTime(current.eventAt) : "開催日時未設定"}` : ambiguousCandidates ? `複数の開催回候補 ${reservations.length}件。候補選択が必要です。` : settings?.kokuchiEventId ? "現在開催回の孤立状態を検出" : "待機中です。",
       details: {
         currentEventId: settings?.kokuchiEventId ?? current?.reservationId ?? null,
         eventAt: settings?.kokuchiEventAt ?? current?.eventAt ?? null,
@@ -353,7 +451,14 @@ async function collectSnapshot(guild, dependencies) {
 
   try {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
-    const sessions = await readMany(models.SplitProcessSession, { guildId: guild.id, status: { $in: OBSERVED_SPLIT_STATUSES } }, { updatedAt: -1 });
+    const incidentCutoff = new Date(now.getTime() - INCIDENT_LOOKBACK_MS);
+    const sessions = await readMany(models.SplitProcessSession, {
+      guildId: guild.id,
+      $or: [
+        { status: { $in: ACTIVE_SPLIT_STATUSES } },
+        { status: { $in: ["failed", "cleanup_required"] }, updatedAt: { $gte: incidentCutoff } },
+      ],
+    }, { updatedAt: -1 });
     const activeSessions = sessions.filter((session) => ACTIVE_SPLIT_STATUSES.includes(session.status));
     const issues = [];
     const stale = activeSessions.filter((session) => ageMs(session.waitingMonitorHeartbeatAt ?? session.updatedAt) > 10 * 60 * 1000 && ["active", "cleaning_up", "role_remove_pending"].includes(session.status));
@@ -368,7 +473,7 @@ async function collectSnapshot(guild, dependencies) {
         : failed.length ? `進行中のセッションはありません。失敗・要確認 ${failed.length}件。` : "進行中のセッションはありません。",
       details: { sessions: sessions.map((session) => ({ sessionId: session.sessionId, status: session.status, phase: session.phase, participantCount: session.participantMemberIds?.length ?? 0, groupCount: session.groupSnapshots?.length ?? 0, waitingMonitorStatus: session.waitingMonitorStatus, waitingMonitorHeartbeatAt: session.waitingMonitorHeartbeatAt, finishNoticeAt: session.finishNoticeAt, roleRemovalCompleted: session.roleRemovalCompleted })) },
       issues,
-      disabled: sessions.length === 0,
+      disabled: false,
       inProgress: activeSessions.length > 0,
     });
   } catch (error) {
@@ -381,9 +486,9 @@ async function collectSnapshot(guild, dependencies) {
     const prompt = settings?.callWaitPrompt ?? null;
     const otebo = Object.values(settings?.oteboRecruitments ?? {}).filter(Boolean);
     const panel = await readOne(models.OteboRecruitmentPanel, { guildId: guild.id });
-    const panelPresence = panel ? await verifyPanelMessage(guild, panel.channelId, panel.messageId) : null;
+    const panelPresence = panel ? await verifyPanelMessage(guild, panel.channelId, panel.messageId, panelPresenceCache) : null;
     const currentGeneration = await readOne(models.CallWaitRoleGeneration, { guildId: guild.id, status: { $in: ["scheduled", "executing"] } });
-    const failedGenerations = await readMany(models.CallWaitRoleGeneration, { guildId: guild.id, status: { $in: ["failed", "superseded"] } }, { updatedAt: -1 });
+    const failedGenerations = await readMany(models.CallWaitRoleGeneration, { guildId: guild.id, status: "failed", updatedAt: { $gte: new Date(now.getTime() - INCIDENT_LOOKBACK_MS) } }, { updatedAt: -1 }, 20);
     const activeButton = otebo.find((item) => item.sourceType === "button" && ["creating", "active", "closing", "merging", "auto_cancel_processing", "success_processing", "success_notified", "cleanup_pending", "published_unconfirmed", "voice_started_notified"].includes(item.status));
     const panelHiddenReasons = [];
     if (settings?.callWaitEnabled !== true) panelHiddenReasons.push("call_wait_disabled");
@@ -414,8 +519,9 @@ async function collectSnapshot(guild, dependencies) {
     if (uncertainSlot) issues.push(issue("otebo_slot_uncertain", `ボタン募集スロットが${slotStatus}状態です。自動再送は行いません。`, true));
     const actions = expiredPrompt || expiredOtebo.length ? ["close_expired_recruitments"] : [];
     if (!panel && settings?.callWaitNoticeChannelId && panelHiddenReasons.length === 0) issues.push(issue("otebo_panel_state_missing", "ボタン募集パネルの保存情報がありません。", false));
-    if (panel && panelPresence?.checked && !panelPresence.exists && panelHiddenReasons.length === 0) issues.push(issue("otebo_panel_message_missing", "ボタン募集パネルのDiscordメッセージが見つかりません。", false));
-    if (failedGenerations.length) issues.push(issue("call_wait_role_generation_failed", `call_wait_role世代処理の失敗・旧世代が${failedGenerations.length}件あります。`, true));
+    if (panel && panelPresence?.checked && panelPresence.exists === false && panelHiddenReasons.length === 0) issues.push(issue("otebo_panel_message_missing", "ボタン募集パネルのDiscordメッセージが見つかりません。", false));
+    if (panelPresence?.status === "unknown") issues.push(issue("otebo_panel_check_failed", `ボタン募集パネルを確認できません: ${panelPresence.error ?? "Discord API error"}`, false));
+    if (failedGenerations.length) issues.push(issue("call_wait_role_generation_failed", `直近7日間のcall_wait_role世代処理の失敗が${failedGenerations.length}件あります。`, true));
     modules.recruitment = makeModule({
       key: "recruitment",
       label: "定時募集・ボタン募集",
@@ -451,25 +557,39 @@ async function collectSnapshot(guild, dependencies) {
   try {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
     const themes = await readOne(models.FukyoThemeState, { guildId: guild.id });
-    const weekly = await readMany(models.FukyoWeeklyPost, { guildId: guild.id }, { createdAt: -1 });
-    const bump = await readMany(models.BumpReminder, { guildId: guild.id }, { dueAt: 1 });
-    const scheduledActions = await readMany(models.ScheduledAction, { guildId: guild.id, status: { $in: [...ACTIVE_ACTION_STATUSES, "failed"] } }, { executeAt: 1 });
+    const weekly = await readMany(models.FukyoWeeklyPost, { guildId: guild.id }, { createdAt: -1 }, 8);
+    const bump = await readMany(models.BumpReminder, { guildId: guild.id, dueAt: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) } }, { dueAt: 1 });
+    const failedActionFilter = { guildId: guild.id, status: "failed", updatedAt: { $gte: new Date(now.getTime() - INCIDENT_LOOKBACK_MS) } };
+    const [activeActions, failedActions, pendingActionCount, runningActionCount, failedActionCount] = await Promise.all([
+      readMany(models.ScheduledAction, { guildId: guild.id, status: { $in: ACTIVE_ACTION_STATUSES } }, { executeAt: 1 }),
+      readMany(models.ScheduledAction, failedActionFilter, { updatedAt: -1 }, 20),
+      readCount(models.ScheduledAction, { guildId: guild.id, status: "pending" }),
+      readCount(models.ScheduledAction, { guildId: guild.id, status: "running" }),
+      readCount(models.ScheduledAction, failedActionFilter),
+    ]);
+    const scheduledActionCounts = {
+      pending: pendingActionCount ?? activeActions.filter((action) => action.status === "pending").length,
+      running: runningActionCount ?? activeActions.filter((action) => action.status === "running").length,
+      failed: failedActionCount ?? failedActions.length,
+    };
+    const scheduledActionCount = scheduledActionCounts.pending + scheduledActionCounts.running + scheduledActionCounts.failed;
     const enabled = settings?.fukyoWeeklyThemeEnabled === true;
     const issues = [];
     if (enabled && !settings?.fukyoThemeChannelId) issues.push(issue("fukyo_channel_missing", "布教テーマ自動投稿は有効ですが送信先がありません。", true));
-    const failedActions = scheduledActions.filter((action) => action.status === "failed");
-    const failedWeekly = weekly.filter((item) => item.status === "failed");
-    if (failedActions.length) issues.push(issue("scheduled_action_failed", `永続スケジュール処理の失敗が${failedActions.length}件あります。`, true));
-    if (failedWeekly.length) issues.push(issue("fukyo_weekly_failed", `Fukyo weekly post failures: ${failedWeekly.length}`, true));
     const recentWeekly = weekly[0] ?? null;
+    const failedWeekly = recentWeekly?.status === "failed" ? [recentWeekly] : [];
+    if (scheduledActionCounts.failed) issues.push(issue("scheduled_action_failed", `永続スケジュール処理の失敗が${scheduledActionCounts.failed}件あります。`, true));
+    if (failedWeekly.length) issues.push(issue("fukyo_weekly_failed", `Fukyo weekly post failures: ${failedWeekly.length}`, true));
+    const overdueBump = bump.filter((item) => ageMs(item.dueAt, now.getTime()) > 5 * 60 * 1000);
+    if (overdueBump.length) issues.push(issue("bump_reminder_overdue", `期限を5分以上過ぎたBumpリマインダーが${overdueBump.length}件あります。`, true));
     modules.automation = makeModule({
       key: "automation",
       label: "自動投稿",
-      summary: enabled ? `布教テーマ有効 / テーマ ${themes?.usedThemeIds?.length ? "利用履歴あり" : "未使用"} / 永続処理 ${scheduledActions.length}件` : bump.length ? `Bumpリマインダー ${bump.length}件 / 永続処理 ${scheduledActions.length}件` : scheduledActions.length ? `永続スケジュール処理 ${scheduledActions.length}件` : "自動投稿は未設定です。",
-      details: { fukyoEnabled: enabled, fukyoChannelId: settings?.fukyoThemeChannelId ?? null, availableThemeCount: settings?.fukyoThemes?.length ?? 0, lastWeeklyPost: recentWeekly ? { status: recentWeekly.status, weekKey: recentWeekly.weekKey, finishedAt: recentWeekly.finishedAt, reason: recentWeekly.reason } : null, bumpReminderCount: bump.length, nextBumpAt: bump[0]?.dueAt ?? null, scheduledActionCounts: { pending: scheduledActions.filter((action) => action.status === "pending").length, running: scheduledActions.filter((action) => action.status === "running").length, failed: failedActions.length }, nextScheduledActionAt: scheduledActions.find((action) => ACTIVE_ACTION_STATUSES.includes(action.status))?.executeAt ?? null, failedScheduledActions: failedActions.slice(0, 20).map((action) => ({ actionKey: action.actionKey, type: action.type, executeAt: action.executeAt, lastError: action.lastError })) },
+      summary: enabled ? `布教テーマ有効 / テーマ ${themes?.usedThemeIds?.length ? "利用履歴あり" : "未使用"} / 永続処理 ${scheduledActionCount}件` : bump.length ? `Bumpリマインダー ${bump.length}件 / 永続処理 ${scheduledActionCount}件` : scheduledActionCount ? `永続スケジュール処理 ${scheduledActionCount}件` : "自動投稿は未設定です。",
+      details: { fukyoEnabled: enabled, fukyoChannelId: settings?.fukyoThemeChannelId ?? null, availableThemeCount: settings?.fukyoThemes?.length ?? 0, lastWeeklyPost: recentWeekly ? { status: recentWeekly.status, weekKey: recentWeekly.weekKey, finishedAt: recentWeekly.finishedAt, reason: recentWeekly.reason } : null, bumpReminderCount: bump.length, nextBumpAt: bump[0]?.dueAt ?? null, scheduledActionCounts, nextScheduledActionAt: activeActions[0]?.executeAt ?? null, failedScheduledActions: failedActions.map((action) => ({ actionKey: action.actionKey, type: action.type, executeAt: action.executeAt, lastError: action.lastError })) },
       issues,
-      disabled: !enabled && bump.length === 0 && scheduledActions.length === 0,
-      inProgress: weekly.some((item) => item.status === "executing") || bump.length > 0 || scheduledActions.some((action) => ACTIVE_ACTION_STATUSES.includes(action.status)),
+      disabled: !enabled && bump.length === 0 && scheduledActionCount === 0,
+      inProgress: weekly.some((item) => item.status === "executing") || bump.length > 0 || scheduledActionCounts.pending > 0 || scheduledActionCounts.running > 0,
     });
   } catch (error) {
     unknownModule = true;
@@ -479,23 +599,32 @@ async function collectSnapshot(guild, dependencies) {
   try {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
     const profilePanel = await readOne(models.ProfileRegistrationPanel, { guildId: guild.id });
-    const vcPanels = await readMany(models.VoiceChannelControl, { guildId: guild.id });
-    const profilePresence = profilePanel ? await verifyPanelMessage(guild, profilePanel.channelId, profilePanel.messageId) : null;
-    const vcPresence = await Promise.all(vcPanels.map((panel) => verifyPanelMessage(guild, panel.channelId, panel.panelMessageId)));
+    const vcPanels = await readMany(models.VoiceChannelControl, { guildId: guild.id }, null, 100);
+    const vcPanelCount = await readCount(models.VoiceChannelControl, { guildId: guild.id }).catch(() => null);
+    const totalVcPanels = vcPanelCount ?? vcPanels.length;
+    const profilePresence = profilePanel ? await verifyPanelMessage(guild, profilePanel.channelId, profilePanel.messageId, panelPresenceCache) : null;
+    const vcPresence = await mapWithConcurrency(
+      vcPanels,
+      PANEL_VERIFY_CONCURRENCY,
+      (panel) => verifyPanelMessage(guild, panel.channelId, panel.panelMessageId, panelPresenceCache),
+    );
     const issues = [];
     if (settings?.profileIntroductionChannelId && !profilePanel) issues.push(issue("profile_panel_missing", "プロフィール登録パネルの保存情報がありません。", false));
-    if (settings?.vcControlCategoryId && vcPanels.length === 0) issues.push(issue("vc_panel_missing", "VCコントロールパネルの保存情報がありません。", false));
-    if (profilePresence?.checked && !profilePresence.exists) issues.push(issue("profile_panel_message_missing", "プロフィール登録パネルのDiscordメッセージを確認できません。", false));
-    const missingVcPanels = vcPresence.filter((presence) => presence.checked && !presence.exists);
+    if (settings?.vcControlCategoryId && totalVcPanels === 0) issues.push(issue("vc_panel_missing", "VCコントロールパネルの保存情報がありません。", false));
+    if (profilePresence?.checked && profilePresence.exists === false) issues.push(issue("profile_panel_message_missing", "プロフィール登録パネルのDiscordメッセージを確認できません。", false));
+    const missingVcPanels = vcPresence.filter((presence) => presence.checked && presence.exists === false);
     if (missingVcPanels.length) issues.push(issue("vc_panel_message_missing", `VCコントロールパネルのDiscordメッセージを${missingVcPanels.length}件確認できません。`, false));
+    const unknownPanelChecks = [profilePresence, ...vcPresence].filter((presence) => presence?.status === "unknown");
+    if (unknownPanelChecks.length) issues.push(issue("panel_check_failed", `Discord APIの一時エラーにより常設パネルを${unknownPanelChecks.length}件確認できません。`, false));
+    const repairableIssueCodes = new Set(["profile_panel_missing", "vc_panel_missing", "profile_panel_message_missing", "vc_panel_message_missing"]);
     modules.panels = makeModule({
       key: "panels",
       label: "常設パネル",
-      summary: `プロフィール ${profilePanel ? "1" : "0"}件 / VCコントロール ${vcPanels.length}件`,
-      details: { profile: profilePanel ? { channelId: profilePanel.channelId, messageId: profilePanel.messageId, updatedAt: profilePanel.updatedAt, discordMessageExists: profilePresence?.checked ? profilePresence.exists : null } : null, voiceControls: vcPanels.map((panel, index) => ({ channelId: panel.channelId, messageId: panel.panelMessageId, updatedAt: panel.updatedAt, discordMessageExists: vcPresence[index]?.checked ? vcPresence[index].exists : null })) },
+      summary: `プロフィール ${profilePanel ? "1" : "0"}件 / VCコントロール ${totalVcPanels}件`,
+      details: { profile: profilePanel ? { channelId: profilePanel.channelId, messageId: profilePanel.messageId, updatedAt: profilePanel.updatedAt, discordMessageExists: profilePresence?.checked ? profilePresence.exists : null } : null, voiceControlCount: totalVcPanels, verifiedVoiceControlCount: vcPanels.length, verificationTruncated: totalVcPanels > vcPanels.length, voiceControls: vcPanels.map((panel, index) => ({ channelId: panel.channelId, messageId: panel.panelMessageId, updatedAt: panel.updatedAt, discordMessageExists: vcPresence[index]?.checked ? vcPresence[index].exists : null })) },
       issues,
       disabled: !settings?.profileIntroductionChannelId && !settings?.vcControlCategoryId,
-      availableActions: issues.length ? ["reinstall_panels"] : [],
+      availableActions: issues.some((item) => repairableIssueCodes.has(item.code)) ? ["reinstall_panels"] : [],
     });
   } catch (error) {
     unknownModule = true;
@@ -504,16 +633,26 @@ async function collectSnapshot(guild, dependencies) {
 
   try {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
-    const [grants, schedules, sessions] = await Promise.all([
-      readMany(models.VoiceParticipantRoleGrant, { guildId: guild.id, status: { $in: ["active", "removing", "failed"] } }),
+    const [failedGrants, schedules, sessions, activeGrantCount, removingGrantCount, failedGrantCount, scheduleCount] = await Promise.all([
+      readMany(models.VoiceParticipantRoleGrant, { guildId: guild.id, status: "failed" }, { updatedAt: -1 }, 20),
       readMany(models.VoiceExitSchedule, { guildId: guild.id, status: { $in: ["scheduled", "executing"] } }, { scheduledAt: 1 }),
       readMany(models.SplitProcessSession, { guildId: guild.id, status: { $in: OBSERVED_SPLIT_STATUSES } }),
+      readCount(models.VoiceParticipantRoleGrant, { guildId: guild.id, status: "active" }),
+      readCount(models.VoiceParticipantRoleGrant, { guildId: guild.id, status: "removing" }),
+      readCount(models.VoiceParticipantRoleGrant, { guildId: guild.id, status: "failed" }),
+      readCount(models.VoiceExitSchedule, { guildId: guild.id, status: { $in: ["scheduled", "executing"] } }),
     ]);
+    const roleGrantCounts = {
+      active: activeGrantCount ?? 0,
+      removing: removingGrantCount ?? 0,
+      failed: failedGrantCount ?? failedGrants.length,
+    };
+    const totalRoleGrantCount = roleGrantCounts.active + roleGrantCounts.removing + roleGrantCounts.failed;
+    const totalScheduleCount = scheduleCount ?? schedules.length;
     const activeSessions = sessions.filter((session) => ACTIVE_SPLIT_STATUSES.includes(session.status));
-    const failedGrants = grants.filter((grant) => grant.status === "failed");
     const issues = [];
     if (settings?.gatheringVcRestorePending) issues.push(issue("gathering_vc_restore_pending", "集合VC権限の復元待ちです。", true));
-    if (failedGrants.length) issues.push(issue("role_cleanup_failed", `参加者ロール解除失敗が${failedGrants.length}件あります。`, true));
+    if (roleGrantCounts.failed) issues.push(issue("role_cleanup_failed", `参加者ロール解除失敗が${roleGrantCounts.failed}件あります。`, true));
     const activeMonitors = activeSessions.filter((session) => session.waitingMonitorStatus && ["active", "extended", "closing"].includes(session.waitingMonitorStatus));
     const staleMonitors = activeMonitors.filter((session) => ageMs(session.waitingMonitorHeartbeatAt ?? session.updatedAt) > 3 * 60 * 1000);
     if (staleMonitors.length) issues.push(issue("voice_monitor_stale", `VC監視ハートビートが3分以上更新されていないセッションが${staleMonitors.length}件あります。`, true));
@@ -524,13 +663,13 @@ async function collectSnapshot(guild, dependencies) {
     modules.voice = makeModule({
       key: "voice",
       label: "VC・ロール",
-      summary: `退出予定 ${schedules.length}件 / ロール処理 ${grants.length}件 / 復元待ち ${settings?.gatheringVcRestorePending ? "あり" : "なし"}`,
-      details: { gatheringVcRestorePending: settings?.gatheringVcRestorePending === true, hasPermissionSnapshot: Boolean(settings?.gatheringVcPermissionBeforeOpen), roleGrantCounts: { active: grants.filter((grant) => grant.status === "active").length, removing: grants.filter((grant) => grant.status === "removing").length, failed: failedGrants.length }, failedRoleGrants: failedGrants.slice(0, 20).map((grant) => ({ memberId: grant.memberId, roleId: grant.roleId, lastError: grant.lastError })), exitScheduleCount: schedules.length, nextExitScheduleAt: schedules[0]?.scheduledAt ?? null, activeVoiceMonitorCount: activeMonitors.length + inMemoryVoiceMonitors.length, staleVoiceMonitorCount: staleMonitors.length },
+      summary: `退出予定 ${totalScheduleCount}件 / ロール処理 ${totalRoleGrantCount}件 / 復元待ち ${settings?.gatheringVcRestorePending ? "あり" : "なし"}`,
+      details: { gatheringVcRestorePending: settings?.gatheringVcRestorePending === true, hasPermissionSnapshot: Boolean(settings?.gatheringVcPermissionBeforeOpen), roleGrantCounts, failedRoleGrants: failedGrants.map((grant) => ({ memberId: grant.memberId, roleId: grant.roleId, lastError: grant.lastError })), exitScheduleCount: totalScheduleCount, nextExitScheduleAt: schedules[0]?.scheduledAt ?? null, activeVoiceMonitorCount: activeMonitors.length + inMemoryVoiceMonitors.length, staleVoiceMonitorCount: staleMonitors.length },
       issues,
-      disabled: grants.length === 0 && schedules.length === 0 && !settings?.gatheringVcRestorePending,
-      inProgress: grants.length > 0 || schedules.length > 0 || activeSessions.length > 0,
+      disabled: false,
+      inProgress: totalRoleGrantCount > 0 || totalScheduleCount > 0 || activeSessions.length > 0,
       availableActions: [
-        ...(failedGrants.length ? ["remove_participant_roles"] : []),
+        ...(roleGrantCounts.failed ? ["remove_participant_roles"] : []),
       ],
     });
   } catch (error) {
@@ -540,7 +679,7 @@ async function collectSnapshot(guild, dependencies) {
 
   if (getVcDmStatus) {
     try {
-      modules.vcDm = await getVcDmStatus(guild);
+      modules.vcDm = await getVcDmStatus(guild, { settings });
     } catch (error) {
       unknownModule = true;
       modules.vcDm = makeModule({
@@ -554,7 +693,7 @@ async function collectSnapshot(guild, dependencies) {
   }
 
   if (settingsReadFailed) {
-    const settingsIssue = issue("settings_unavailable", `GuildSettings could not be read${settingsReadError ? `: ${settingsReadError}` : ""}`, true);
+    const settingsIssue = issue("settings_unavailable", `GuildSettings could not be read${settingsReadError ? `: ${settingsReadError}` : ""}`, true, null, "settings_unavailable");
     for (const key of ["kokuchi", "recruitment", "automation", "panels", "voice", "vcDm"]) {
       const module = modules[key];
       if (!module) continue;
@@ -566,6 +705,16 @@ async function collectSnapshot(guild, dependencies) {
     unknownModule = true;
   }
   const allIssues = Object.values(modules).flatMap((module) => module.issues ?? []);
+  const uniqueIssues = [...new Map(allIssues.map((item) => {
+    const rootCauseId = item.rootCauseId
+      ?? (["database_unavailable", "health_state_read_failed", "board_state_read_failed"].includes(item.code)
+        || (item.code === "read_failed" && /^MongoDB is /i.test(item.message ?? ""))
+        ? "database_unavailable"
+        : item.code === "settings_unavailable"
+          ? "settings_unavailable"
+          : `${item.code}:${item.message}`);
+    return [rootCauseId, item];
+  })).values()];
   const actions = [...new Set(Object.values(modules).flatMap((module) => module.availableActions ?? []))];
   const snapshotStatus = unknownModule ? "partial" : "success";
   const snapshot = {
@@ -574,8 +723,9 @@ async function collectSnapshot(guild, dependencies) {
     modules,
     system: modules.system,
     issues: allIssues,
-    attentionCount: allIssues.filter((item) => item.blocking).length,
-    recommendationCount: allIssues.filter((item) => !item.blocking).length,
+    attentionCount: uniqueIssues.filter((item) => item.blocking).length,
+    recommendationCount: uniqueIssues.filter((item) => !item.blocking).length,
+    rootCauseCount: uniqueIssues.length,
     availableActions: actions,
   };
   const healthWrite = db.status === "disconnected" ? null : models.OperationalHealthState?.findOneAndUpdate?.(
@@ -589,15 +739,16 @@ async function collectSnapshot(guild, dependencies) {
 
 export function createOperationalStatusService({ getGuildSettings, client, getStartupState, getVoiceMonitorSessions, getVcDmStatus, models: injectedModels = {}, getDatabaseStatus: getDatabaseStatusOverride } = {}) {
   const models = { ...defaultModels, ...injectedModels };
+  const panelPresenceCache = new Map();
   if (Object.keys(injectedModels).length > 0) {
     if (!("OteboRecruitmentPanel" in injectedModels)) models.OteboRecruitmentPanel = null;
     if (!("CallWaitRoleGeneration" in injectedModels)) models.CallWaitRoleGeneration = null;
   }
-  const dependencies = { getGuildSettings, client, getStartupState, getVoiceMonitorSessions, getVcDmStatus, models, getDatabaseStatus: getDatabaseStatusOverride };
+  const dependencies = { getGuildSettings, client, getStartupState, getVoiceMonitorSessions, getVcDmStatus, models, getDatabaseStatus: getDatabaseStatusOverride, panelPresenceCache };
 
-  async function getOperationalStatusSnapshot(guild) {
+  async function getOperationalStatusSnapshot(guild, options = {}) {
     if (!guild?.id) throw new Error("A guild is required to build an operational status snapshot.");
-    return collectSnapshot(guild, dependencies);
+    return withTimeout(collectSnapshot(guild, dependencies, options), SNAPSHOT_BUILD_TIMEOUT_MS, "Operational status snapshot");
   }
 
   async function recordStartupRestore({ results = [], completedAt = new Date() } = {}) {
@@ -618,7 +769,7 @@ export function createOperationalStatusService({ getGuildSettings, client, getSt
   };
 }
 
-export async function getOperationalStatusSnapshot(guild, dependencies) {
+export async function getOperationalStatusSnapshot(guild, dependencies, options = {}) {
   if (!dependencies?.getGuildSettings) throw new Error("getGuildSettings is required.");
   const injectedModels = dependencies.models ?? {};
   const models = { ...defaultModels, ...injectedModels };
@@ -626,7 +777,11 @@ export async function getOperationalStatusSnapshot(guild, dependencies) {
     if (!("OteboRecruitmentPanel" in injectedModels)) models.OteboRecruitmentPanel = null;
     if (!("CallWaitRoleGeneration" in injectedModels)) models.CallWaitRoleGeneration = null;
   }
-  return collectSnapshot(guild, { ...dependencies, models });
+  return withTimeout(
+    collectSnapshot(guild, { ...dependencies, models, panelPresenceCache: dependencies.panelPresenceCache ?? new Map() }, options),
+    SNAPSHOT_BUILD_TIMEOUT_MS,
+    "Operational status snapshot",
+  );
 }
 
 export { makeModule };

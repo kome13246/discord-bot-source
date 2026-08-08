@@ -19,6 +19,8 @@ const schema = new mongoose.Schema(
 );
 
 schema.index({ status: 1, executeAt: 1 });
+schema.index({ guildId: 1, status: 1, executeAt: 1 });
+schema.index({ guildId: 1, status: 1, updatedAt: -1 });
 // At most one pending/running follow-up is allowed per guild.  Completed
 // actions remain as history, while a later successful recruitment can create
 // the next follow-up action.
@@ -33,5 +35,6 @@ schema.index(
   },
 );
 schema.index({ completedAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60, partialFilterExpression: { status: "completed" } });
+schema.index({ updatedAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60, partialFilterExpression: { status: { $in: ["failed", "canceled"] } } });
 
 export const ScheduledAction = mongoose.models.ScheduledAction ?? mongoose.model("ScheduledAction", schema);

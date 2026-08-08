@@ -60,5 +60,7 @@ const schema = new mongoose.Schema(
 );
 
 schema.index({ guildId: 1, status: 1 });
+schema.index({ guildId: 1, status: 1, updatedAt: -1 });
 schema.index({ guildId: 1, waitingChannelId: 1, waitingMonitorStatus: 1 });
+schema.index({ completedAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60, partialFilterExpression: { status: { $in: ["completed", "canceled"] } } });
 export const SplitProcessSession = mongoose.models.SplitProcessSession ?? mongoose.model("SplitProcessSession", schema);

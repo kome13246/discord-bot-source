@@ -7,6 +7,8 @@ const schema = new mongoose.Schema(
   {
     lockKey: { type: String, required: true, unique: true },
     ownerId: { type: String, default: null },
+    leaseId: { type: String, default: null },
+    fencingToken: { type: Number, default: 0, min: 0 },
     acquiredAt: { type: Date, default: null },
     leaseUntil: { type: Date, default: null },
   },

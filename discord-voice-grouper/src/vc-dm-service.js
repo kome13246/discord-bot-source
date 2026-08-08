@@ -1668,19 +1668,33 @@ export function createVcDmService({
     return false;
   }
 
-  async function getOperationalStatus(guild) {
-    const settings = await getGuildSettings(guild.id);
-    const panel = await getVcDmPanel(guild.id).catch(() => null);
-    const dailyRun = getVcDmDailyRun(guild.id, getJstCalendarDate(now())).catch(() => null);
-    const migrationState = getVcDmMigration(guild.id).catch(() => null);
-    const reminders = getActiveVcDmReminders(guild.id).catch(() => []);
-    const uncertainState = getVcDmUnconfirmedSummary(guild.id).catch(() => ({ memberCount: 0, reminderCount: 0, total: 0 }));
-    const resultState = getVcDmResultSummary(guild.id).catch(() => ({ member: {}, reminders: {}, delivered: 0, dm_unavailable: 0, failed: 0, unconfirmed: 0 }));
-    const [panelState, currentRun, migration, activeReminders, uncertain, results] = await Promise.all([panelService.getStatus(guild).catch(() => ({ candidateCount: 0, configValid: false })), dailyRun, migrationState, reminders, uncertainState, resultState]);
+  async function getOperationalStatus(guild, { settings: providedSettings } = {}) {
+    const settings = providedSettings ?? await getGuildSettings(guild.id);
+    const reads = await Promise.allSettled([
+      getVcDmPanel(guild.id),
+      getVcDmDailyRun(guild.id, getJstCalendarDate(now())),
+      getVcDmMigration(guild.id),
+      getActiveVcDmReminders(guild.id),
+      getVcDmUnconfirmedSummary(guild.id),
+      getVcDmResultSummary(guild.id),
+      panelService.getStatus(guild),
+    ]);
+    const readErrors = reads
+      .filter((result) => result.status === "rejected")
+      .map((result) => truncateError(result.reason));
+    const value = (index, fallback) => reads[index]?.status === "fulfilled" ? reads[index].value : fallback;
+    const panel = value(0, null);
+    const currentRun = value(1, null);
+    const migration = value(2, null);
+    const activeReminders = value(3, []);
+    const uncertain = value(4, { memberCount: 0, reminderCount: 0, total: 0 });
+    const results = value(5, { member: {}, reminders: {}, delivered: 0, dm_unavailable: 0, failed: 0, unconfirmed: 0 });
+    const panelState = value(6, { candidateCount: 0, configValid: false });
     const enabled = settings?.vcDmEnabled === true;
     const configurationIssues = enabled ? await getAllVcDmConfigurationIssues(guild, settings) : [];
     const configValid = enabled && hasVcDmConfiguration(settings) && configurationIssues.length === 0;
     const issues = [];
+    if (readErrors.length) issues.push({ code: "read_failed", message: `VC DMの状態を取得できません: ${readErrors.join(" / ").slice(0, 1000)}`, blocking: true });
     for (const issue of configurationIssues) issues.push({ ...issue, blocking: true });
     if (currentRun?.status === "failed") issues.push({ code: "daily_run_failed", message: currentRun.lastError ?? "17:00の日次判定に失敗しています。", blocking: true });
     if (enabled && currentRun?.status === "stopped") {
@@ -1692,7 +1706,9 @@ export function createVcDmService({
     if (activeReminders.some((item) => item.status === "failed")) issues.push({ code: "reminder_failed", message: "送信待ちリマインダーに失敗状態があります。", blocking: true });
     if (enabled && results.failed > 0) issues.push({ code: "dm_failed", message: `VC DMまたはリマインダーに再試行待ちの失敗が${results.failed}件あります。`, blocking: true });
     if (enabled && uncertain.total > 0) issues.push({ code: "dm_unconfirmed", message: `DM送信後の保存結果を確認できない状態が${uncertain.total}件あります。`, blocking: true });
-    const severity = getVcDmStatusSeverity({ enabled, configValid, dailyRun: currentRun, migration, reminders: activeReminders, panel, uncertain, results });
+    const severity = readErrors.length
+      ? "unknown"
+      : getVcDmStatusSeverity({ enabled, configValid, dailyRun: currentRun, migration, reminders: activeReminders, panel, uncertain, results });
     return {
       key: "vcDm",
       label: "VC未参加者DM",
@@ -1713,7 +1729,7 @@ export function createVcDmService({
       },
       issues,
       blocking: issues.some((issue) => issue.blocking),
-      availableActions: issues.length ? ["vc_dm_refresh"] : [],
+      availableActions: [],
       observedAt: now().toISOString(),
       inProgress: migration?.status === "processing"
         || currentRun?.status === "processing"

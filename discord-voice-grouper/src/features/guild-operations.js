@@ -135,6 +135,7 @@ export function createGuildOperationsFeature(dependencies) {
     const subcommand = interaction.options.getSubcommand();
   
     if (subcommand === "show") {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const settings = await getGuildSettings(interaction.guildId);
       await replyInChunks(interaction, formatSettings(settings), {
         flags: MessageFlags.Ephemeral,
@@ -156,12 +157,27 @@ export function createGuildOperationsFeature(dependencies) {
         await interaction.editReply("channelを指定するか、remove=trueで既存ボードを解除してください。");
         return;
       }
-      const result = remove
-        ? await operationalStatusBoardService.remove(interaction.guild)
-        : await operationalStatusBoardService.configure(interaction.guild, channel);
-      await interaction.editReply(remove
-        ? `ステータスボードを解除しました: ${result.status}`
-        : `ステータスボードを設置しました。${result.status}`);
+      let result;
+      try {
+        result = remove
+          ? await operationalStatusBoardService.remove(interaction.guild)
+          : await operationalStatusBoardService.configure(interaction.guild, channel);
+      } catch (error) {
+        await interaction.editReply(`ステータスボード設定に失敗しました: ${error?.message ?? error}`);
+        return;
+      }
+      const message = remove
+        ? result.status === "removed"
+          ? "ステータスボードを解除しました。"
+          : result.status === "cleanup-pending"
+            ? "ステータスボードの更新を停止しました。Discordメッセージの削除は再試行中です。"
+            : result.status === "busy"
+              ? "別のステータスボード操作が進行中です。少し待ってから再実行してください。"
+              : "ステータスボードは設定されていません。"
+        : result.status === "cleanup-pending"
+          ? "ステータスボードを設置しました。旧メッセージの削除は再試行中です。"
+          : `ステータスボードを設置しました: ${result.status}`;
+      await interaction.editReply(message);
       requestOperationalStatusRefresh(interaction.guildId, "status-board-setting");
       return;
     }

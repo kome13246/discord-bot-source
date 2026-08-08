@@ -328,7 +328,13 @@ Bot本体は別のホスティング先で起動しておく必要がありま�
 ```text
 GET /
 GET /health
+GET /ready
+GET /live
 ```
+
+- `/health` はDiscord、MongoDB、起動時復元、終了状態をまとめた厳格なヘルス判定です。起動時復元が一部失敗した場合もHTTP 503になります。
+- `/ready` はリクエストを処理できる準備が整っているかを返します。MongoDBは接続状態だけでなく実際のping結果を確認します。復元の一部失敗は`degraded:true`で示し、Discord・MongoDB・起動完了が利用可能ならHTTP 200です。
+- `/live` はプロセスが応答可能で終了処理中でないかを返します。ホスティングの再起動判定にはこのURLを推奨します。
 
 ホスティング先が `PORT` 環境変数を渡す場合は、そのポートで自動的に待ち受けます。
 ローカルで確認したい場合は `.env` に次を追加します。
@@ -570,7 +576,10 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 /setting forms form_channel:フォーム設置先 form_send_channel:フォーム転送先 moderator_role:@モデレーター
 /setting callwait call_wait_enabled:true call_wait_interval_minutes:45 call_wait_role:@通話希望者 call_wait_prompt_channel:募集作成用チャンネル call_wait_notice_channel:常設パネル・集合通知チャンネル call_wait_voice_category:VCカテゴリ otebo_quick_confirm_seconds:30 bosyu_mention_role:@募集通知
 /setting vc_dm enabled:true panel_channel:対象確認パネル target_category:対象VCカテゴリ target_channels:VCのIDをカンマ区切り excluded_channels:対象外VCのIDをカンマ区切り
+/setting status_board channel:運用ステータス
 ```
+
+運用ステータスボードを解除する場合は`/setting status_board remove:true`を実行します。`/botstatus show`、`/botstatus refresh`、`/botstatus manage`はManageGuild権限が必要です。問題詳細と管理操作は最初にEphemeral応答を確定してから状態を取得し、操作結果の応答はボード再描画を待ちません。Snapshotには処理期限があり、Discordパネル確認は短時間キャッシュされます。
 
 `/setting vc_dm` の対象VCは、カテゴリ指定または個別VC指定で設定します。対象VCへ3分以上連続して参加すると有効参加として記録され、対象確認パネルから外れます。AFK、集合VC、待機VCカテゴリ、VCコントロールカテゴリ、PB親VC、明示した対象外VCは自動的に対象外です。管理者はパネルのユーザー選択メニューから、既参加者としての除外・除外取消を行えます。パネルを置くチャンネルには、Botの閲覧・メッセージ送信・メッセージ履歴閲覧権限が必要です。
 

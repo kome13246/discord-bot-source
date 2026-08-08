@@ -11,4 +11,5 @@ const schema = new mongoose.Schema(
 );
 
 schema.index({ dueAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 });
+schema.index({ guildId: 1, dueAt: 1 });
 export const BumpReminder = mongoose.models.BumpReminder ?? mongoose.model("BumpReminder", schema);

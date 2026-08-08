@@ -5,6 +5,7 @@ import { CallWaitInterest } from "../src/models/call-wait-interest.js";
 import { KokuchiReservation } from "../src/models/kokuchi-reservation.js";
 import { SplitProcessSession } from "../src/models/split-process-session.js";
 import { MongoLeaseLock } from "../src/models/mongo-lease-lock.js";
+import { OperationalStatusBoard } from "../src/models/operational-status-board.js";
 import { VoiceParticipantRoleGrant } from "../src/models/voice-participant-role-grant.js";
 import { toCurrentGroupMemberIds } from "../src/split-waiting-utils.js";
 
@@ -90,6 +91,9 @@ test("興味ありモデルは受付時到達状態と終了通知再試行状�
 
 test("MongoDBリースロックはキーの一意性とリース期限を永続化する", () => {
   assert.equal(MongoLeaseLock.schema.path("lockKey").options.unique, true);
+  assert.equal(MongoLeaseLock.schema.path("leaseId").instance, "String");
+  assert.equal(MongoLeaseLock.schema.path("fencingToken").instance, "Number");
+  assert.equal(OperationalStatusBoard.schema.path("fencingToken").instance, "Number");
   assert.equal(MongoLeaseLock.schema.path("leaseUntil").instance, "Date");
   assert.equal(MongoLeaseLock.schema.indexes().some(([key]) => key.lockKey === 1), true);
 });
