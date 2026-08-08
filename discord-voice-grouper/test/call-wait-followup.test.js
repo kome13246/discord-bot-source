@@ -76,6 +76,8 @@ test("ヘルスチェックはDiscord・MongoDB・復元・終了状態を反映
   });
   assert.equal(healthy.statusCode, 200);
   assert.equal(healthy.body.ok, true);
+  assert.equal(healthy.body.ready, true);
+  assert.equal(healthy.body.startupRestoreFailed, false);
   assert.equal(buildHealthSnapshot({
     discordReady: true,
     mongoReady: true,

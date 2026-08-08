@@ -20,6 +20,10 @@ const schema = new mongoose.Schema(
 
 schema.index({ guildId: 1, roleId: 1, generationId: 1 }, { unique: true });
 schema.index({ guildId: 1, roleId: 1, status: 1, executeAt: 1 });
+schema.index({ guildId: 1, status: 1, updatedAt: -1 });
+schema.index({ completedAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60, partialFilterExpression: { status: "completed" } });
+schema.index({ supersededAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60, partialFilterExpression: { status: "superseded" } });
+schema.index({ updatedAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60, partialFilterExpression: { status: "failed" } });
 
 export const CallWaitRoleGeneration = mongoose.models.CallWaitRoleGeneration
   ?? mongoose.model("CallWaitRoleGeneration", schema);

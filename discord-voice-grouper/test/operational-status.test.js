@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import test from "node:test";
 import { commands } from "../src/commands.js";
 import { buildOperationalStatusPayload, createOperationalStatusBoardService } from "../src/operational-status-board-service.js";
 import { createKokuchiRecoveryService } from "../src/kokuchi-recovery-service.js";
+import { createOperationalManagementService } from "../src/operational-management-service.js";
 import { createOperationalStatusService, makeModule } from "../src/operational-status-service.js";
+import { startHealthServer } from "../src/health-server.js";
 
 function emptyModel() {
   return {
@@ -335,7 +338,7 @@ test("kokuchi状態のみ解除は強制終了失敗後かつ権限スナップ�
   assert.equal(rejectedResult.status, "rejected");
 });
 
-test("GuildSettings縺ｮ蜿門ｾ怜､ｱ謨励〒隕∝ｯｾ蠢・ｼ医・縺ｧ繧ゅｒunknown縺ｫ縺吶ｋ", async () => {
+test("GuildSettingsの取得失敗で依存モジュールをunknownにする", async () => {
   const service = createOperationalStatusService({
     getGuildSettings: async () => { throw new Error("settings read failed"); },
     client: readyClient(),
@@ -347,12 +350,13 @@ test("GuildSettings縺ｮ蜿門ｾ怜､ｱ謨励〒隕∝ｯｾ蠢・ｼ医・�
     assert.equal(snapshot.modules[key].severity, "unknown");
     assert.equal(snapshot.modules[key].issues.some((item) => item.code === "settings_unavailable"), true);
   }
-  assert.equal(snapshot.modules.splitvc.severity, "disabled");
+  assert.equal(snapshot.modules.splitvc.severity, "healthy");
   assert.equal(snapshot.modules.system.issues.some((item) => item.code === "settings_unavailable"), true);
+  assert.equal(snapshot.modules.system.issues.filter((item) => item.code === "settings_unavailable").length, 1);
   assert.equal(snapshot.issues.some((item) => item.code === "settings_unavailable"), true);
 });
 
-test("Otebo縺ｮ螟ｱ謨励・蜿ょ刈譁ｰ隕上′繧ｹ繝ｆ繝ｼ繧ｿ繧ｹ縺ｫ蜿励ｊ莨九＆繧後ｋ", async () => {
+test("Oteboの失敗・参加新規がステータスに反映される", async () => {
   const service = createOperationalStatusService({
     getGuildSettings: async () => ({
       callWaitEnabled: true,
@@ -444,4 +448,379 @@ test("status board reruns after a refresh request arrives during an update", asy
   assert.equal(editCount, 2);
   assert.equal((await secondRequest).status, "updated");
   service.stop();
+});
+
+test("問題詳細ボタンは権限取得やSnapshotより先に応答をdeferする", async () => {
+  const order = [];
+  const snapshot = {
+    guildId: "guild-id",
+    attentionCount: 0,
+    recommendationCount: 0,
+    modules: { system: makeModule({ key: "system", label: "Bot・DB", summary: "正常" }) },
+    availableActions: [],
+  };
+  const service = createOperationalManagementService({
+    statusService: { getOperationalStatusSnapshot: async () => { order.push("snapshot"); return snapshot; } },
+    boardService: { requestRefresh: async () => ({}), buildPayload: () => ({}) },
+    recoveryService: {},
+  });
+  const interaction = {
+    customId: "operational:details:guild-id",
+    guildId: "guild-id",
+    guild: { members: { fetch: async () => { order.push("permission"); return { permissions: { has: () => true } }; } } },
+    user: { id: "admin-id" },
+    memberPermissions: { has: () => true },
+    deferred: false,
+    replied: false,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => false,
+    deferReply: async () => { order.push("defer"); interaction.deferred = true; },
+    editReply: async () => { order.push("reply"); },
+  };
+  assert.equal(await service.handle(interaction), true);
+  assert.equal(order[0], "defer");
+  assert.ok(order.indexOf("defer") < order.indexOf("permission"));
+  assert.ok(order.indexOf("defer") < order.indexOf("snapshot"));
+});
+
+test("管理操作の最初のエラーを省略せず応答と監査へ残す", async () => {
+  const replies = [];
+  const auditEntries = [];
+  const auditFallbacks = [];
+  const snapshot = {
+    guildId: "guild-id",
+    modules: {},
+    availableActions: ["remove_participant_roles"],
+  };
+  const service = createOperationalManagementService({
+    statusService: { getOperationalStatusSnapshot: async () => snapshot },
+    boardService: { requestRefresh: async () => ({}) },
+    recoveryService: {},
+    actions: { removeParticipantRoles: async () => ({ status: "failed", result: "failed", errors: ["first complete error"] }) },
+    actionLogModel: { create: async (entry) => { auditEntries.push(entry); return entry; } },
+    sendOperationalLog: async ({ fallbackChannel }) => { auditFallbacks.push(fallbackChannel); return { id: "log-message" }; },
+  });
+  const interaction = {
+    customId: "operational:manage_select:guild-id",
+    guildId: "guild-id",
+    guild: { members: { fetch: async () => ({ permissions: { has: () => true } }) } },
+    channel: { id: "channel-id" },
+    user: { id: "admin-id" },
+    values: ["remove_participant_roles"],
+    deferred: false,
+    replied: false,
+    isButton: () => false,
+    isStringSelectMenu: () => true,
+    isModalSubmit: () => false,
+    deferReply: async () => { interaction.deferred = true; },
+    editReply: async (payload) => { replies.push(payload); },
+  };
+  assert.equal(await service.handle(interaction), true);
+  assert.match(replies.at(-1).content, /first complete error/);
+  assert.deepEqual(auditEntries[0].errorMessages, ["first complete error"]);
+  assert.deepEqual(auditFallbacks, [null]);
+});
+
+test("Discord API一時障害はパネル欠損や再設置候補にしない", async () => {
+  const models = emptyModels();
+  models.ProfileRegistrationPanel = {
+    findOne: () => ({ lean: async () => ({ channelId: "panel-channel", messageId: "panel-message" }) }),
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({ profileIntroductionChannelId: "intro-channel" }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  const guild = {
+    id: "guild-id",
+    channels: {
+      cache: new Map(),
+      fetch: async () => { const error = new Error("temporary Discord failure"); error.status = 503; throw error; },
+    },
+  };
+  const snapshot = await service.getOperationalStatusSnapshot(guild);
+  assert.equal(snapshot.modules.panels.issues.some((item) => item.code === "panel_check_failed"), true);
+  assert.equal(snapshot.modules.panels.issues.some((item) => item.code === "profile_panel_message_missing"), false);
+  assert.equal(snapshot.modules.panels.availableActions.includes("reinstall_panels"), false);
+});
+
+test("ボード削除失敗を永続化し、次回refreshで削除を完了する", async () => {
+  let board = { guildId: "guild-id", channelId: "channel-id", messageId: "message-id", pendingMessageDeletions: [], removalPending: false };
+  let deletionFails = true;
+  const message = {
+    id: "message-id",
+    delete: async () => {
+      if (deletionFails) throw new Error("temporary delete failure");
+    },
+  };
+  const channel = {
+    id: "channel-id",
+    type: 0,
+    send: async () => message,
+    messages: { fetch: async () => message },
+  };
+  const guild = { id: "guild-id", channels: { cache: new Map([[channel.id, channel]]) } };
+  const boardModel = {
+    findOne: () => ({ lean: async () => board }),
+    updateOne: async (_filter, update) => { if (board) board = { ...board, ...(update.$set ?? {}) }; return { matchedCount: board ? 1 : 0 }; },
+    findOneAndUpdate: async (_filter, update) => { if (board) board = { ...board, ...(update.$set ?? {}) }; return board; },
+    findOneAndDelete: async () => { const removed = board; board = null; return removed; },
+  };
+  const service = createOperationalStatusBoardService({
+    boardModel,
+    healthModel: { findOneAndUpdate: async () => null },
+    getOperationalStatusSnapshot: async () => ({ guildId: guild.id, modules: {} }),
+    acquireMongoLease: async () => ({ lockKey: "lease", ownerId: "owner", leaseId: "lease-id" }),
+    renewMongoLease: async () => true,
+    releaseMongoLease: async () => {},
+  });
+  const first = await service.remove(guild);
+  assert.equal(first.status, "cleanup-pending");
+  assert.equal(board.removalPending, true);
+  deletionFails = false;
+  const second = await service.refresh(guild, "cleanup-retry");
+  assert.equal(second.status, "removed");
+  assert.equal(board, null);
+  service.stop();
+});
+
+test("新規ボードメッセージ後のDB保存失敗はメッセージをロールバックする", async () => {
+  let deleted = 0;
+  const message = { id: "new-message", delete: async () => { deleted += 1; } };
+  const channel = {
+    id: "channel-id",
+    type: 0,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => message },
+    send: async () => message,
+  };
+  const guild = {
+    id: "guild-id",
+    members: { me: {} },
+    channels: { cache: new Map([[channel.id, channel]]) },
+  };
+  const board = { guildId: guild.id, channelId: channel.id, messageId: null, payloadHash: null, pendingMessageDeletions: [] };
+  const boardModel = {
+    findOne: () => ({ lean: async () => board }),
+    findOneAndUpdate: async () => { throw new Error("board save failed"); },
+  };
+  const service = createOperationalStatusBoardService({
+    boardModel,
+    healthModel: { findOneAndUpdate: async () => null },
+    getOperationalStatusSnapshot: async () => ({
+      guildId: guild.id,
+      observedAt: new Date().toISOString(),
+      attentionCount: 0,
+      recommendationCount: 0,
+      modules: Object.fromEntries(["system", "kokuchi", "splitvc", "recruitment", "automation", "panels", "voice"].map((key) => [key, makeModule({ key, label: key, summary: "正常" })])),
+    }),
+    acquireMongoLease: async () => ({ lockKey: "lease", ownerId: "owner", leaseId: "lease-id" }),
+    renewMongoLease: async () => true,
+    releaseMongoLease: async () => {},
+    logger: { error: () => {} },
+  });
+  const result = await service.refresh(guild, "rollback-test");
+  assert.equal(result.status, "failed");
+  assert.equal(deleted, 1);
+  service.stop();
+});
+
+test("call_wait_roleの正常なsuperseded世代を障害検索に含めない", async () => {
+  const models = emptyModels();
+  let generationFilter = null;
+  models.CallWaitRoleGeneration = {
+    findOne: async () => null,
+    find: (filter) => {
+      generationFilter = filter;
+      return { sort: () => ({ lean: async () => [] }) };
+    },
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({ callWaitEnabled: true }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  await service.getOperationalStatusSnapshot({ id: "guild-id", channels: { cache: new Map() } });
+  assert.equal(generationFilter.status, "failed");
+  assert.notEqual(generationFilter.status, "superseded");
+});
+
+test("管理操作はボード再描画の完了を待たずに結果を返す", async () => {
+  const replies = [];
+  const snapshot = { guildId: "guild-id", modules: {}, availableActions: ["remove_participant_roles"] };
+  const service = createOperationalManagementService({
+    statusService: { getOperationalStatusSnapshot: async () => snapshot },
+    boardService: { markDirty: () => new Promise(() => {}), requestRefresh: async () => ({}), buildPayload: () => ({}) },
+    recoveryService: {},
+    actions: { removeParticipantRoles: async () => ({ status: "completed", result: "success", errors: [] }) },
+    actionLogModel: { create: async (entry) => entry },
+    sendOperationalLog: async () => null,
+  });
+  const interaction = {
+    customId: "operational:manage_select:guild-id",
+    guildId: "guild-id",
+    guild: { id: "guild-id", members: { fetch: async () => ({ permissions: { has: () => true } }) } },
+    user: { id: "admin-id" },
+    values: ["remove_participant_roles"],
+    deferred: false,
+    replied: false,
+    isButton: () => false,
+    isStringSelectMenu: () => true,
+    isModalSubmit: () => false,
+    deferReply: async () => { interaction.deferred = true; },
+    editReply: async (payload) => { replies.push(payload); },
+  };
+  const result = await Promise.race([
+    service.handle(interaction),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("management response waited for board refresh")), 100)),
+  ]);
+  assert.equal(result, true);
+  assert.equal(replies.length, 1);
+});
+
+test("ステータスボードはリース喪失後にDiscordメッセージを更新しない", async () => {
+  let edits = 0;
+  const board = { guildId: "guild-id", channelId: "channel-id", messageId: "message-id", payloadHash: null, fencingToken: 1, pendingMessageDeletions: [] };
+  const message = { id: "message-id", edit: async () => { edits += 1; } };
+  const channel = {
+    id: "channel-id",
+    type: 0,
+    send: async () => message,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => message },
+  };
+  const guild = { id: "guild-id", members: { me: {} }, channels: { cache: new Map([[channel.id, channel]]) } };
+  const service = createOperationalStatusBoardService({
+    boardModel: { findOne: () => ({ lean: async () => board }), findOneAndUpdate: async () => board },
+    healthModel: { findOneAndUpdate: async () => null },
+    getOperationalStatusSnapshot: async () => ({ guildId: guild.id, modules: {} }),
+    acquireMongoLease: async () => ({ lockKey: "lease", ownerId: "owner", leaseId: "lease-id", fencingToken: 2 }),
+    renewMongoLease: async () => false,
+    releaseMongoLease: async () => {},
+    logger: { error: () => {} },
+  });
+  const result = await service.refresh(guild, "lease-loss-test");
+  assert.equal(result.status, "failed");
+  assert.equal(edits, 0);
+  service.stop();
+});
+
+test("busy状態のボード更新要求は有限回で解決する", async () => {
+  const service = createOperationalStatusBoardService({
+    debounceMs: 1,
+    getOperationalStatusSnapshot: async () => ({ guildId: "guild-id", modules: {} }),
+    acquireMongoLease: async () => null,
+  });
+  const result = await service.requestRefresh({ id: "guild-id" }, "busy-test");
+  assert.equal(result.status, "busy");
+  assert.equal(result.reason, "retry-limit");
+  service.stop();
+});
+
+test("単一のMongoDB障害をモジュール数分だけ重複計上しない", async () => {
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({}),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "disconnected", error: "offline" }),
+    models: emptyModels(),
+  });
+  const snapshot = await service.getOperationalStatusSnapshot({ id: "guild-id", channels: { cache: new Map() } });
+  assert.equal(snapshot.attentionCount, 1);
+  assert.equal(snapshot.rootCauseCount, 1);
+});
+
+test("Discordパネル存在確認を短時間キャッシュする", async () => {
+  const models = emptyModels();
+  models.ProfileRegistrationPanel = { findOne: () => ({ lean: async () => ({ channelId: "panel-channel", messageId: "panel-message" }) }) };
+  let fetches = 0;
+  const channel = {
+    messages: { cache: new Map(), fetch: async () => { fetches += 1; return { id: "panel-message" }; } },
+  };
+  const guild = { id: "guild-id", channels: { cache: new Map([["panel-channel", channel]]), fetch: async () => channel } };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({ profileIntroductionChannelId: "panel-channel" }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  await service.getOperationalStatusSnapshot(guild);
+  await service.getOperationalStatusSnapshot(guild);
+  assert.equal(fetches, 1);
+});
+
+test("HTTP readinessはMongoDBの非同期ping結果を待って判定する", async () => {
+  const server = startHealthServer({
+    port: 0,
+    client: { isReady: () => true, user: { tag: "bot#0001" } },
+    getMongoReady: async () => false,
+    getStartupState: () => ({ completed: true, failed: false }),
+    isShuttingDown: () => false,
+    logger: { log: () => {}, error: () => {} },
+  });
+  await once(server, "listening");
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/ready`);
+    const body = await response.json();
+    assert.equal(response.status, 503);
+    assert.equal(body.mongoReady, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("DBへ新ボード参照を保存した後の清掃失敗では新メッセージを削除しない", async () => {
+  let deleted = 0;
+  let board = { guildId: "guild-id", channelId: "channel-id", messageId: null, payloadHash: null, pendingMessageDeletions: [] };
+  const message = { id: "new-message", delete: async () => { deleted += 1; } };
+  const channel = {
+    id: "channel-id",
+    type: 0,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => null },
+    send: async () => message,
+  };
+  const guild = { id: "guild-id", members: { me: {} }, channels: { cache: new Map([[channel.id, channel]]) } };
+  const boardModel = {
+    findOne: () => ({ lean: async () => board }),
+    findOneAndUpdate: async (_filter, update) => { board = { ...board, ...(update.$set ?? {}) }; return board; },
+    updateOne: async () => { throw new Error("cleanup state write failed"); },
+  };
+  const service = createOperationalStatusBoardService({
+    boardModel,
+    healthModel: { findOneAndUpdate: async () => null },
+    getOperationalStatusSnapshot: async () => ({ guildId: guild.id, modules: {} }),
+    acquireMongoLease: async () => ({ lockKey: "lease", ownerId: "owner", leaseId: "lease-id", fencingToken: 2 }),
+    renewMongoLease: async () => true,
+    releaseMongoLease: async () => {},
+    logger: { error: () => {} },
+  });
+  const result = await service.refresh(guild, "post-save-cleanup-failure");
+  assert.equal(result.status, "failed");
+  assert.equal(board.messageId, "new-message");
+  assert.equal(deleted, 0);
+  service.stop();
+});
+
+test("ステータス件数は詳細サンプル上限を超えてもcountDocumentsを使用する", async () => {
+  const models = emptyModels();
+  models.VoiceParticipantRoleGrant = {
+    find: () => ({ sort: () => ({ limit: () => ({ lean: async () => [{ memberId: "sample", status: "failed" }] }) }) }),
+    countDocuments: async (filter) => ({ active: 150, removing: 2, failed: 3 }[filter.status] ?? 0),
+  };
+  models.VoiceExitSchedule = {
+    find: () => ({ sort: () => ({ limit: () => ({ lean: async () => [] }) }) }),
+    countDocuments: async () => 120,
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({}),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  const snapshot = await service.getOperationalStatusSnapshot({ id: "guild-id", channels: { cache: new Map() } });
+  assert.deepEqual(snapshot.modules.voice.details.roleGrantCounts, { active: 150, removing: 2, failed: 3 });
+  assert.equal(snapshot.modules.voice.details.exitScheduleCount, 120);
 });

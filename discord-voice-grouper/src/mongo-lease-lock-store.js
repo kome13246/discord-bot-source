@@ -8,12 +8,13 @@ export async function acquireMongoLease(lockKey, {
   leaseMs = 30_000,
 } = {}) {
   const now = new Date();
+  const leaseId = crypto.randomUUID();
   try {
     const lock = await MongoLeaseLock.findOneAndUpdate(
       {
         lockKey,
         $or: [
-          { ownerId },
+          { ownerId: null },
           { leaseUntil: null },
           { leaseUntil: { $lte: now } },
         ],
@@ -21,14 +22,18 @@ export async function acquireMongoLease(lockKey, {
       {
         $set: {
           ownerId,
+          leaseId,
           acquiredAt: now,
           leaseUntil: new Date(now.getTime() + leaseMs),
         },
+        $inc: { fencingToken: 1 },
         $setOnInsert: { lockKey },
       },
       { upsert: true, returnDocument: "after", lean: true },
     );
-    return lock?.ownerId === ownerId ? { lockKey, ownerId } : null;
+    return lock?.ownerId === ownerId && lock?.leaseId === leaseId
+      ? { lockKey, ownerId, leaseId, fencingToken: lock.fencingToken }
+      : null;
   } catch (error) {
     // A concurrent upsert can lose on the unique index.  That means another
     // worker owns the lock, not that the caller should retry its side effect.
@@ -40,10 +45,12 @@ export async function acquireMongoLease(lockKey, {
 export async function renewMongoLease(lease, { leaseMs = 30_000 } = {}) {
   if (!lease) return false;
   const now = new Date();
+  const ownership = lease.leaseId
+    ? { lockKey: lease.lockKey, ownerId: lease.ownerId, leaseId: lease.leaseId }
+    : { lockKey: lease.lockKey, ownerId: lease.ownerId };
   const result = await MongoLeaseLock.updateOne(
     {
-      lockKey: lease.lockKey,
-      ownerId: lease.ownerId,
+      ...ownership,
       leaseUntil: { $gt: now },
     },
     { $set: { leaseUntil: new Date(now.getTime() + leaseMs) } },
@@ -53,9 +60,12 @@ export async function renewMongoLease(lease, { leaseMs = 30_000 } = {}) {
 
 export async function releaseMongoLease(lease) {
   if (!lease) return false;
+  const ownership = lease.leaseId
+    ? { lockKey: lease.lockKey, ownerId: lease.ownerId, leaseId: lease.leaseId }
+    : { lockKey: lease.lockKey, ownerId: lease.ownerId };
   const result = await MongoLeaseLock.updateOne(
-    { lockKey: lease.lockKey, ownerId: lease.ownerId },
-    { $set: { ownerId: null, leaseUntil: new Date(0) } },
+    ownership,
+    { $set: { ownerId: null, leaseId: null, leaseUntil: new Date(0) } },
   );
   return result.matchedCount === 1;
 }

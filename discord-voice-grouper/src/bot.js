@@ -1,4 +1,5 @@
 import "./load-env.js";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -55,7 +56,7 @@ import { CallWaitRoleGeneration } from "./models/call-wait-role-generation.js";
 import { OperationalActionLog } from "./models/operational-action-log.js";
 import { OperationalHealthState } from "./models/operational-health-state.js";
 import { OperationalStatusBoard } from "./models/operational-status-board.js";
-import { acquireMongoLease, releaseMongoLease } from "./mongo-lease-lock-store.js";
+import { acquireMongoLease, releaseMongoLease, renewMongoLease } from "./mongo-lease-lock-store.js";
 import { handleProfileVoiceState, restoreProfiles } from "./profile-service.js";
 import { createProfileRegistrationPanelService } from "./profile-registration-panel-service.js";
 import { createOteboRecruitmentPanelService } from "./otebo-recruitment-panel-service.js";
@@ -83,6 +84,7 @@ import { VcDmMemberTracking } from "./models/vc-dm-member-tracking.js";
 import { VcDmMigration } from "./models/vc-dm-migration.js";
 import { VcDmPanel } from "./models/vc-dm-panel.js";
 import { VcDmReminder } from "./models/vc-dm-reminder.js";
+import { BumpReminder } from "./models/bump-reminder.js";
 import { FukyoThemeState } from "./models/fukyo-theme-state.js";
 import { FukyoWeeklyPost } from "./models/fukyo-weekly-post.js";
 import {
@@ -298,7 +300,7 @@ function logRecoverableError(context, error) {
 
 function requestOperationalStatusRefresh(guildId, reason = "state-change") {
   const guild = client.guilds.cache.get(guildId);
-  if (guild && operationalStatusBoardService) void operationalStatusBoardService.requestRefresh(guild, reason).catch((error) => logRecoverableError("Operational status refresh request failed", error));
+  if (guild && operationalStatusBoardService) void operationalStatusBoardService.markDirty(guild, reason).catch((error) => logRecoverableError("Operational status refresh request failed", error));
 }
 
 if (!DISCORD_TOKEN) {
@@ -1026,8 +1028,9 @@ const operationalStatusService = createOperationalStatusService({
   }),
 });
 const operationalStatusBoardService = createOperationalStatusBoardService({
-  getOperationalStatusSnapshot: (guild) => operationalStatusService.getOperationalStatusSnapshot(guild),
+  getOperationalStatusSnapshot: (guild, options) => operationalStatusService.getOperationalStatusSnapshot(guild, options),
   acquireMongoLease,
+  renewMongoLease,
   releaseMongoLease,
   logger: console,
 });
@@ -1154,17 +1157,28 @@ function getKokuchiExecutionBlockReason(...args) { return guildOperationsFeature
 let discordReadyWatchdog = null;
 
 const healthPort = Number(PORT ?? KEEP_ALIVE_PORT);
+const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
 
 if (Number.isInteger(healthPort) && healthPort > 0) {
+  eventLoopDelay.enable();
   startHealthServer({
     port: healthPort,
     client,
-    getMongoReady: () => mongoose.connection.readyState === 1,
+    getMongoReady: async () => {
+      if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return false;
+      await mongoose.connection.db.command({ ping: 1 }, { maxTimeMS: 1_500 });
+      return true;
+    },
     getStartupState: () => ({
       completed: startupRestoreCompleted,
       failed: startupRestoreFailed,
     }),
     isShuttingDown,
+    getEventLoopLagMs: () => {
+      const lagMs = Number.isFinite(eventLoopDelay.mean) ? Math.round((eventLoopDelay.mean / 1e6) * 10) / 10 : null;
+      eventLoopDelay.reset();
+      return lagMs;
+    },
   });
 }
 
@@ -1321,7 +1335,9 @@ client.on(Events.InteractionCreate, createInteractionHandler({
     await replySafely(interaction, "処理中にエラーが発生しました。Renderのログを確認してください。");
   },
   onFinally: async (interaction) => {
-    if (interaction.guildId) requestOperationalStatusRefresh(interaction.guildId, "interaction");
+    const isOperationalInteraction = interaction.commandName === "botstatus"
+      || interaction.customId?.startsWith?.("operational:");
+    if (interaction.guildId && !isOperationalInteraction) requestOperationalStatusRefresh(interaction.guildId, "interaction");
   },
 }));
 
@@ -1561,6 +1577,7 @@ client.on(Events.InteractionCreate, createInteractionHandler({
     }
     await Promise.all([
       ensureVoiceParticipantRoleGrantIndexes(),
+      BumpReminder.createIndexes(),
       ScheduledAction.createIndexes(),
       CallWaitInterest.createIndexes(),
       KokuchiReservation.createIndexes(),
