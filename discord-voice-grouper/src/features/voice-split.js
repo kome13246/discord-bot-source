@@ -89,6 +89,7 @@ export function createVoiceSplitFeature(dependencies) {
     releaseMongoLease,
     releaseOteboRecruitmentSlot,
     removeCallWaitRoleFromMembers,
+    retryAction,
     replaceNestedObject,
     requestOperationalStatusRefresh,
     resolveConfiguredTextChannel,
@@ -123,6 +124,143 @@ export function createVoiceSplitFeature(dependencies) {
   } = dependencies;
 
   const WAITING_CHILD_TARGET_SIZE = 4;
+  const WAITING_EXTENSION_MAX_MEMBERS = 2;
+  const DIRECT_CHILD_USER_LIMIT = 5;
+  const DIRECT_EMPTY_GRACE_MS = 5 * 60 * 1000;
+  const DIRECT_CHILD_MONITOR_POLL_MS = 5 * 1000;
+  const directChildMonitorTimers = new Map();
+  const directChildMonitorLocks = new Set();
+  const waitingRollbackLocks = new Set();
+
+  function shutdownDirectChildMonitors() {
+    for (const sessionId of directChildMonitorTimers.keys()) {
+      clearDirectChildMonitor(sessionId);
+    }
+    directChildMonitorLocks.clear();
+    waitingRollbackLocks.clear();
+  }
+
+  function normalizeSplitMode(settings) {
+    return settings?.splitMode === "partybeast" ? "partybeast" : "direct";
+  }
+
+  function normalizeSessionSplitMode(session) {
+    // Sessions written before splitMode was introduced were PB sessions.
+    return session?.splitMode === "direct" ? "direct" : "partybeast";
+  }
+
+  async function queueWaitingRollbackTask({
+    sessionId,
+    channelId,
+    sourceChannelId,
+    memberIds = [],
+    roleMemberIds = [],
+    deleteChannel = false,
+    lastError,
+  }) {
+    const task = {
+      taskId: createSessionId(),
+      channelId,
+      sourceChannelId,
+      memberIds: [...new Set(memberIds)],
+      roleMemberIds: [...new Set(roleMemberIds)],
+      deleteChannel,
+      createdAt: new Date(),
+      lastError,
+    };
+    const queued = await SplitProcessSession.updateOne(
+      { sessionId },
+      {
+        $push: { waitingRollbackTasks: task },
+        $set: { lastError },
+        $inc: { waitingMonitorFailureCount: 1 },
+      },
+    );
+    return queued.matchedCount === 1 ? task : null;
+  }
+
+  async function processWaitingRollbackTasks(sessionId, guild) {
+    if (waitingRollbackLocks.has(sessionId)) return;
+    waitingRollbackLocks.add(sessionId);
+    try {
+      const session = await SplitProcessSession.findOne({ sessionId }).lean();
+      const tasks = session?.waitingRollbackTasks ?? [];
+      for (const task of tasks) {
+        const errors = [];
+        let sourceChannel = null;
+        try {
+          sourceChannel = task.sourceChannelId
+            ? await guild.channels.fetch(task.sourceChannelId)
+            : null;
+        } catch (error) {
+          if (error?.code !== 10003) errors.push(`source channel: ${error.message}`);
+        }
+
+        for (const memberId of task.memberIds ?? []) {
+          try {
+            const member = await guild.members.fetch(memberId);
+            if (member.voice.channelId === task.channelId) {
+              if (!sourceChannel?.isVoiceBased?.()) {
+                throw new Error("waiting voice channel is unavailable");
+              }
+              await member.voice.setChannel(sourceChannel, "Retry waiting transfer rollback");
+            }
+          } catch (error) {
+            errors.push(`${memberId} voice: ${error.message}`);
+          }
+        }
+
+        for (const memberId of task.roleMemberIds ?? []) {
+          try {
+            const member = await guild.members.fetch(memberId);
+            await removeVoiceParticipantRole(member, session.participantRoleId, {
+              sourceType: "splitvc",
+              sourceId: sessionId,
+            });
+          } catch (error) {
+            errors.push(`${memberId} role: ${error.message}`);
+          }
+        }
+
+        if (task.deleteChannel && errors.length === 0) {
+          try {
+            const channel = await guild.channels.fetch(task.channelId);
+            if (channel) await channel.delete("Retry waiting transfer rollback cleanup");
+          } catch (error) {
+            if (error?.code !== 10003) errors.push(`child channel ${task.channelId}: ${error.message}`);
+          }
+        }
+
+        if (errors.length > 0) {
+          const lastError = `Waiting transfer rollback is still pending: ${errors.join(" | ")}`;
+          await SplitProcessSession.updateOne(
+            { sessionId, "waitingRollbackTasks.taskId": task.taskId },
+            { $set: { "waitingRollbackTasks.$.lastError": lastError, lastError } },
+          ).catch((error) => logRecoverableError(`Failed to persist waiting rollback retry ${task.taskId}`, error));
+          continue;
+        }
+
+        const pull = {
+          waitingRollbackTasks: { taskId: task.taskId },
+          participantMemberIds: { $in: task.memberIds ?? [] },
+          participantRoleGrantedMemberIds: { $in: task.roleMemberIds ?? [] },
+        };
+        if (task.deleteChannel) {
+          pull.childChannelIds = task.channelId;
+          pull.childChannelStates = { channelId: task.channelId };
+          pull.groupSnapshots = { channelId: task.channelId };
+        } else {
+          pull["groupSnapshots.$[].memberIds"] = { $in: task.memberIds ?? [] };
+        }
+        await SplitProcessSession.updateOne(
+          { sessionId, "waitingRollbackTasks.taskId": task.taskId },
+          { $pull: pull },
+        );
+      }
+    } finally {
+      waitingRollbackLocks.delete(sessionId);
+    }
+  }
 
   async function getKokuchiActionGuard({ guildId, eventId = null, expectedRevision = null } = {}) {
     if (!eventId) return { valid: true, event: null, eventId: null, revision: null };
@@ -491,14 +629,13 @@ export function createVoiceSplitFeature(dependencies) {
         clearRestoredWaitingMonitor(sessionId);
         return;
       }
-      const childChannels = (await Promise.all((session.childChannelIds ?? []).map((id) => guild.channels.fetch(id).catch(() => null))))
-        .filter((channel) => channel?.isVoiceBased?.());
-      const hasUnderfilledChildChannel = childChannels.some(
-        (channel) => [...channel.members.values()].filter((member) => !member.user.bot).length < WAITING_CHILD_TARGET_SIZE,
-      );
+      const hasWaitingExtensionChildChannel = await shouldKeepWaitingRoomAlive({
+        guild,
+        childChannelIds: session.childChannelIds ?? [],
+      });
       const monitorEndsAt = new Date(session.waitingMonitorEndsAt).getTime();
       if (Number.isFinite(monitorEndsAt) && Date.now() >= monitorEndsAt) {
-        if (hasUnderfilledChildChannel) {
+        if (hasWaitingExtensionChildChannel) {
           const extended = await SplitProcessSession.updateOne(
             { sessionId, waitingMonitorLeaseOwner: waitingMonitorLeaseOwner, waitingMonitorStatus: "active" },
             { $set: { waitingMonitorStatus: "extended", waitingMonitorExtendedAt: new Date() } },
@@ -550,24 +687,33 @@ export function createVoiceSplitFeature(dependencies) {
         }
       }
       const settings = await getGuildSettings(guild.id);
+      const splitMode = normalizeSessionSplitMode(session);
       const parentChannel = session.parentChannelId
         ? await guild.channels.fetch(session.parentChannelId).catch(() => null)
+        : null;
+      const childCategory = session.childCategoryId
+        ? await guild.channels.fetch(session.childCategoryId).catch(() => null)
         : null;
       const participantRole = session.participantRoleId
         ? guild.roles.cache.get(session.participantRoleId) ?? await guild.roles.fetch(session.participantRoleId).catch(() => null)
         : null;
-      if (!parentChannel?.isVoiceBased?.() || !participantRole) {
+      if ((splitMode === "partybeast" && !parentChannel?.isVoiceBased?.()) || (splitMode === "direct" && childCategory?.type !== ChannelType.GuildCategory) || !participantRole) {
         throw new Error("Restored waiting monitor configuration is no longer available.");
       }
       const groupingState = await getSplitGroupingState(guild.id).catch(() => null);
       const previousGroups = groupingState?.current?.sessionId === session.sessionId
         ? groupingState?.previous?.groups ?? []
         : groupingState?.current?.groups ?? groupingState?.previous?.groups ?? [];
+      const nextDirectGroupNumber = [...(session.groupSnapshots ?? []), ...(session.childChannelStates ?? [])].reduce(
+        (max, group) => Math.max(max, Number(group.groupNumber) || 0),
+        0,
+      ) + 1;
       await processWaitingRoom({
         channel: await guild.channels.fetch(session.operationChannelId).catch(() => null),
         guild,
         waitingChannel,
         parentChannel,
+        splitMode,
         participantRole,
         childCategoryId: session.childCategoryId ?? null,
         childChannelIds: new Set(session.childChannelIds ?? []),
@@ -580,6 +726,7 @@ export function createVoiceSplitFeature(dependencies) {
         currentGroupMembers: new Map(
           (session.groupSnapshots ?? []).map((group) => [group.channelId, new Set(group.memberIds ?? [])]),
         ),
+        nextDirectGroupNumber,
       });
       await SplitProcessSession.updateOne({ sessionId }, { $set: { waitingMonitorHeartbeatAt: new Date() } });
     } finally {
@@ -600,17 +747,96 @@ export function createVoiceSplitFeature(dependencies) {
   
   async function restoreSplitProcessSessions() {
     if (mongoose.connection.readyState !== 1) return;
-    const sessions = await SplitProcessSession.find({ status: { $in: ["active", "finish_notice_pending", "role_remove_pending", "cleaning_up", "feedback_open"] } }).lean();
+    const sessions = await SplitProcessSession.find({
+      $or: [
+        { status: { $in: ["active", "finish_notice_pending", "role_remove_pending", "cleaning_up", "feedback_open"] } },
+        { splitMode: "direct", status: "cleanup_required" },
+        { splitMode: "direct", status: { $in: ["completed", "canceled"] }, childChannelsCleanupCompleted: { $ne: true } },
+      ],
+    }).lean();
     let restored = 0;
     for (const session of sessions) {
       try {
         const guild = client.guilds.cache.get(session.guildId) ?? await client.guilds.fetch(session.guildId).catch(() => null);
         if (!guild) continue;
+        if (session.waitingRollbackTasks?.length) {
+          await processWaitingRollbackTasks(session.sessionId, guild);
+        }
+        if (session.phase === "transfer_waiting" && normalizeSessionSplitMode(session) === "direct" && session.childChannelIds?.length) {
+          let cleanupFailed = false;
+          for (const channelId of session.childChannelIds) {
+            let channel = null;
+            try {
+              channel = await guild.channels.fetch(channelId);
+            } catch (error) {
+              if (error?.code !== 10003) {
+                cleanupFailed = true;
+                logRecoverableError(`Failed to fetch interrupted direct splitvc channel ${channelId}`, error);
+              }
+            }
+            if (channel) {
+              await channel.delete("Remove direct splitvc channels left by interrupted transfer").catch((error) => {
+                cleanupFailed = true;
+                logRecoverableError(`Failed to remove interrupted direct splitvc channel ${channelId}`, error);
+              });
+            }
+          }
+          const grantedRows = await VoiceParticipantRoleGrant.find({
+            guildId: session.guildId,
+            sourceType: "splitvc",
+            sourceId: session.sessionId,
+            status: "active",
+          }).lean().catch((error) => {
+            cleanupFailed = true;
+            logRecoverableError(`Failed to find interrupted direct splitvc role grants ${session.sessionId}`, error);
+            return [];
+          });
+          if (grantedRows.length > 0) {
+            const roleRemoval = await removeRoleFromMembers(
+              guild,
+              session.participantRoleId,
+              grantedRows.map((row) => row.memberId),
+              { sourceType: "splitvc", sourceId: session.sessionId },
+            ).catch((error) => {
+              cleanupFailed = true;
+              logRecoverableError(`Failed to remove interrupted direct splitvc participant roles ${session.sessionId}`, error);
+              return { failed: grantedRows.length };
+            });
+            if (roleRemoval.failed > 0) cleanupFailed = true;
+          }
+          await SplitProcessSession.updateOne(
+            { sessionId: session.sessionId, status: "active" },
+            {
+              $set: {
+                status: cleanupFailed ? "cleanup_required" : "canceled",
+                phase: cleanupFailed ? "cleanup_required" : "canceled",
+                ...(cleanupFailed ? {} : {
+                  childChannelIds: [],
+                  childChannelStates: [],
+                  childChannelsCleanupCompleted: true,
+                }),
+                completedAt: new Date(),
+                lastError: cleanupFailed
+                  ? "Bot restarted before direct transfer completed; direct VC cleanup is still required"
+                  : "Bot restarted before direct transfer completed",
+              },
+            },
+          );
+          if (cleanupFailed && normalizeSessionSplitMode(session) === "direct") {
+            startDirectChildMonitor({ sessionId: session.sessionId }, guild);
+          }
+          continue;
+        }
         if (session.phase === "transfer_waiting" && !(session.childChannelIds?.length)) {
           await SplitProcessSession.updateOne(
             { sessionId: session.sessionId, status: "active" },
             { $set: { status: "canceled", phase: "canceled", lastError: "Bot restarted before transfer completed" } },
           );
+          continue;
+        }
+        if (session.status === "cleanup_required" && normalizeSessionSplitMode(session) === "direct") {
+          startDirectChildMonitor(session, guild);
+          restored += 1;
           continue;
         }
         if (
@@ -619,6 +845,24 @@ export function createVoiceSplitFeature(dependencies) {
           && ["active", "extended"].includes(session.waitingMonitorStatus)
         ) {
           startRestoredWaitingMonitor(session, guild);
+        }
+        if (normalizeSessionSplitMode(session) === "direct" && session.childChannelIds?.length && !session.childChannelsCleanupCompleted) {
+          startDirectChildMonitor(session, guild);
+        }
+        if (
+          normalizeSessionSplitMode(session) === "direct"
+          && ["active", "finish_notice_pending"].includes(session.status)
+          && !session.finishNoticeSent
+          && session.finishNoticeAt
+          && new Date(session.finishNoticeAt).getTime() <= Date.now()
+        ) {
+          void recoverOverdueDirectFinishNotice(session, guild).catch((error) => {
+            console.error(`Failed to recover overdue direct splitvc finish notice ${session.sessionId}: ${error.message}`);
+          });
+        }
+        if (["completed", "canceled"].includes(session.status)) {
+          restored += 1;
+          continue;
         }
         if (session.status === "active" && !session.finishNoticeSent) { restored += 1; continue; }
         const roleRemoveAt = session.roleRemoveAt ? new Date(session.roleRemoveAt).getTime() : Date.now();
@@ -2654,6 +2898,461 @@ export function createVoiceSplitFeature(dependencies) {
   }
   
   
+  function directChildStateMap(session) {
+    return new Map((session?.childChannelStates ?? []).map((state) => [state.channelId, { ...state }]));
+  }
+
+  async function persistDirectChildStates(sessionId, states, completed = false) {
+    await SplitProcessSession.updateOne(
+      { sessionId },
+      {
+        $set: {
+          childChannelStates: [...states.values()],
+          childChannelsCleanupCompleted: completed,
+        },
+      },
+    );
+  }
+
+  async function markDirectSplitCleanupRequired(sessionId, lastError, guild = null) {
+    await SplitProcessSession.updateOne(
+      {
+        sessionId,
+        status: { $in: ["active", "finish_notice_pending", "completed", "canceled", "failed", "cleanup_required"] },
+      },
+      {
+        $set: {
+          status: "cleanup_required",
+          phase: "cleanup_required",
+          lastError,
+          completedAt: new Date(),
+        },
+      },
+    ).catch((error) => logRecoverableError(`Failed to mark direct splitvc cleanup required for ${sessionId}`, error));
+    if (guild) startDirectChildMonitor({ sessionId }, guild);
+  }
+
+  async function deleteDirectChildChannel(channel, reason, logMessage) {
+    if (!channel) return true;
+    try {
+      await channel.delete(reason);
+      return true;
+    } catch (error) {
+      logRecoverableError(logMessage, error);
+      return false;
+    }
+  }
+
+  async function createDirectChildChannels(groups, config) {
+    const created = [];
+    try {
+      for (const [index, group] of groups.entries()) {
+        if (!group?.length) continue;
+        const channel = await config.guild.channels.create({
+          name: `会話練習会(${index + 1})`,
+          type: ChannelType.GuildVoice,
+          parent: config.childCategoryId,
+          userLimit: DIRECT_CHILD_USER_LIMIT,
+          reason: "Create direct splitvc conversation channel",
+        });
+        created.push({ channel, groupNumber: index + 1 });
+        await SplitProcessSession.updateOne(
+          { sessionId: config.splitSessionId },
+          {
+            $addToSet: { childChannelIds: channel.id },
+            $push: { childChannelStates: { channelId: channel.id, groupNumber: index + 1 } },
+          },
+        );
+        // Explicitly synchronize overwrites with the category.  userLimit is
+        // independent from permission overwrites and remains five after this.
+        if (typeof channel.lockPermissions === "function") {
+          await channel.lockPermissions();
+        }
+      }
+      return created;
+    } catch (error) {
+      const deletedChannelIds = [];
+      await Promise.all(created.map(async ({ channel }) => {
+        if (await deleteDirectChildChannel(
+          channel,
+          "Rollback direct splitvc channel creation",
+          `Failed to roll back direct splitvc channel ${channel.id}`,
+        )) {
+          deletedChannelIds.push(channel.id);
+        }
+      }));
+      if (deletedChannelIds.length > 0) {
+        await SplitProcessSession.updateOne(
+          { sessionId: config.splitSessionId },
+          {
+            $pull: {
+              childChannelIds: { $in: deletedChannelIds },
+              childChannelStates: { channelId: { $in: deletedChannelIds } },
+            },
+          },
+        ).catch((cleanupError) => logRecoverableError(`Failed to remove rolled-back direct splitvc channels from session ${config.splitSessionId}`, cleanupError));
+      }
+      const failedChannelIds = created
+        .map(({ channel }) => channel.id)
+        .filter((channelId) => !deletedChannelIds.includes(channelId));
+      if (failedChannelIds.length > 0) {
+        await markDirectSplitCleanupRequired(
+          config.splitSessionId,
+          `Direct splitvc channel creation rollback failed for: ${failedChannelIds.join(", ")}`,
+          config.guild,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async function transferDirectGroups(groups, config) {
+    const lines = [];
+    const childChannelIds = new Set();
+    const participantMemberIds = new Set();
+    const participantRoleGrantedMemberIds = new Set();
+    const groupSummaries = [];
+    const channels = await createDirectChildChannels(groups, config);
+
+    for (const [index, group] of groups.entries()) {
+      const entry = channels[index];
+      if (!entry) continue;
+      const movedMemberIds = [];
+      const failed = [];
+      const roleFailures = [];
+      for (const member of group) {
+        if (!member.voice?.channelId) {
+          failed.push(member.displayName);
+          continue;
+        }
+        try {
+          const transfer = await moveMemberWithParticipantRole(
+            member,
+            entry.channel,
+            "Move group member to direct splitvc channel",
+            config.participantRole,
+            participantMemberIds,
+            participantRoleGrantedMemberIds,
+            config.splitSessionId,
+          );
+          if (!transfer.moved) {
+            roleFailures.push(transfer.memberName);
+            failed.push(member.displayName);
+            continue;
+          }
+          movedMemberIds.push(member.id);
+          await SplitProcessSession.updateOne(
+            { sessionId: config.splitSessionId },
+            {
+              $addToSet: {
+                participantMemberIds: member.id,
+                ...(transfer.roleGranted ? { participantRoleGrantedMemberIds: member.id } : {}),
+              },
+            },
+          ).catch((error) => logRecoverableError(`Failed to persist direct splitvc member ${member.id}`, error));
+        } catch (error) {
+          failed.push(member.displayName);
+          logRecoverableError(`Failed to move direct splitvc member ${member.id}`, error);
+        }
+      }
+
+      if (movedMemberIds.length === 0) {
+        const deleted = await deleteDirectChildChannel(
+          entry.channel,
+          "Remove empty direct splitvc channel after transfer failure",
+          `Failed to delete empty direct splitvc channel ${entry.channel.id}`,
+        );
+        if (deleted) {
+          await SplitProcessSession.updateOne(
+            { sessionId: config.splitSessionId },
+            { $pull: { childChannelIds: entry.channel.id, childChannelStates: { channelId: entry.channel.id } } },
+          ).catch((error) => logRecoverableError(`Failed to remove deleted direct splitvc channel ${entry.channel.id} from session`, error));
+        } else {
+          // Keep the channel tracked so the direct-child monitor can retry the
+          // deletion.  It may be one of several groups, so do not fail the
+          // groups that transferred successfully.
+          childChannelIds.add(entry.channel.id);
+        }
+        lines.push(`グループ ${index + 1}: 転送できたメンバーがいませんでした。`);
+        continue;
+      }
+
+      childChannelIds.add(entry.channel.id);
+      groupSummaries.push({
+        groupNumber: entry.groupNumber,
+        channelId: entry.channel.id,
+        channelName: entry.channel.name,
+        memberNames: shuffle(group).map((member) => member.displayName),
+        memberIds: movedMemberIds,
+      });
+      const failedText = failed.length > 0 ? ` 転送失敗: ${failed.join("、")}` : "";
+      const roleFailedText = roleFailures.length > 0 ? ` 参加者ロール付与失敗: ${roleFailures.join("、")}` : "";
+      lines.push(`グループ ${index + 1}: ${entry.channel.name} へ ${movedMemberIds.length}/${group.length} 人を転送しました。${failedText}${roleFailedText}`);
+    }
+
+    return {
+      lines,
+      childChannelIds: [...childChannelIds],
+      groupSummaries,
+      participantMemberIds: [...participantMemberIds],
+      participantRoleGrantedMemberIds: [...participantRoleGrantedMemberIds],
+    };
+  }
+
+  function clearDirectChildMonitor(sessionId) {
+    const timer = directChildMonitorTimers.get(sessionId);
+    if (timer) clearInterval(timer);
+    directChildMonitorTimers.delete(sessionId);
+  }
+
+  async function processDirectCleanupRequiredSession(session, guild) {
+    const remainingChannelIds = [];
+    const stateMap = directChildStateMap(session);
+    for (const channelId of session.childChannelIds ?? []) {
+      let channel;
+      try {
+        channel = await guild.channels.fetch(channelId);
+      } catch (error) {
+        if (error?.code === 10003) continue;
+        remainingChannelIds.push(channelId);
+        logRecoverableError(`Failed to fetch direct splitvc cleanup channel ${channelId}`, error);
+        continue;
+      }
+      if (!channel?.isVoiceBased?.()) continue;
+      const deleted = await deleteDirectChildChannel(
+        channel,
+        "Retry direct splitvc cleanup",
+        `Failed to retry direct splitvc channel cleanup ${channelId}`,
+      );
+      if (!deleted) remainingChannelIds.push(channelId);
+    }
+
+    let roleCleanupFailed = false;
+    const grantedRows = await VoiceParticipantRoleGrant.find({
+      guildId: session.guildId,
+      sourceType: "splitvc",
+      sourceId: session.sessionId,
+      status: "active",
+    }).lean().catch((error) => {
+      roleCleanupFailed = true;
+      logRecoverableError(`Failed to find direct splitvc cleanup role grants ${session.sessionId}`, error);
+      return [];
+    });
+    if (grantedRows.length > 0) {
+      const roleRemoval = await removeRoleFromMembers(
+        guild,
+        session.participantRoleId,
+        grantedRows.map((row) => row.memberId),
+        { sourceType: "splitvc", sourceId: session.sessionId },
+      ).catch((error) => {
+        roleCleanupFailed = true;
+        logRecoverableError(`Failed to retry direct splitvc participant-role cleanup ${session.sessionId}`, error);
+        return { failed: grantedRows.length };
+      });
+      if (roleRemoval.failed > 0) roleCleanupFailed = true;
+    }
+
+    const cleanupCompleted = remainingChannelIds.length === 0 && !roleCleanupFailed;
+    const remainingStates = [...stateMap.values()].filter((state) => remainingChannelIds.includes(state.channelId));
+    await SplitProcessSession.updateOne(
+      { sessionId: session.sessionId, status: "cleanup_required" },
+      {
+        $set: cleanupCompleted
+          ? {
+            status: "failed",
+            phase: "failed",
+            childChannelIds: [],
+            childChannelStates: [],
+            childChannelsCleanupCompleted: true,
+            roleRemovalCompleted: true,
+            completedAt: new Date(),
+            lastError: "Direct splitvc cleanup completed after retry",
+          }
+          : {
+            status: "cleanup_required",
+            phase: "cleanup_required",
+            childChannelIds: remainingChannelIds,
+            childChannelStates: remainingStates,
+            childChannelsCleanupCompleted: false,
+            lastError: "Direct splitvc cleanup is still pending; automatic retry will continue",
+          },
+      },
+    ).catch((error) => logRecoverableError(`Failed to persist direct splitvc cleanup retry state ${session.sessionId}`, error));
+    if (cleanupCompleted) clearDirectChildMonitor(session.sessionId);
+  }
+
+  async function processDirectChildMonitor(sessionId, guild) {
+    if (directChildMonitorLocks.has(sessionId)) return;
+    directChildMonitorLocks.add(sessionId);
+    try {
+      const sessionFilter = {
+        sessionId,
+        splitMode: "direct",
+        status: { $in: ["active", "feedback_open", "role_remove_pending", "cleaning_up", "completed", "canceled", "cleanup_required"] },
+      };
+      let session = await SplitProcessSession.findOne(sessionFilter).lean();
+      if (!session) {
+        clearDirectChildMonitor(sessionId);
+        return;
+      }
+      if (session.waitingRollbackTasks?.length) {
+        await processWaitingRollbackTasks(sessionId, guild);
+        session = await SplitProcessSession.findOne(sessionFilter).lean();
+        if (!session) {
+          clearDirectChildMonitor(sessionId);
+          return;
+        }
+      }
+      if (session.status === "cleanup_required") {
+        await processDirectCleanupRequiredSession(session, guild);
+        return;
+      }
+
+      const states = directChildStateMap(session);
+      let changed = false;
+      let remainingChannels = 0;
+      const now = Date.now();
+      const finishAt = session.finishNoticeAt ? new Date(session.finishNoticeAt).getTime() : null;
+      const finishSent = session.finishNoticeSent === true;
+
+      for (const channelId of session.childChannelIds ?? []) {
+        const current = states.get(channelId) ?? { channelId };
+        let channel;
+        try {
+          channel = await guild.channels.fetch(channelId);
+        } catch (error) {
+          // A transient Discord/API failure must not be interpreted as a
+          // deleted channel.  Only Discord's explicit unknown-channel error
+          // is terminal; the next poll will retry all other failures.
+          if (error?.code === 10003) {
+            channel = null;
+          } else {
+            remainingChannels += 1;
+            logRecoverableError(`Failed to fetch direct splitvc channel ${channelId}`, error);
+            continue;
+          }
+        }
+        if (!channel?.isVoiceBased?.()) {
+          if (!current.deletedAt) {
+            current.deletedAt = new Date();
+            current.emptySince = null;
+            current.cleanupAt = null;
+            states.set(channelId, current);
+            changed = true;
+          }
+          continue;
+        }
+
+        remainingChannels += 1;
+        const humanCount = [...channel.members.values()].filter((member) => !member.user?.bot).length;
+        if (humanCount > 0) {
+          if (current.emptySince || current.cleanupAt || current.deletedAt) {
+            current.emptySince = null;
+            current.cleanupAt = null;
+            current.deletedAt = null;
+            states.set(channelId, current);
+            changed = true;
+          }
+          continue;
+        }
+
+        if (current.deletedAt) {
+          current.deletedAt = null;
+          changed = true;
+        }
+        if (!current.emptySince) {
+          current.emptySince = new Date();
+          changed = true;
+        }
+
+        if (!current.cleanupAt) {
+          if (finishSent) current.cleanupAt = new Date(now);
+          else if (finishAt && finishAt > now) current.cleanupAt = new Date(Math.min(now + DIRECT_EMPTY_GRACE_MS, finishAt));
+          if (current.cleanupAt) changed = true;
+        }
+        if (current.cleanupAt && new Date(current.cleanupAt).getTime() <= now && (finishSent || !finishAt || finishAt > now)) {
+          const deleted = await channel.delete("Remove empty direct splitvc channel").then(() => true).catch((error) => {
+            logRecoverableError(`Failed to delete empty direct splitvc channel ${channelId}`, error);
+            return false;
+          });
+          if (deleted) {
+            current.deletedAt = new Date();
+            current.cleanupAt = null;
+            states.set(channelId, current);
+            remainingChannels -= 1;
+            changed = true;
+          }
+        }
+      }
+
+      const completed = remainingChannels === 0 && (session.childChannelIds ?? []).length > 0;
+      if (changed || completed !== session.childChannelsCleanupCompleted) {
+        await persistDirectChildStates(sessionId, states, completed);
+      }
+      if (completed && session.roleRemovalCompleted) clearDirectChildMonitor(sessionId);
+    } finally {
+      directChildMonitorLocks.delete(sessionId);
+    }
+  }
+
+  function startDirectChildMonitor(session, guild) {
+    clearDirectChildMonitor(session.sessionId);
+    const timer = setInterval(() => {
+      void processDirectChildMonitor(session.sessionId, guild).catch((error) => {
+        console.error(`Direct splitvc channel monitor failed for ${session.sessionId}:`, error);
+      }).finally(() => requestOperationalStatusRefresh(guild.id, "split-direct-child-monitor"));
+    }, DIRECT_CHILD_MONITOR_POLL_MS);
+    directChildMonitorTimers.set(session.sessionId, timer);
+    void processDirectChildMonitor(session.sessionId, guild).catch((error) => {
+      console.error(`Direct splitvc channel monitor failed for ${session.sessionId}:`, error);
+    });
+  }
+
+  async function recoverOverdueDirectFinishNotice(session, guild) {
+    const channel = await guild.channels.fetch(session.operationChannelId).catch(() => null);
+    if (!channel?.send) return;
+    const actionKey = `split-finish-notice:${session.sessionId}`;
+    const existingAction = await scheduleAction({
+      actionKey,
+      guildId: guild.id,
+      type: "split_finish_notice",
+      executeAt: new Date(),
+      roleId: session.participantRoleId,
+      memberIds: session.participantMemberIds ?? [],
+      payload: {
+        sessionId: session.sessionId,
+        kokuchiEventId: session.kokuchiEventId ?? null,
+        kokuchiEventRevision: session.kokuchiEventRevision ?? null,
+        channelId: channel.id,
+        finishMessage: session.finishMessage ?? DEFAULT_FINISH_MESSAGE,
+      },
+    });
+    if (existingAction?.status === "failed") {
+      await retryAction(actionKey, {
+        executeAt: new Date(),
+        lastError: "Recovered overdue direct splitvc finish notice after restart",
+      }).catch((error) => logRecoverableError(`Failed to requeue overdue direct splitvc finish notice ${session.sessionId}`, error));
+    }
+    await sendClaimedSplitFinishNotice({
+      channel,
+      guild,
+      ownerId: session.ownerId,
+      roleId: session.participantRoleId,
+      memberIds: new Set(session.participantMemberIds ?? []),
+      roleGrantedMemberIds: new Set(session.participantRoleGrantedMemberIds ?? []),
+      finishMessage: session.finishMessage ?? DEFAULT_FINISH_MESSAGE,
+      noticeWaitMs: 0,
+      roleRemoveWaitMs: 0,
+      childChannelIds: new Set(session.childChannelIds ?? []),
+      state: { ended: false },
+      splitSessionId: session.sessionId,
+      kokuchiEventId: session.kokuchiEventId ?? null,
+      kokuchiEventRevision: session.kokuchiEventRevision ?? null,
+      settings: await getGuildSettings(guild.id).catch(() => null),
+      splitMode: "direct",
+    });
+  }
+
   async function handleSplitVoice(interaction) {
     if (!interaction.inGuild()) {
       await interaction.reply({
@@ -2744,6 +3443,7 @@ export function createVoiceSplitFeature(dependencies) {
   
     const includeBots = interaction.options.getBoolean("include_bots") ?? false;
     const splitSessionId = createSessionId();
+    interaction.__splitSessionId = splitSessionId;
     const members = [...sourceChannel.members.values()]
       .filter((member) => includeBots || !member.user.bot)
       .sort((left, right) =>
@@ -2858,6 +3558,7 @@ export function createVoiceSplitFeature(dependencies) {
     let temporaryWaitingVcDeleteTimer = null;
     let splitStartMessage = null;
     const transferAt = new Date(Date.now() + transferWaitMs);
+    let nextDirectGroupNumber = 1;
   
     // Persist the intent before displaying the cancellable countdown.  A
     // restart during this window can now restore or cancel the same session
@@ -2865,9 +3566,10 @@ export function createVoiceSplitFeature(dependencies) {
     await persistSplitProcessSession(splitSessionId, {
       guildId: interaction.guildId,
       ownerId: interaction.user.id,
+      splitMode: config.splitMode,
       sourceChannelId: sourceChannel.id,
       operationChannelId: operationChannel.id,
-      parentChannelId: config.parentChannel.id,
+      parentChannelId: config.parentChannel?.id ?? null,
       childCategoryId: config.childCategoryId,
       participantRoleId: config.tempRole.id,
       kokuchiEventId: settings?.kokuchiEventId ?? null,
@@ -2888,33 +3590,47 @@ export function createVoiceSplitFeature(dependencies) {
       buttonLabel: "転送キャンセル",
       cancelText: "転送はキャンセルされました。終了通知の待機は続行します。",
       render: (remainingMs) =>
-        `PB親チャンネルへの転送開始まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
+        `${config.splitMode === "direct" ? "VC作成後のメンバー転送" : "PB親チャンネルへの転送"}開始まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
     });
   
     if (transferCanceled) {
       await persistSplitProcessSession(splitSessionId, {
         status: "canceled",
         phase: "canceled",
+        ...(config.splitMode === "direct" ? { childChannelStates: [], childChannelsCleanupCompleted: true } : {}),
         completedAt: new Date(),
       });
       releaseSplitVoiceLock();
       await operationChannel.send("転送をキャンセルしました。");
     } else {
-      const transferResult = await transferGroups(groups, {
-        splitSessionId,
-        parentChannel: config.parentChannel,
-        childCategoryId: config.childCategoryId,
-        participantRole: config.tempRole,
-        sourceChannelId: sourceChannel.id,
-        guild: interaction.guild,
-        settings,
-      });
+      const transferResult = config.splitMode === "direct"
+        ? await transferDirectGroups(groups, {
+          splitSessionId,
+          childCategoryId: config.childCategoryId,
+          participantRole: config.tempRole,
+          sourceChannelId: sourceChannel.id,
+          guild: interaction.guild,
+          settings,
+        })
+        : await transferGroups(groups, {
+          splitSessionId,
+          parentChannel: config.parentChannel,
+          childCategoryId: config.childCategoryId,
+          participantRole: config.tempRole,
+          sourceChannelId: sourceChannel.id,
+          guild: interaction.guild,
+          settings,
+        });
       addMany(childChannelIds, transferResult.childChannelIds);
       addMany(participantMemberIds, transferResult.participantMemberIds);
       addMany(participantRoleGrantedMemberIds, transferResult.participantRoleGrantedMemberIds);
   
       if (transferResult.groupSummaries.length === 0) {
         const cleanupErrors = [];
+        const sessionBeforeCleanup = await SplitProcessSession.findOne({ sessionId: splitSessionId }).lean().catch((error) => {
+          cleanupErrors.push(`session lookup: ${error.message}`);
+          return null;
+        });
         const source = await interaction.guild.channels.fetch(sourceChannel.id).catch((error) => {
           cleanupErrors.push(`source VC lookup: ${error.message}`);
           return null;
@@ -2942,25 +3658,51 @@ export function createVoiceSplitFeature(dependencies) {
         } catch (error) {
           cleanupErrors.push(`participant role rollback: ${error.message}`);
         }
-        for (const channelId of childChannelIds) {
+        for (const channelId of [...childChannelIds]) {
+          let channel;
           try {
-            const channel = await interaction.guild.channels.fetch(channelId);
-            await channel.delete("Remove empty splitvc child after all transfers failed");
+            channel = await interaction.guild.channels.fetch(channelId);
           } catch (error) {
-            cleanupErrors.push(`child VC ${channelId} cleanup: ${error.message}`);
+            if (error?.code === 10003) {
+              childChannelIds.delete(channelId);
+              continue;
+            }
+            cleanupErrors.push(`child VC ${channelId} lookup: ${error.message}`);
+            continue;
+          }
+          if (await deleteDirectChildChannel(
+            channel,
+            "Remove empty splitvc child after all transfers failed",
+            `Failed to clean up splitvc child ${channelId} after all transfers failed`,
+          )) {
+            childChannelIds.delete(channelId);
+          } else {
+            cleanupErrors.push(`child VC ${channelId} cleanup failed`);
           }
         }
         const lastError = cleanupErrors.length > 0
           ? `No group was transferred successfully. Cleanup required: ${cleanupErrors.join(" | ")}`
           : "No group was transferred successfully.";
-        await persistSplitProcessSession(splitSessionId, {
+        const cleanupPatch = {
           status: cleanupErrors.length > 0 ? "cleanup_required" : "failed",
           phase: "failed",
           completedAt: new Date(),
           lastError,
-        });
+          childChannelIds: [...childChannelIds],
+        };
+        if (config.splitMode === "direct") {
+          cleanupPatch.childChannelStates = (sessionBeforeCleanup?.childChannelStates ?? [])
+            .filter((state) => childChannelIds.has(state.channelId));
+          cleanupPatch.childChannelsCleanupCompleted = childChannelIds.size === 0;
+        }
+        await persistSplitProcessSession(splitSessionId, cleanupPatch);
+        if (cleanupErrors.length > 0 && config.splitMode === "direct") {
+          startDirectChildMonitor({ sessionId: splitSessionId }, interaction.guild);
+        }
         releaseSplitVoiceLock();
-        await operationChannel.send("グループ転送に成功したグループがないため、処理を終了しました。参加者ロールと作成済みVCは回収しました。");
+        await operationChannel.send(cleanupErrors.length > 0
+          ? "グループ転送に成功したグループがないため、処理を終了しました。参加者ロールまたは作成済みVCの回収が完了していません。運用ログを確認してください。"
+          : "グループ転送に成功したグループがないため、処理を終了しました。参加者ロールと作成済みVCは回収しました。");
         await sendOperationalLog({
           guild: interaction.guild,
           settings,
@@ -2971,6 +3713,10 @@ export function createVoiceSplitFeature(dependencies) {
       }
   
       if (transferResult.groupSummaries.length > 0) {
+        nextDirectGroupNumber = transferResult.groupSummaries.reduce(
+          (max, summary) => Math.max(max, Number(summary.groupNumber) || 0),
+          0,
+        ) + 1;
         try {
           await startSplitGrouping({
             guildId: interaction.guildId,
@@ -2999,6 +3745,7 @@ export function createVoiceSplitFeature(dependencies) {
         await persistSplitProcessSession(splitSessionId, {
           phase: "active",
           status: "active",
+          splitMode: config.splitMode,
           participantMemberIds: [...participantMemberIds],
           participantRoleGrantedMemberIds: [...participantRoleGrantedMemberIds],
           childChannelIds: [...childChannelIds],
@@ -3007,6 +3754,10 @@ export function createVoiceSplitFeature(dependencies) {
             channelId: summary.channelId,
             memberIds: summary.memberIds,
           })),
+          childChannelStates: config.splitMode === "direct"
+            ? transferResult.groupSummaries.map((summary) => ({ channelId: summary.channelId, groupNumber: summary.groupNumber }))
+            : [],
+          childChannelsCleanupCompleted: false,
           conversationStartedAt: new Date(),
           finishNoticeAt,
           roleRemoveAt,
@@ -3036,6 +3787,7 @@ export function createVoiceSplitFeature(dependencies) {
         throw error;
       }
       releaseSplitVoiceLock();
+      if (config.splitMode === "direct") startDirectChildMonitor({ sessionId: splitSessionId }, interaction.guild);
   
       await sendOperationalLog({
         guild: interaction.guild,
@@ -3139,7 +3891,7 @@ export function createVoiceSplitFeature(dependencies) {
                   guild: interaction.guild,
                   settings,
                   fallbackChannel: operationChannel,
-                  content: "3人以下の子VCが残っているため、待機用VCの自動削除を延長しました。",
+                  content: "2人以下の子VCが残っているため、待機用VCの自動削除を延長しました。",
                 });
   
                 return;
@@ -3170,11 +3922,13 @@ export function createVoiceSplitFeature(dependencies) {
           guild: interaction.guild,
           waitingChannel: temporaryWaitingVc,
           parentChannel: config.parentChannel,
+          splitMode: config.splitMode,
           participantRole: config.tempRole,
           childCategoryId: config.childCategoryId,
           childChannelIds,
           participantMemberIds,
           participantRoleGrantedMemberIds,
+          nextDirectGroupNumber,
           state: processState,
           settings,
           previousPairKeys: getPairKeysFromGroups(previousGroups),
@@ -3201,13 +3955,14 @@ export function createVoiceSplitFeature(dependencies) {
         roleRemoveWaitMs,
         childChannelIds,
         state: processState,
-         splitSessionId,
-         kokuchiEventId: settings?.kokuchiEventId ?? null,
-         kokuchiEventRevision,
-         temporaryWaitingVc,
+        splitSessionId,
+        kokuchiEventId: settings?.kokuchiEventId ?? null,
+        kokuchiEventRevision,
+        temporaryWaitingVc,
         temporaryWaitingVcDeleteTimer,
         splitStartMessage,
         settings,
+        splitMode: config.splitMode,
       }).catch((error) => {
         console.error(error);
       });
@@ -3247,13 +4002,18 @@ export function createVoiceSplitFeature(dependencies) {
   
     async function resolveProcessConfig(interaction, settings, botMember) {
       const errors = [];
+      const splitMode = normalizeSplitMode(settings);
   
       if (!settings?.tempRoleId) {
         errors.push("/setting splitvc で参加者ロールを設定してください。");
       }
   
-      if (!settings?.parentChannelId) {
+      if (splitMode === "partybeast" && !settings?.parentChannelId) {
         errors.push("/setting splitvc でPB親ボイスチャンネルを設定してください。");
+      }
+
+      if (splitMode === "direct" && !settings?.childCategoryId) {
+        errors.push("直接作成モードでは、/setting splitvc で作成先カテゴリを設定してください。");
       }
   
       const tempRole = settings?.tempRoleId
@@ -3273,7 +4033,7 @@ export function createVoiceSplitFeature(dependencies) {
         errors.push("設定済みの参加者ロールが見つかりません。");
       }
   
-      if (settings?.parentChannelId && !parentChannel?.isVoiceBased()) {
+      if (splitMode === "partybeast" && settings?.parentChannelId && !parentChannel?.isVoiceBased()) {
         errors.push("設定済みのPB親チャンネルがボイスチャンネルではありません。");
       }
   
@@ -3281,6 +4041,19 @@ export function createVoiceSplitFeature(dependencies) {
         errors.push("設定済みの子VCカテゴリが見つかりません。");
       } else if (settings?.childCategoryId && childCategory.type !== ChannelType.GuildCategory) {
         errors.push("設定済みの子VCカテゴリがカテゴリチャンネルではありません。");
+      }
+
+      if (splitMode === "direct" && childCategory) {
+        const categoryPermissions = childCategory.permissionsFor(botMember);
+        if (!categoryPermissions?.has(PermissionFlagsBits.ViewChannel)) {
+          errors.push("Botが直接作成VCのカテゴリを閲覧する権限を持っていません。");
+        }
+        if (!categoryPermissions?.has(PermissionFlagsBits.ManageChannels)) {
+          errors.push("Botに直接作成VCのManage Channels権限がありません。");
+        }
+        if (!categoryPermissions?.has(PermissionFlagsBits.Connect)) {
+          errors.push("Botに直接作成VCへ接続する権限がありません。");
+        }
       }
   
       if (settings?.waitingVcCategoryId && !waitingVcCategory) {
@@ -3310,7 +4083,7 @@ export function createVoiceSplitFeature(dependencies) {
         errors.push("Botに Move Members 権限がありません。");
       }
   
-      if (parentChannel?.isVoiceBased()) {
+      if (splitMode === "partybeast" && parentChannel?.isVoiceBased()) {
         const parentPermissions = parentChannel.permissionsFor(botMember);
   
         if (!parentPermissions?.has(PermissionsBitField.Flags.ViewChannel)) {
@@ -3331,9 +4104,11 @@ export function createVoiceSplitFeature(dependencies) {
       }
   
       return {
+        splitMode,
         errors,
         tempRole,
         parentChannel,
+        childCategory,
         waitingVcCategory,
         childCategoryId: childCategory?.id ?? null,
         waitingVcCategoryId: waitingVcCategory?.id ?? null,
@@ -3650,7 +4425,7 @@ export function createVoiceSplitFeature(dependencies) {
           guild: options.guild,
           settings: options.settings,
           fallbackChannel: options.channel,
-          content: "3人以下の子VCが残っているため、途中参加監視を延長します。",
+          content: "2人以下の子VCが残っているため、途中参加監視を延長します。",
         });
   
         while (!options.state.ended && (await shouldKeepWaitingRoomAlive(options))) {
@@ -3727,6 +4502,7 @@ export function createVoiceSplitFeature(dependencies) {
     }
   
     async function processWaitingRoom(options) {
+      await processWaitingRollbackTasks(options.splitSessionId, options.guild);
       const waitingMembers = getWaitingMembers(options.waitingChannel);
   
       if (waitingMembers.length === 0) {
@@ -3819,10 +4595,14 @@ export function createVoiceSplitFeature(dependencies) {
           guild: options.guild,
           settings: options.settings,
           splitSessionId: options.splitSessionId,
+          splitMode: options.splitMode,
+          childChannelIds: options.childChannelIds,
+          nextDirectGroupNumber: options.nextDirectGroupNumber,
         });
-  
+
         if (result.childChannelId) {
           options.childChannelIds.add(result.childChannelId);
+          if (options.splitMode === "direct") options.nextDirectGroupNumber = (options.nextDirectGroupNumber ?? 1) + 1;
           options.currentGroupMembers.set(result.childChannelId, new Set(result.movedMemberIds));
           const persistence = await persistWaitingGroupMembers(
             options,
@@ -3833,7 +4613,6 @@ export function createVoiceSplitFeature(dependencies) {
           );
           if (!persistence.persisted) return;
         }
-  
         await sendOperationalLog({
           guild: options.guild,
           settings: options.settings,
@@ -3904,9 +4683,17 @@ export function createVoiceSplitFeature(dependencies) {
     }
   
     async function shouldKeepWaitingRoomAlive(options) {
-      return Boolean(
-        await findUnderfilledChildChannel(options.guild, options.childChannelIds),
-      );
+      for (const channelId of options.childChannelIds) {
+        const channel = options.guild.channels.cache.get(channelId)
+          ?? await options.guild.channels.fetch(channelId).catch(() => null);
+        if (
+          channel?.isVoiceBased?.()
+          && getNonBotVoiceMembers(channel).length <= WAITING_EXTENSION_MAX_MEMBERS
+        ) {
+          return true;
+        }
+      }
+      return false;
     }
   
     async function moveMemberToChildChannel(
@@ -3929,6 +4716,9 @@ export function createVoiceSplitFeature(dependencies) {
     }
   
     async function transferWaitingGroupToNewChild(members, config) {
+      if (config.splitMode === "direct") {
+        return transferWaitingGroupToDirectChild(members, config);
+      }
       const lines = [];
       const seedMember = members[0];
   
@@ -4033,6 +4823,119 @@ export function createVoiceSplitFeature(dependencies) {
         };
       }
     }
+
+    async function transferWaitingGroupToDirectChild(members, config) {
+      const lines = [];
+      const movedMemberIds = [];
+      const newlyGrantedRoleMemberIds = [];
+      const failed = [];
+      const roleFailures = [];
+      let childChannel = null;
+      try {
+        childChannel = await config.guild.channels.create({
+          name: `会話練習会(${config.nextDirectGroupNumber ?? (config.childChannelIds?.size ?? 0) + 1})`,
+          type: ChannelType.GuildVoice,
+          parent: config.childCategoryId,
+          userLimit: DIRECT_CHILD_USER_LIMIT,
+          reason: "Create direct splitvc waiting-room channel",
+        });
+        await SplitProcessSession.updateOne(
+          { sessionId: config.splitSessionId },
+          {
+            $addToSet: { childChannelIds: childChannel.id },
+            $push: { childChannelStates: { channelId: childChannel.id, groupNumber: config.nextDirectGroupNumber ?? (config.childChannelIds?.size ?? 0) + 1 } },
+          },
+        );
+        if (typeof childChannel.lockPermissions === "function") await childChannel.lockPermissions();
+        await sendSplitRandomTopicPanels({
+          guild: config.guild,
+          settings: config.settings,
+          childChannelIds: [childChannel.id],
+        });
+        for (const member of members) {
+          try {
+            const transfer = await moveMemberWithParticipantRole(
+              member,
+              childChannel,
+              "Move waiting group member to direct splitvc channel",
+              config.participantRole,
+              config.participantMemberIds,
+              config.participantRoleGrantedMemberIds,
+              config.splitSessionId,
+            );
+            if (!transfer.moved) {
+              roleFailures.push(transfer.memberName);
+              failed.push(member.displayName);
+              continue;
+            }
+            movedMemberIds.push(member.id);
+            if (transfer.roleGranted) newlyGrantedRoleMemberIds.push(member.id);
+            await SplitProcessSession.updateOne(
+              { sessionId: config.splitSessionId },
+              {
+                $addToSet: {
+                  participantMemberIds: member.id,
+                  ...(transfer.roleGranted ? { participantRoleGrantedMemberIds: member.id } : {}),
+                },
+              },
+            ).catch((error) => logRecoverableError(`Failed to persist direct splitvc waiting member ${member.id}`, error));
+          } catch (error) {
+            failed.push(member.displayName);
+            logRecoverableError(`Failed to move waiting member ${member.id} to direct splitvc channel`, error);
+          }
+        }
+        if (movedMemberIds.length === 0) {
+          const deleted = await deleteDirectChildChannel(
+            childChannel,
+            "Remove empty direct splitvc waiting channel",
+            `Failed to delete empty direct splitvc waiting channel ${childChannel.id}`,
+          );
+          if (deleted) {
+            await SplitProcessSession.updateOne(
+              { sessionId: config.splitSessionId },
+              { $pull: { childChannelIds: childChannel.id, childChannelStates: { channelId: childChannel.id } } },
+            ).catch((error) => logRecoverableError(`Failed to remove deleted direct splitvc waiting channel ${childChannel.id} from session`, error));
+          } else {
+            await queueWaitingRollbackTask({
+              sessionId: config.splitSessionId,
+              channelId: childChannel.id,
+              sourceChannelId: config.sourceChannelId,
+              deleteChannel: true,
+              lastError: `Direct splitvc empty waiting channel rollback is pending for ${childChannel.id}`,
+            }).catch((error) => logRecoverableError(`Failed to queue direct splitvc waiting channel rollback ${childChannel.id}`, error));
+          }
+          return {
+            childChannelId: null,
+            movedMemberIds: [],
+            newlyGrantedRoleMemberIds: [],
+            lines: ["転送できたメンバーがいませんでした。"],
+          };
+        }
+        const failedText = failed.length > 0 ? ` 転送失敗: ${failed.join("、")}` : "";
+        const roleFailedText = roleFailures.length > 0 ? ` 参加者ロール付与失敗: ${roleFailures.join("、")}` : "";
+        lines.push(`${childChannel.name} へ ${movedMemberIds.length}/${members.length} 人を転送しました。${failedText}${roleFailedText}`);
+        return { childChannelId: childChannel.id, movedMemberIds, newlyGrantedRoleMemberIds, lines };
+      } catch (error) {
+        if (childChannel) {
+          await queueWaitingRollbackTask({
+            sessionId: config.splitSessionId,
+            channelId: childChannel.id,
+            sourceChannelId: config.sourceChannelId,
+            memberIds: movedMemberIds,
+            roleMemberIds: newlyGrantedRoleMemberIds,
+            deleteChannel: true,
+            lastError: `Direct splitvc waiting channel rollback is pending for ${childChannel.id}: ${error.message}`,
+          }).then(() => processWaitingRollbackTasks(config.splitSessionId, config.guild))
+            .catch((cleanupError) => logRecoverableError(`Failed to queue direct splitvc waiting rollback ${childChannel.id}`, cleanupError));
+        }
+        return {
+          childChannelId: null,
+          movedMemberIds: [],
+          newlyGrantedRoleMemberIds: [],
+          lines: [`転送中に失敗しました。${error.message}`],
+        };
+      }
+    }
   
     async function closeSplitWithoutFeedback(options, reason) {
       // gatheringVcRestorePending is read from the session-owned kokuchi event.
@@ -4043,7 +4946,9 @@ export function createVoiceSplitFeature(dependencies) {
       }
       const actionKey = `split-role-remove:${options.splitSessionId}`;
       const claimed = await claimAction(actionKey);
-      if (!claimed) return;
+      // Before the finish notice is sent, the durable role-removal action has
+      // not been created yet.  Both modes therefore perform the same
+      // immediate cancellation cleanup when there is nothing to claim.
       const actionGuard = await getKokuchiActionGuard({
         guildId: options.guild.id,
         eventId: options.kokuchiEventId ?? null,
@@ -4135,7 +5040,13 @@ export function createVoiceSplitFeature(dependencies) {
         channel: options.channel, ownerId: options.ownerId, totalMs: options.noticeWaitMs, updateEveryMs: COUNTDOWN_UPDATE_MS,
         cancellationKey: options.splitSessionId,
         buttonLabel: "終了通知キャンセル", cancelText: "終了通知はキャンセルされました。参加者ロールをすぐ解除します。",
-        autoCancelWhen: () => areAllChannelsGone(options.guild, options.childChannelIds),
+        // Direct-created VC cleanup is independent from the finish-notice
+        // schedule.  Empty rooms may be removed before this deadline, but the
+        // notice itself must never be sent early just because every room is
+        // empty.
+        autoCancelWhen: options.splitMode === "direct"
+          ? null
+          : () => areAllChannelsGone(options.guild, options.childChannelIds),
         render: (remainingMs) => `終了通知まで残り ${formatDuration(remainingMs)} です。\nキャンセルできるのはコマンド実行者のみです。`,
       });
       if (notificationCanceled === "external") {
@@ -4222,6 +5133,7 @@ export function createVoiceSplitFeature(dependencies) {
         return { persisted: true, groupCreated: existingGroupIndex < 0 };
       } catch (error) {
         const rollbackErrors = [];
+        let childChannelDeleted = false;
         for (const memberId of memberIds) {
           try {
             const member = await options.guild.members.fetch(memberId);
@@ -4247,22 +5159,51 @@ export function createVoiceSplitFeature(dependencies) {
           try {
             const childChannel = await options.guild.channels.fetch(channelId);
             await childChannel?.delete("Rollback split waiting child after persistence failure");
+            childChannelDeleted = true;
           } catch (rollbackError) {
-            rollbackErrors.push(`child channel ${channelId}: ${rollbackError.message}`);
+            if (rollbackError?.code === 10003) childChannelDeleted = true;
+            else rollbackErrors.push(`child channel ${channelId}: ${rollbackError.message}`);
           }
         }
-        const statePatch = {
-          status: rollbackErrors.length ? "cleanup_required" : "failed",
-          phase: rollbackErrors.length ? "cleanup_required" : "failed",
-          lastError: `Waiting transfer persistence failed: ${error.message}${rollbackErrors.length ? `; rollback failures: ${rollbackErrors.join(" | ")}` : ""}`,
-        };
-        const marked = await SplitProcessSession.updateOne(
-          { sessionId: options.splitSessionId },
-          { $set: statePatch },
-        ).catch((stateError) => {
-          console.error(`Failed to mark split waiting persistence failure: ${stateError.message}`);
-          return null;
-        });
+        const lastError = `Waiting transfer persistence failed: ${error.message}${rollbackErrors.length ? `; rollback failures: ${rollbackErrors.join(" | ")}` : ""}`;
+        let marked;
+        if (rollbackErrors.length > 0) {
+          marked = await queueWaitingRollbackTask({
+            sessionId: options.splitSessionId,
+            channelId,
+            sourceChannelId: options.waitingChannel?.id,
+            memberIds,
+            roleMemberIds: newlyGrantedRoleMemberIds,
+            deleteChannel: processName === "new-group",
+            lastError,
+          }).then((task) => ({ matchedCount: task ? 1 : 0 })).catch((stateError) => {
+            console.error(`Failed to queue split waiting rollback: ${stateError.message}`);
+            return null;
+          });
+        } else {
+          const pull = {
+            participantMemberIds: { $in: memberIds },
+            participantRoleGrantedMemberIds: { $in: newlyGrantedRoleMemberIds },
+          };
+          if (processName === "new-group" && childChannelDeleted) {
+            pull.childChannelIds = channelId;
+            pull.childChannelStates = { channelId };
+            pull.groupSnapshots = { channelId };
+          } else {
+            pull["groupSnapshots.$[].memberIds"] = { $in: memberIds };
+          }
+          marked = await SplitProcessSession.updateOne(
+            { sessionId: options.splitSessionId },
+            {
+              $pull: pull,
+              $set: { lastError },
+              $inc: { waitingMonitorFailureCount: 1 },
+            },
+          ).catch((stateError) => {
+            console.error(`Failed to persist split waiting rollback: ${stateError.message}`);
+            return null;
+          });
+        }
         if (!marked || marked.matchedCount !== 1) {
           console.error(`Split waiting persistence failure state could not be confirmed for ${options.splitSessionId}`);
         }
@@ -4449,7 +5390,9 @@ export function createVoiceSplitFeature(dependencies) {
         `対象外VC: ${settings.vcDmExcludedChannelIds?.length ? settings.vcDmExcludedChannelIds.map((id) => `<#${id}>`).join(" ") : "なし"}`,
         "",
         "【splitvc】",
+        `VC作成方式: ${normalizeSplitMode(settings) === "direct" ? "Bot直接作成" : "PB互換モード"}`,
         `参加者ロール: ${settings.tempRoleId ? `<@&${settings.tempRoleId}>` : "未設定"}`,
+        `直接作成先カテゴリ: ${settings.childCategoryId ? `<#${settings.childCategoryId}>` : "未設定"}`,
         `PB親VC: ${settings.parentChannelId ? `<#${settings.parentChannelId}>` : "未設定"}`,
         `待機VCカテゴリ: ${settings.waitingVcCategoryId ? `<#${settings.waitingVcCategoryId}>` : "未設定"}`,
         `待機VC名: ${settings.waitingVcName || DEFAULT_WAITING_VC_NAME}`,
@@ -4840,6 +5783,7 @@ export function createVoiceSplitFeature(dependencies) {
     persistAutoSplitSuggestion,
     clearAutoSplitSuggestion,
     restoreVoiceMonitorSessions,
+    shutdown: shutdownDirectChildMonitors,
     isPersistedVoiceMonitorGrantInCurrentContext,
     reconcilePersistedVoiceParticipantRoleGrants,
     sendVoiceMonitorStartNotice,

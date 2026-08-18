@@ -7,6 +7,28 @@ import { SplitReview } from "../src/models/split-review.js";
 import { SplitReviewDraft } from "../src/models/split-review-draft.js";
 import { SplitProcessSession } from "../src/models/split-process-session.js";
 
+test("splitvc direct mode creates five-seat rooms and keeps PB as an explicit compatibility mode", async () => {
+  const setting = commands.find((command) => command.name === "setting");
+  const splitvc = setting?.options?.find((option) => option.name === "splitvc");
+  const mode = splitvc?.options?.find((option) => option.name === "mode");
+  assert.deepEqual(mode?.choices?.map((choice) => choice.value), ["direct", "partybeast"]);
+  assert.equal(SplitProcessSession.schema.path("splitMode").enumValues.includes("direct"), true);
+  assert.equal(SplitProcessSession.schema.path("splitMode").enumValues.includes("partybeast"), true);
+  assert.ok(SplitProcessSession.schema.path("childChannelStates"));
+  assert.ok(SplitProcessSession.schema.path("childChannelsCleanupCompleted"));
+  assert.ok(SplitProcessSession.schema.path("waitingRollbackTasks"));
+
+  const source = await readFile(new URL("../src/features/voice-split.js", import.meta.url), "utf8");
+  assert.match(source, /const DIRECT_CHILD_USER_LIMIT = 5/);
+  assert.match(source, /name: `会話練習会\(\$\{index \+ 1\}\)`/);
+  assert.match(source, /userLimit: DIRECT_CHILD_USER_LIMIT/);
+  assert.match(source, /autoCancelWhen: options\.splitMode === "direct"/);
+  assert.match(source, /Math\.min\(now \+ DIRECT_EMPTY_GRACE_MS, finishAt\)/);
+  assert.match(source, /async function processDirectCleanupRequiredSession\(/);
+  assert.match(source, /status: \{ \$in: \["active", "feedback_open", "role_remove_pending", "cleaning_up", "completed", "canceled", "cleanup_required"\] \}/);
+  assert.match(source, /function shutdownDirectChildMonitors\(\)/);
+});
+
 async function readSplitSources() {
   const sources = await Promise.all([
     readBotImplementationSource(),
@@ -79,14 +101,46 @@ test("splitvcの通常・途中参加転送は渡されたsplitSessionIdをロ�
 
 test("/splitvc は成功グループが0件なら後続処理を予約せず回収して失敗終了する", async () => {
   const source = await readBotImplementationSource();
-  const start = source.indexOf("const transferResult = await transferGroups(groups");
+  const start = source.indexOf("const transferResult = config.splitMode === \"direct\"");
   const end = source.indexOf("if (transferResult.groupSummaries.length > 0)", start);
   const failurePath = source.slice(start, end);
 
+  assert.match(failurePath, /transferDirectGroups\(groups/);
+  assert.match(failurePath, /transferGroups\(groups/);
   assert.match(failurePath, /if \(transferResult\.groupSummaries\.length === 0\)/);
   assert.match(failurePath, /status: cleanupErrors\.length > 0 \? "cleanup_required" : "failed"/);
   assert.match(failurePath, /await removeRoleFromMembers\(/);
-  assert.match(failurePath, /await channel\.delete\(/);
+  assert.match(failurePath, /await deleteDirectChildChannel\(/);
+});
+
+test("direct splitvc cleanup is retried on startup and its monitor is stopped during shutdown", async () => {
+  const source = await readBotImplementationSource();
+  const feature = await readFile(new URL("../src/features/voice-split.js", import.meta.url), "utf8");
+  assert.match(feature, /splitMode: "direct", status: "cleanup_required"/);
+  assert.match(feature, /session\.status === "cleanup_required"/);
+  assert.match(feature, /startDirectChildMonitor\(session, guild\)/);
+  assert.match(source, /\(\) => voiceSplitFeature\.shutdown\(\)/);
+});
+
+test("途中参加の局所失敗は全VC清掃へ昇格せず、起動後も再試行される", async () => {
+  const source = await readBotImplementationSource();
+  const feature = await readFile(new URL("../src/features/voice-split.js", import.meta.url), "utf8");
+  const start = feature.indexOf("async function transferWaitingGroupToDirectChild");
+  const end = feature.indexOf("async function closeSplitWithoutFeedback", start);
+  const transfer = feature.slice(start, end);
+  assert.match(transfer, /queueWaitingRollbackTask\(\{/);
+  assert.doesNotMatch(transfer, /markDirectSplitCleanupRequired\(/);
+  assert.match(feature, /await processWaitingRollbackTasks\(sessionId, guild\)/);
+  assert.match(source, /if \(session\.waitingRollbackTasks\?\.length\) \{\s*await processWaitingRollbackTasks\(session\.sessionId, guild\)/);
+});
+
+test("全グループ失敗時は未回収があれば完了したとは通知しない", async () => {
+  const source = await readBotImplementationSource();
+  const start = source.indexOf("if (transferResult.groupSummaries.length === 0)");
+  const end = source.indexOf("if (transferResult.groupSummaries.length > 0)", start);
+  const failure = source.slice(start, end);
+  assert.match(failure, /cleanupErrors\.length > 0[\s\S]*?回収が完了していません。運用ログを確認してください/);
+  assert.match(failure, /参加者ロールと作成済みVCは回収しました/);
 });
 
 test("splitvc snapshots always retain their child channel identity", async () => {

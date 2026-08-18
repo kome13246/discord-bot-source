@@ -690,6 +690,7 @@ const voiceSplitFeature = createVoiceSplitFeature({
   releaseMongoLease,
   releaseOteboRecruitmentSlot,
   removeCallWaitRoleFromMembers,
+  retryAction,
   replaceNestedObject,
   requestOperationalStatusRefresh,
   resolveConfiguredTextChannel,
@@ -1322,6 +1323,28 @@ client.on(Events.InteractionCreate, createInteractionHandler({
   },
   onError: async (interaction, error) => {
     if (interaction.commandName === "splitvc") {
+      const splitSessionId = interaction.__splitSessionId;
+      if (splitSessionId) {
+        const splitSession = await SplitProcessSession.findOne({ sessionId: splitSessionId }).lean().catch(() => null);
+        const canContinueInBackground = Boolean(
+          splitSession?.childChannelIds?.length
+          && splitSession.phase !== "transfer_waiting"
+          && splitSession.status === "active",
+        );
+        await SplitProcessSession.updateOne(
+          { sessionId: splitSessionId, status: { $in: ["active", "finish_notice_pending"] } },
+          {
+            $set: canContinueInBackground
+              ? { lastError: `splitvc command failed after transfer; background recovery continues: ${error?.message ?? error}` }
+              : {
+                status: "failed",
+                phase: "failed",
+                completedAt: new Date(),
+                lastError: `splitvc command failed: ${error?.message ?? error}`,
+              },
+          },
+        ).catch((persistError) => console.error(`Failed to close failed splitvc session ${splitSessionId}: ${persistError.message}`));
+      }
       splitVoiceGuildLocks.delete(interaction.guildId);
       const splitLease = activeSplitVoiceLeases.get(interaction.guildId);
       if (splitLease) {
@@ -1603,6 +1626,7 @@ client.on(Events.InteractionCreate, createInteractionHandler({
 
   shutdownController = createShutdownController({
     stopServices: [
+      () => voiceSplitFeature.shutdown(),
       () => vcDmService.shutdown(),
       () => bumpReminderFeature.shutdown(),
       () => recruitmentFeature.shutdown(),

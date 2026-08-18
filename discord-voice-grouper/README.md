@@ -224,8 +224,9 @@ DISCORD_CLIENT_ID=your_application_client_id_here
 | `DISBOARD_BOT_ID` | 任意 | DISBOARD BotのIDです。未設定時は公開DISBOARD Bot IDを使います。 |
 | `DISCORD_GUILD_ID` | 任意 | テスト用サーバーのIDです。指定すると、そのサーバーだけにコマンドを登録します。 |
 | `PB_PARTICIPANT_ROLE_ID` | 任意 | Renderなどで固定設定したい場合の参加者ロールIDです。 |
+| `PB_SPLIT_MODE` | 任意 | `/splitvc` のVC作成方式です。`direct`（Botが直接作成、既定）または `partybeast`（旧PB互換）を指定します。 |
 | `PB_PARENT_CHANNEL_ID` | 任意 | Renderなどで固定設定したい場合のPB親VCのIDです。 |
-| `PB_CHILD_CATEGORY_ID` | 任意 | PBが子VCを作るカテゴリIDです。未設定でも自動検出します。 |
+| `PB_CHILD_CATEGORY_ID` | 任意 | direct modeでVCを作成するカテゴリ、またはPBが子VCを作るカテゴリのIDです。PB互換モードでは未設定でも自動検出します。 |
 | `PB_WAITING_VC_CATEGORY_ID` | 任意 | Botが途中参加用の待機VCを作成するカテゴリIDです。 |
 | `PB_WAITING_VC_NAME` | 任意 | 自動作成する待機VCの名前です。未設定時は `途中参加部屋` です。 |
 | `PB_WAITING_CHANNEL_ID` | 任意 | 古い設定との互換用です。新しく設定する場合は `PB_WAITING_VC_CATEGORY_ID` を使ってください。 |
@@ -491,7 +492,7 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
 Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID` または `PB_VOICE_REMINDER_PARENT_CHANNEL_IDS`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_KOKUCHI_MENTION_ROLE_IDS`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_INTERVAL_MINUTES`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
+確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_SPLIT_MODE`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID` または `PB_VOICE_REMINDER_PARENT_CHANNEL_IDS`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_KOKUCHI_MENTION_ROLE_IDS`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_INTERVAL_MINUTES`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
 募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
 Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting zatudan`、`/setting kokuchi` などで再設定が必要になることがあります。
 
@@ -569,7 +570,7 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 `/setting set` は使わず、次のように機能別サブコマンドで設定します。
 
 ```text
-/setting splitvc participant_role:@参加者ロール parent_channel:PB親VC child_category:PB子VCカテゴリ kokuchi_overview_channel:告知概要チャンネル waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:150
+/setting splitvc mode:direct participant_role:@参加者ロール child_category:直接作成先カテゴリ parent_channel:PB親VC kokuchi_overview_channel:告知概要チャンネル waiting_vc_category:待機VC作成先カテゴリ waiting_vc_name:途中参加部屋 post_split_wadai_channel:話題・発話順送信先 gathering_voice_channel:集合VC split_feedback_channel:意見・苦情チャンネル transfer_wait_seconds:30 notice_wait_minutes:25 role_remove_wait_minutes:150
 /setting zatudan voice_participant_role:@VC参加者 voice_reminder_enabled:true voice_reminder_parent_channel:PB親VC voice_reminder_parent_channel_2:PB親VC2 voice_reminder_child_category:PB子VCカテゴリ
 /setting kokuchi announcement_channel:告知・スタート案内送信先 event_time:21:00 gathering_voice_channel:集合VC mention_role:@告知ロール
 /setting logs log_channel:運用ログ
@@ -949,18 +950,21 @@ VC集合フォームは、`voice_reminder_child_category`で指定したカテ�
 - 結果を自分だけに表示する: `/splitvc private:true`
 - Botも含めて分ける: `/splitvc include_bots:true`
 
-PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も行います。
+`/setting splitvc mode:direct`（既定）では、設定した `child_category` 配下に `会話練習会(番号)` というVCを必要数作成します。各VCはカテゴリの権限を継承し、参加人数上限だけ5人（4人＋読み上げ）にします。`mode:partybeast` を選ぶと、従来のPB親VC経由方式を使えます。
+
+`/splitvc` 実行後は次の処理を行います。
 
 1. 振り分け結果を送信します。
 2. 参加者ロールは、各メンバーをVCへ転送したタイミングで付与します。
 3. 30秒待機し、待機中だけ転送キャンセルボタンを表示します。
-4. 各グループから1人をPB親VCへ移動します。
-5. PBが作成した子VCを検出し、同じグループの残りメンバーを移動します。
-6. 転送と参加者ロール付与が終わった後、集合VCのeveryone接続権限を不可に戻します。
-7. 最初の話題とグループごとの発話順を送信します。
-8. 25分後に参加者ロールへメンションして終了通知を送信します。
-9. 終了通知の150分後に参加者ロールを解除します（設定で変更可能）。
-10. `announcement_channel` で指定した告知・スタート案内送信先に、参加のお礼と次回案内を送信します。
+4. direct modeでは必要数のVCを先に作成してから各グループのメンバーを移動します。PB互換モードでは各グループから1人をPB親VCへ移動し、PBが作成した子VCへ残りを移動します。
+5. 転送と参加者ロール付与が終わった後、集合VCのeveryone接続権限を不可に戻します。
+6. 最初の話題とグループごとの発話順を送信します。
+7. 25分後に参加者ロールへメンションして終了通知を送信します。
+8. 終了通知の150分後に参加者ロールを解除します（設定で変更可能）。
+9. `announcement_channel` で指定した告知・スタート案内送信先に、参加のお礼と次回案内を送信します。
+
+direct modeの空VCは、終了通知後に参加者が0人になった時点で削除します。終了通知前に空になった場合は5分間の猶予を置き、終了通知時刻と重なる場合は終了通知を優先します。Bot再起動後も保存済みの空室タイマーと終了通知時刻を復元します。
 
 最初の話題と発話順の送信先は `/setting splitvc post_split_wadai_channel:...` で指定できます。
 未設定の場合は、従来どおり `/splitvc` を実行したチャンネルへ送ります。
@@ -983,6 +987,7 @@ PB連携設定が済んでいる場合、`/splitvc` 実行後に次の処理も�
 - 参加者が待機中VCにいて、3人以下の子VCがある場合は、その子VCへ1人転送します。
 - 3人以下の子VCがない場合は、待機中VCに3人集まるまで待ちます。
 - 待機中VCに3人集まったら、その3人を新規グループとしてPB親VC経由で新規子VCへ転送します。
+- 10分経過時点で2人以下の子VCがある場合に限り、途中参加の受付を延長します。3人の子VCは転送先にはなりますが、延長理由にはなりません。
 - 参加者ロールは、実際にVC転送が発生したタイミングで付与します。
 - 参加者ロール解除は、最初の参加者と途中参加者をまとめて一括で行います。
 - 待機VCは作成から10分が経過したら自動削除されます。

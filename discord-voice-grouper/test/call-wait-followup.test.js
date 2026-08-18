@@ -313,7 +313,7 @@ test("splitvc never transfers a member when its participant-role grant fails", a
   assert.match(source, /if \(!transfer\.moved\) \{\s*throw new Error\(`Participant role grant failed/);
 });
 
-test("waiting transfer persistence failures roll back voice, source-owned roles, and session state", async () => {
+test("waiting transfer persistence failures stay local and keep the split session active", async () => {
   const source = await readBotImplementationSource();
   const start = source.indexOf("async function persistWaitingGroupMembers");
   const end = source.indexOf("async function removeRoleFromMembers", start);
@@ -321,12 +321,28 @@ test("waiting transfer persistence failures roll back voice, source-owned roles,
   const persist = source.slice(start, end);
   assert.match(persist, /Rollback waiting transfer after persistence failure/);
   assert.match(persist, /removeVoiceParticipantRole\(member, options\.participantRole\.id/);
-  assert.match(persist, /status: rollbackErrors\.length \? "cleanup_required" : "failed"/);
+  assert.match(persist, /queueWaitingRollbackTask\(\{/);
+  assert.doesNotMatch(persist, /status: rollbackErrors\.length \? "cleanup_required" : "failed"/);
+  assert.doesNotMatch(persist, /phase: rollbackErrors\.length \? "cleanup_required" : "failed"/);
   assert.match(persist, /status: "active",\s*waitingMonitorStatus: \{ \$in: \["active", "extended"\] \}/);
   assert.match(persist, /childChannelIds: channelId/);
   assert.match(persist, /groupSnapshots: \{ groupNumber, channelId, memberIds \}/);
   assert.match(persist, /persisted: false,\s*reason: error\.persistenceReason/);
   assert.match(persist, /Rollback split waiting child after persistence failure/);
+});
+
+test("waiting rollback retries only its recorded members and child channel", async () => {
+  const source = await readBotImplementationSource();
+  const start = source.indexOf("async function processWaitingRollbackTasks");
+  const end = source.indexOf("async function getKokuchiActionGuard", start);
+  assert.ok(start >= 0 && end > start);
+  const retry = source.slice(start, end);
+  assert.match(retry, /for \(const task of tasks\)/);
+  assert.match(retry, /for \(const memberId of task\.memberIds/);
+  assert.match(retry, /for \(const memberId of task\.roleMemberIds/);
+  assert.match(retry, /guild\.channels\.fetch\(task\.channelId\)/);
+  assert.doesNotMatch(retry, /session\.childChannelIds/);
+  assert.doesNotMatch(retry, /VoiceParticipantRoleGrant\.find/);
 });
 
 test("interest component handlers acknowledge before MongoDB or Discord work", async () => {

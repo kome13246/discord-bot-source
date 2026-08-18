@@ -33,7 +33,15 @@ export const settingCommand = new SlashCommandBuilder()
   .addSubcommand((subcommand) =>
     subcommand
       .setName("splitvc")
-      .setDescription("/splitvc とPB連携設定を保存します")
+      .setDescription("/splitvc とVC作成方式の設定を保存します")
+      .addStringOption((option) => option
+        .setName("mode")
+        .setDescription("VC作成方式（直接作成またはPB互換）")
+        .addChoices(
+          { name: "Botが直接作成", value: "direct" },
+          { name: "PB互換モード", value: "partybeast" },
+        )
+        .setRequired(false))
       .addRoleOption((option) =>
         option
           .setName("participant_role")
