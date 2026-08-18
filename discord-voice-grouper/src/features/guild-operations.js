@@ -237,6 +237,7 @@ export function createGuildOperationsFeature(dependencies) {
     }
   
     const tempRole = interaction.options.getRole("participant_role", false);
+    const splitMode = interaction.options.getString("mode", false);
     const parentChannel = interaction.options.getChannel("parent_channel", false);
     const childCategory = interaction.options.getChannel("child_category", false);
     const waitingVcCategory = interaction.options.getChannel("waiting_vc_category", false,);
@@ -262,6 +263,10 @@ export function createGuildOperationsFeature(dependencies) {
       false,
     );
     const patch = {};
+
+    if (splitMode !== null && splitMode !== undefined) {
+      patch.splitMode = splitMode;
+    }
   
     if (tempRole) {
       patch.tempRoleId = tempRole.id;

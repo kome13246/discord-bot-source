@@ -9,6 +9,9 @@ const schema = new mongoose.Schema(
     kokuchiEventId: String,
     kokuchiEventRevision: { type: Number, min: 0 },
     ownerId: String,
+    // The mode is captured when /splitvc starts so a settings change cannot
+    // reinterpret an in-flight session during recovery.
+    splitMode: { type: String, enum: ["direct", "partybeast"], default: "direct" },
     sourceChannelId: String,
     operationChannelId: String,
     parentChannelId: String,
@@ -17,6 +20,36 @@ const schema = new mongoose.Schema(
     participantMemberIds: { type: [String], default: [] },
     participantRoleGrantedMemberIds: { type: [String], default: [] },
     childChannelIds: { type: [String], default: [] },
+    // Direct-created child VC lifecycle.  emptySince is persisted so a
+    // restart does not lose the five-minute empty-room grace period.
+    childChannelStates: {
+      type: [{
+        channelId: String,
+        groupNumber: Number,
+        emptySince: Date,
+        cleanupAt: Date,
+        deletedAt: Date,
+      }],
+      default: [],
+    },
+    childChannelsCleanupCompleted: { type: Boolean, default: false },
+    // A waiting-room transfer can fail after Discord has already moved a
+    // member.  Keep the compensation scoped to that transfer so recovery
+    // never tears down the other rooms in the split session.
+    waitingRollbackTasks: {
+      type: [{
+        _id: false,
+        taskId: String,
+        channelId: String,
+        sourceChannelId: String,
+        memberIds: [String],
+        roleMemberIds: [String],
+        deleteChannel: { type: Boolean, default: false },
+        createdAt: Date,
+        lastError: String,
+      }],
+      default: [],
+    },
     waitingChannelId: String,
     waitingMonitorStatus: {
       type: String,

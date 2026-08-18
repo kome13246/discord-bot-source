@@ -48,6 +48,9 @@ export function mergeGuildSettingsWithEnvironmentDefaults(
 /** Backward-compatible, idempotent read-time normalization. */
 export function normalizeGuildSettings(settings = {}) {
   const result = { ...settings };
+  result.splitMode = ["direct", "partybeast"].includes(result.splitMode)
+    ? result.splitMode
+    : "direct";
   const normalizedRoleRemoveWaitMinutes = Number(result.roleRemoveWaitMinutes);
   result.roleRemoveWaitMinutes = Number.isInteger(normalizedRoleRemoveWaitMinutes) && normalizedRoleRemoveWaitMinutes >= 0
     ? normalizedRoleRemoveWaitMinutes
@@ -670,6 +673,7 @@ function getEnvironmentSettings(guildId) {
   const bool = (name) => parseOptionalBoolean(value(name));
   const integer = (name) => parseOptionalInteger(value(name));
   const settings = {
+    splitMode: value("PB_SPLIT_MODE"),
     tempRoleId: value("PB_PARTICIPANT_ROLE_ID") ?? value("PB_TEMP_ROLE_ID"),
     parentChannelId: value("PB_PARENT_CHANNEL_ID"), childCategoryId: value("PB_CHILD_CATEGORY_ID"),
     kokuchiOverviewChannelId: value("PB_KOKUCHI_OVERVIEW_CHANNEL_ID"),

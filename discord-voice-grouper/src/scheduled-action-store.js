@@ -91,14 +91,15 @@ export async function failAction(actionKey, lastError) {
 }
 
 /**
- * Return a claimed action to the durable queue after a transient failure.
- * Keeping it pending, rather than failed, lets startup restoration and the
- * caller's retry timer continue the workflow after a Discord/Mongo outage.
+ * Return a claimed or previously failed action to the durable queue after a
+ * transient failure. Keeping it pending, rather than failed, lets startup
+ * restoration and the caller's retry timer continue the workflow after a
+ * Discord/Mongo outage.
  */
 export async function retryAction(actionKey, { executeAt, lastError }) {
   if (mongoose.connection.readyState !== 1) throw new Error("MongoDB is required to retry persistent actions.");
   return ScheduledAction.findOneAndUpdate(
-    { actionKey, status: "running" },
+    { actionKey, status: { $in: ["running", "failed"] } },
     {
       $set: { status: "pending", executeAt, lastError },
       $unset: { startedAt: 1 },
