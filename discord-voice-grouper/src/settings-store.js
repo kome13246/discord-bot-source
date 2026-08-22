@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import { CONFIG_SCHEMA_VERSION, normalizeConfigurationRevision } from "./settings-configuration.js";
 import { createConfigurationService, createEffectiveConfigurationWriter } from "./configuration-service.js";
 import { SettingsApplyJob } from "./models/settings-apply-job.js";
+import { getVoiceReminderParentChannelIds } from "./voice-reminder-settings.js";
 
 const settingsPath = resolve(process.cwd(), "data", "settings.json");
 let legacyCache;
@@ -105,16 +106,7 @@ export function normalizeGuildSettings(settings = {}) {
     (Array.isArray(mentionRoles) ? mentionRoles : [mentionRoles])
       .filter((roleId) => typeof roleId === "string" && roleId.length > 0),
   )];
-  const voiceReminderParentChannelIds = Array.isArray(result.voiceReminderParentChannelIds)
-    && result.voiceReminderParentChannelIds.length > 0
-    ? result.voiceReminderParentChannelIds
-    : result.voiceReminderParentChannelId;
-  result.voiceReminderParentChannelIds = [...new Set(
-    (Array.isArray(voiceReminderParentChannelIds)
-      ? voiceReminderParentChannelIds
-      : [voiceReminderParentChannelIds])
-      .filter((channelId) => typeof channelId === "string" && channelId.length > 0),
-  )];
+  result.voiceReminderParentChannelIds = getVoiceReminderParentChannelIds(result);
   // Keep the old singular field available to older code and environment
   // configurations while making the array the canonical representation.
   result.voiceReminderParentChannelId = result.voiceReminderParentChannelIds[0] ?? null;

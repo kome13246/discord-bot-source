@@ -34,7 +34,5 @@ const schema = new mongoose.Schema({
   lastRecoveryFailureReason: { type: String, default: null },
 }, { timestamps: true, minimize: false });
 
-schema.index({ guildId: 1 }, { unique: true });
-
 export const OperationalHealthState = mongoose.models.OperationalHealthState
   ?? mongoose.model("OperationalHealthState", schema);

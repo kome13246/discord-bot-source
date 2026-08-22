@@ -12,6 +12,7 @@ import {
   listVoiceExitNoticeDeletions, listVoiceExitSchedules, removeInterruptedVoiceExitSchedule,
   saveVoiceExitSchedule,
 } from "./voice-exit-schedule-store.js";
+import { getVoiceReminderParentChannelIds } from "./voice-reminder-settings.js";
 
 const P = "vc_control";
 const EXIT_DURATIONS = [
@@ -83,9 +84,7 @@ function isMissingDiscordResource(error) {
 export function isVoiceChannelControlTarget(channel, settings) {
   const categoryId = settings?.vcControlCategoryId;
   if (typeof categoryId !== "string" || categoryId.trim().length === 0) return false;
-  const reminderParents = Array.isArray(settings?.voiceReminderParentChannelIds)
-    ? settings.voiceReminderParentChannelIds
-    : [settings?.voiceReminderParentChannelId];
+  const reminderParents = getVoiceReminderParentChannelIds(settings);
   return channel?.type === ChannelType.GuildVoice
     && !reminderParents.includes(channel.id)
     && channel.id !== settings?.parentChannelId

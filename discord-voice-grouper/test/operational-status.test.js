@@ -837,6 +837,51 @@ test("VCパネル照合は対象VC集合と保存レコード集合を比較し�
   assert.equal(candidates.some((candidate) => candidate.key === "voice_control_panels.ensure"), true);
 });
 
+test("VC集合親VCの未送信パネルは常設パネルの確認推奨に含めない", async () => {
+  const models = emptyModels();
+  const persisted = [
+    { guildId: "guild-id", channelId: "target", panelMessageId: "target-message" },
+    { guildId: "guild-id", channelId: "reminder-a", panelMessageId: null },
+    { guildId: "guild-id", channelId: "reminder-b", panelMessageId: "deleted-message" },
+  ];
+  models.VoiceChannelControl = {
+    // Deliberately return every stored record. The snapshot must still limit
+    // message verification and issue detection to current panel targets.
+    find: () => ({ lean: async () => persisted }),
+    countDocuments: async () => persisted.length,
+  };
+  const targetMessage = { id: "target-message" };
+  const target = {
+    id: "target",
+    type: 2,
+    parentId: "category",
+    messages: { cache: new Map([[targetMessage.id, targetMessage]]), fetch: async () => targetMessage },
+  };
+  const reminderA = { id: "reminder-a", type: 2, parentId: "category" };
+  const reminderB = { id: "reminder-b", type: 2, parentId: "category" };
+  const channelMap = new Map([target, reminderA, reminderB].map((channel) => [channel.id, channel]));
+  const guild = {
+    id: "guild-id",
+    channels: { cache: channelMap, fetch: async (channelId) => channelMap.get(channelId) ?? null },
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({
+      vcControlCategoryId: "category",
+      voiceReminderParentChannelIds: ["reminder-a", "reminder-b"],
+    }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+
+  const snapshot = await service.getOperationalStatusSnapshot(guild);
+  assert.equal(snapshot.modules.panels.severity, "healthy");
+  assert.deepEqual(snapshot.modules.panels.issues, []);
+  assert.equal(snapshot.modules.panels.summary, "プロフィール 0件 / VCコントロール 1/1件");
+  assert.equal(snapshot.modules.panels.details.ignoredStoredVoiceControlCount, 2);
+  assert.deepEqual(snapshot.modules.panels.details.voiceControls.map((panel) => panel.channelId), ["target"]);
+});
+
 test("HTTP readinessはMongoDBの非同期ping結果を待って判定する", async () => {
   const server = startHealthServer({
     port: 0,

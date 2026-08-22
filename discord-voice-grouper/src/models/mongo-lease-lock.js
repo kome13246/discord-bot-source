@@ -15,7 +15,6 @@ const schema = new mongoose.Schema(
   { timestamps: true },
 );
 
-schema.index({ lockKey: 1 }, { unique: true });
 schema.index({ leaseUntil: 1 });
 
 export const MongoLeaseLock = mongoose.models.MongoLeaseLock
