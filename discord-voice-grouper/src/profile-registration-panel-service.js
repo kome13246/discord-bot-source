@@ -114,7 +114,7 @@ export function createProfileRegistrationPanelService({
     if (!channel) return { status: "channel-unavailable" };
 
     const lease = await acquireLease(`profile-registration-panel:${guild.id}:${channel.id}`, { leaseMs: 30_000 });
-    if (!lease) return { status: "lease-unavailable" };
+    if (!lease) return { status: "lease-unavailable", reason: "lease-unavailable", retryable: true, beforeDiscord: true, preMutation: true };
     try {
       const latestSettings = await getGuildSettings(guild.id);
       if (latestSettings?.profileIntroductionChannelId !== channel.id) return { status: "configuration-changed" };
@@ -171,15 +171,46 @@ export function createProfileRegistrationPanelService({
   async function removeProfileRegistrationPanel(guild) {
     const state = await getPanel(guild.id);
     if (!state) return { status: "absent" };
+    let messageAbsent = false;
     try {
       const channel = await guild.channels.fetch(state.channelId).catch((error) => isMissingResourceError(error) ? null : Promise.reject(error));
-      await deleteMessage(channel, state.messageId);
+      if (!channel) {
+        // A 10003/404 channel response is definitive absence, so it is safe
+        // to remove the stale durable pointer below.
+        messageAbsent = true;
+      } else {
+        const message = await channel.messages.fetch(state.messageId).catch((error) => {
+          if (isMissingResourceError(error)) return null;
+          throw error;
+        });
+        if (!message) {
+          messageAbsent = true;
+        } else {
+          await message.delete().catch((error) => {
+            if (isMissingResourceError(error)) {
+              messageAbsent = true;
+              return null;
+            }
+            throw error;
+          });
+        }
+      }
     } catch (error) {
       await logFailure(guild, null, "profile registration panel remove failed", error, state);
-    } finally {
-      await deletePanel(guild.id).catch((error) => logFailure(guild, null, "profile registration panel state delete failed", error, state));
+      // A failed/unknown Discord delete must retain state so the next apply
+      // can retry it.  Clearing it here would make a failed removal look
+      // applied and lose the only durable reference to the old message.
+      return { status: "remove-failed", retryable: true, error };
     }
-    return { status: "removed" };
+    try {
+      await deletePanel(guild.id);
+    } catch (error) {
+      await logFailure(guild, null, "profile registration panel state delete failed", error, state);
+      // The message may already be gone, but retaining the state is safe and
+      // idempotent; a later retry can confirm absence and delete the pointer.
+      return { status: "save-failed", retryable: true, error };
+    }
+    return { status: "removed", messageAbsent };
   }
 
   async function requestProfileRegistrationPanelMove(guild, reason = "request") {
@@ -228,5 +259,7 @@ export function createProfileRegistrationPanelService({
 }
 
 function isMissingResourceError(error) {
-  return MISSING_RESOURCE_CODES.has(error?.code);
+  return MISSING_RESOURCE_CODES.has(error?.code)
+    || MISSING_RESOURCE_CODES.has(error?.rawError?.code)
+    || Number(error?.status ?? error?.statusCode) === 404;
 }

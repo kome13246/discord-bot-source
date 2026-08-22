@@ -224,6 +224,19 @@ function leaseLostError() {
   return error;
 }
 
+function leaseUnavailableResult(reason = "lease-unavailable") {
+  // This result is only returned when no Discord operation has started.  The
+  // explicit marker lets apply/repair workers retry safely without treating a
+  // truthy adapter response as an unknown post-Discord outcome.
+  return {
+    status: "busy",
+    reason,
+    retryable: true,
+    beforeDiscord: true,
+    preMutation: true,
+  };
+}
+
 function fencedFilter(guildId, lease) {
   if (!Number.isFinite(lease?.fencingToken)) return { guildId };
   return {
@@ -589,7 +602,7 @@ export function createOperationalStatusBoardService({
     if (!target) throw new Error("ステータスボードにはテキストチャンネルを指定してください。");
     if (!hasBoardPermissions(target, guild)) throw new Error("Botにステータスボードの閲覧・送信・Embed・履歴閲覧権限がありません。");
     const lease = await acquireMongoLease(`operational-status-board:${guild.id}`, { leaseMs: BOARD_LEASE_MS });
-    if (!lease) throw new Error("Operational status board is busy; please retry.");
+    if (!lease) return leaseUnavailableResult();
     const leaseGuard = startLeaseHeartbeat(lease);
     try {
     const previous = await getBoard(guild.id, boardModel);
@@ -637,7 +650,7 @@ export function createOperationalStatusBoardService({
 
   async function remove(guild) {
     const lease = await acquireMongoLease(`operational-status-board:${guild.id}`, { leaseMs: BOARD_LEASE_MS });
-    if (!lease) return { status: "busy" };
+    if (!lease) return leaseUnavailableResult();
     const leaseGuard = startLeaseHeartbeat(lease);
     try {
     const board = await getBoard(guild.id, boardModel);

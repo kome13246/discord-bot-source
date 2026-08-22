@@ -1134,9 +1134,13 @@ export function createRecruitmentFeature(dependencies) {
           });
           if (closing) {
             await endCallWaitInterestsForRecruitment(guild.id, prompt.messageId);
-            await deleteCallWaitPrompt(guild, prompt).catch((error) => {
+            try {
+              const deletion = await deleteCallWaitPrompt(guild, prompt);
+              if (!isConfirmedCallWaitDeletion(deletion)) throw callWaitDeletionError(deletion);
+            } catch (error) {
               console.error(`Failed to delete disabled call-wait prompt ${prompt.messageId}: ${error.message}`);
-            });
+              return;
+            }
             await saveGuildSettingsWithCurrent(guild.id, closing, { callWaitPrompt: null });
           }
         }
@@ -1164,9 +1168,13 @@ export function createRecruitmentFeature(dependencies) {
         });
         if (closing) {
           await endCallWaitInterestsForRecruitment(guild.id, expiredPrompt.messageId);
-          await deleteCallWaitPrompt(guild, expiredPrompt).catch((error) => {
+          try {
+            const deletion = await deleteCallWaitPrompt(guild, expiredPrompt);
+            if (!isConfirmedCallWaitDeletion(deletion)) throw callWaitDeletionError(deletion);
+          } catch (error) {
             console.error(`Failed to delete expired call-wait prompt ${expiredPrompt.messageId}: ${error.message}`);
-          });
+            return;
+          }
           await saveGuildSettingsWithCurrent(guild.id, closing, { callWaitPrompt: null });
           await sendOperationalLog({
             guild,
@@ -1215,11 +1223,15 @@ export function createRecruitmentFeature(dependencies) {
   
         if (queued) {
           await endCallWaitInterestsForRecruitment(guild.id, evaluatedRecruitmentId);
+          try {
+            const deletion = await deleteCallWaitPrompt(guild, roleGranting.callWaitPrompt);
+            if (!isConfirmedCallWaitDeletion(deletion)) throw callWaitDeletionError(deletion);
+          } catch (error) {
+            console.error(`Failed to delete completed call-wait prompt ${evaluatedRecruitmentId}: ${error.message}`);
+            return;
+          }
           settings = await saveGuildSettingsWithCurrent(guild.id, roleGranting, {
             callWaitPrompt: null,
-          });
-          await deleteCallWaitPrompt(guild, roleGranting.callWaitPrompt).catch((error) => {
-            console.error(`Failed to delete completed call-wait prompt ${evaluatedRecruitmentId}: ${error.message}`);
           });
           await scheduleCallWaitFollowupCheck(guild);
           return;
@@ -1234,11 +1246,15 @@ export function createRecruitmentFeature(dependencies) {
       }
   
       await endCallWaitInterestsForRecruitment(guild.id, evaluatedRecruitmentId);
+      try {
+        const deletion = await deleteCallWaitPrompt(guild, evaluatedPrompt);
+        if (!isConfirmedCallWaitDeletion(deletion)) throw callWaitDeletionError(deletion);
+      } catch (error) {
+        console.error(`Failed to delete evaluated call-wait prompt ${evaluatedRecruitmentId}: ${error.message}`);
+        return;
+      }
       settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
         callWaitPrompt: null,
-      });
-      await deleteCallWaitPrompt(guild, evaluatedPrompt).catch((error) => {
-        console.error(`Failed to delete evaluated call-wait prompt ${evaluatedRecruitmentId}: ${error.message}`);
       });
       if (promptResult.mode === CALL_WAIT_MODE_BUTTON) {
         await sendCallWaitApplicantLog({
@@ -1268,7 +1284,7 @@ export function createRecruitmentFeature(dependencies) {
     if (activeVoiceMemberIds.length >= CALL_WAIT_MIN_MEMBERS) {
       if (settings.callWaitPrompt) {
         await endCallWaitInterestsForRecruitment(guild.id, settings.callWaitPrompt.messageId);
-        await deleteCallWaitPrompt(guild, settings.callWaitPrompt);
+        await requireConfirmedCallWaitDeletion(guild, settings.callWaitPrompt);
         settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
           callWaitPrompt: null,
         });
@@ -1324,14 +1340,15 @@ export function createRecruitmentFeature(dependencies) {
   
     if (force && settings.callWaitPrompt) {
       await endCallWaitInterestsForRecruitment(guild.id, settings.callWaitPrompt.messageId);
-      await deleteCallWaitPrompt(guild, settings.callWaitPrompt);
+      await requireConfirmedCallWaitDeletion(guild, settings.callWaitPrompt);
       settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
         callWaitPrompt: null,
       });
     }
   
     if (settings.callWaitSkippedNotice) {
-      await deleteCallWaitMessage(guild, settings.callWaitSkippedNotice);
+      const deletion = await deleteCallWaitMessage(guild, settings.callWaitSkippedNotice);
+      if (!isConfirmedCallWaitDeletion(deletion)) throw callWaitDeletionError(deletion);
       settings = await saveGuildSettingsWithCurrent(guild.id, settings, {
         callWaitSkippedNotice: null,
       });
@@ -1461,24 +1478,82 @@ export function createRecruitmentFeature(dependencies) {
     return { evaluated: true, memberIds, mode: CALL_WAIT_MODE_BUTTON };
   }
   
+  function isKnownMissingDiscordResource(error) {
+    const code = Number(error?.code ?? error?.rawError?.code ?? error?.errors?.code);
+    if ([10003, 10004, 10008, 10011].includes(code)) return true;
+    if (Number(error?.status ?? error?.statusCode) === 404) return true;
+    return /unknown\s+(?:channel|message|guild|guild\s*member|interaction)/i.test(String(error?.message ?? error ?? ""));
+  }
+
+  function isConfirmedCallWaitDeletion(result) {
+    if (!result) return true;
+    return ["removed", "already-absent"].includes(String(result.status ?? "").toLowerCase());
+  }
+
+  function callWaitDeletionError(result, fallback = "Call-wait message deletion was not confirmed.") {
+    const error = new Error(result?.reason ?? fallback);
+    if (result?.unknownOutcome || ["unknown", "uncertain"].includes(String(result?.status ?? "").toLowerCase())) {
+      error.unknownOutcome = true;
+      error.code = "SETTINGS_APPLY_UNKNOWN_OUTCOME";
+    } else {
+      error.retryable = true;
+      error.code = "SETTINGS_APPLY_RETRY";
+    }
+    return error;
+  }
+
+  async function requireConfirmedCallWaitDeletion(guild, messageRef) {
+    const result = await deleteCallWaitMessage(guild, messageRef);
+    if (!isConfirmedCallWaitDeletion(result)) throw callWaitDeletionError(result);
+    return result;
+  }
+
   async function deleteCallWaitPrompt(guild, prompt) {
-    await deleteCallWaitMessage(guild, prompt);
+    return deleteCallWaitMessage(guild, prompt);
   }
   
   async function deleteCallWaitMessage(guild, messageRef) {
     if (!messageRef?.channelId || !messageRef?.messageId) {
-      return;
+      return { status: "already-absent", idempotent: true, reason: "missing-message-reference" };
     }
-  
-    const channel = await resolveConfiguredTextChannel(guild, messageRef.channelId);
-  
-    if (!channel || typeof channel.messages?.fetch !== "function") {
-      return;
+
+    let channel = guild?.channels?.cache?.get?.(messageRef.channelId) ?? null;
+    if (!channel) {
+      if (typeof guild?.channels?.fetch !== "function") {
+        return { status: "unknown", unknownOutcome: true, reason: "channel-fetch-unavailable" };
+      }
+      try {
+        channel = await guild.channels.fetch(messageRef.channelId);
+      } catch (error) {
+        if (isKnownMissingDiscordResource(error)) return { status: "already-absent", idempotent: true, reason: "channel-missing" };
+        return { status: "unknown", unknownOutcome: true, reason: "channel-fetch-unknown" };
+      }
     }
-  
-    const message = await channel.messages.fetch(messageRef.messageId).catch(() => null);
-    if (message) {
-      await message.delete().catch(() => null);
+
+    if (!channel) return { status: "already-absent", idempotent: true, reason: "channel-missing" };
+    if (channel.guildId && guild?.id && channel.guildId !== guild.id) {
+      return { status: "unknown", unknownOutcome: true, reason: "channel-guild-mismatch" };
+    }
+    if (typeof channel.messages?.fetch !== "function") {
+      return { status: "unknown", unknownOutcome: true, reason: "channel-message-fetch-unavailable" };
+    }
+
+    let message;
+    try {
+      message = await channel.messages.fetch(messageRef.messageId);
+    } catch (error) {
+      if (isKnownMissingDiscordResource(error)) return { status: "already-absent", idempotent: true, reason: "message-missing" };
+      return { status: "unknown", unknownOutcome: true, reason: "message-fetch-unknown" };
+    }
+    if (!message) return { status: "already-absent", idempotent: true, reason: "message-missing" };
+    if (typeof message.delete !== "function") return { status: "unknown", unknownOutcome: true, reason: "message-delete-unavailable" };
+
+    try {
+      await message.delete();
+      return { status: "removed" };
+    } catch (error) {
+      if (isKnownMissingDiscordResource(error)) return { status: "already-absent", idempotent: true, reason: "message-missing" };
+      return { status: "unknown", unknownOutcome: true, reason: "message-delete-unknown" };
     }
   }
   

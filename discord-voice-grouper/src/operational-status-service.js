@@ -16,6 +16,7 @@ import { SplitProcessSession } from "./models/split-process-session.js";
 import { VoiceChannelControl } from "./models/voice-channel-control.js";
 import { VoiceExitSchedule } from "./models/voice-exit-schedule.js";
 import { VoiceParticipantRoleGrant } from "./models/voice-participant-role-grant.js";
+import { isVoiceChannelControlTarget } from "./voice-channel-control-service.js";
 import { getPermissionOverwriteState } from "./kokuchi-utils.js";
 import {
   classifyGatheringVcRestoreBlock,
@@ -141,7 +142,15 @@ async function verifyPanelMessage(guild, channelId, messageId, cache = null) {
     if (!channel) channel = await guild.channels.fetch(channelId);
     if (!channel?.messages?.fetch) {
       result = { checked: true, exists: false, status: "missing", channelId, messageId };
-    } else {
+    } else if (typeof channel.permissionsFor === "function" && guild.members?.me) {
+      const permissions = channel.permissionsFor(guild.members.me);
+      const canView = typeof permissions?.has === "function" ? permissions.has(PermissionFlagsBits.ViewChannel) : null;
+      const canRead = typeof permissions?.has === "function" ? permissions.has(PermissionFlagsBits.ReadMessageHistory) : null;
+      if (canView === false || canRead === false) {
+        result = { checked: true, exists: null, status: "unknown", channelId, messageId, error: "Bot lacks permission to verify the panel message." };
+      }
+    }
+    if (!result && channel?.messages?.fetch) {
       let message = channel.messages.cache?.get(messageId) ?? null;
       if (!message) message = await channel.messages.fetch(messageId);
       result = { checked: true, exists: Boolean(message), status: message ? "present" : "missing", channelId, messageId };
@@ -519,6 +528,10 @@ async function collectSnapshot(guild, dependencies, options = {}) {
     if (uncertainSlot) issues.push(issue("otebo_slot_uncertain", `ボタン募集スロットが${slotStatus}状態です。自動再送は行いません。`, true));
     const actions = expiredPrompt || expiredOtebo.length ? ["close_expired_recruitments"] : [];
     if (!panel && settings?.callWaitNoticeChannelId && panelHiddenReasons.length === 0) issues.push(issue("otebo_panel_state_missing", "ボタン募集パネルの保存情報がありません。", false));
+    if (panel && settings?.callWaitNoticeChannelId && panel.channelId !== settings.callWaitNoticeChannelId
+      && panelHiddenReasons.length === 0 && panelPresence?.checked === true && panelPresence.status !== "unknown") {
+      issues.push(issue("otebo_panel_channel_mismatch", "保存済みボタン募集パネルの設置先が現在の設定と一致しません。", false));
+    }
     if (panel && panelPresence?.checked && panelPresence.exists === false && panelHiddenReasons.length === 0) issues.push(issue("otebo_panel_message_missing", "ボタン募集パネルのDiscordメッセージが見つかりません。", false));
     if (panelPresence?.status === "unknown") issues.push(issue("otebo_panel_check_failed", `ボタン募集パネルを確認できません: ${panelPresence.error ?? "Discord API error"}`, false));
     if (failedGenerations.length) issues.push(issue("call_wait_role_generation_failed", `直近7日間のcall_wait_role世代処理の失敗が${failedGenerations.length}件あります。`, true));
@@ -599,29 +612,56 @@ async function collectSnapshot(guild, dependencies, options = {}) {
   try {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
     const profilePanel = await readOne(models.ProfileRegistrationPanel, { guildId: guild.id });
-    const vcPanels = await readMany(models.VoiceChannelControl, { guildId: guild.id }, null, 100);
     const vcPanelCount = await readCount(models.VoiceChannelControl, { guildId: guild.id }).catch(() => null);
+    const targetVoiceChannels = [...(guild.channels?.cache?.values?.() ?? [])]
+      .filter((channel) => isVoiceChannelControlTarget(channel, settings));
+    const targetVoiceChannelIds = new Set(targetVoiceChannels.map((channel) => channel.id));
+    // Query the configured target IDs when possible so stale records for
+    // deleted or out-of-category channels cannot satisfy the target count.
+    const panelFilter = targetVoiceChannelIds.size > 0
+      ? { guildId: guild.id, channelId: { $in: [...targetVoiceChannelIds] } }
+      : { guildId: guild.id };
+    const vcPanels = await readMany(
+      models.VoiceChannelControl,
+      panelFilter,
+      null,
+      Math.max(MAX_STATUS_RECORDS, targetVoiceChannelIds.size),
+    );
+    const targetVcPanels = vcPanels.filter((panel) => targetVoiceChannelIds.has(panel?.channelId));
     const totalVcPanels = vcPanelCount ?? vcPanels.length;
     const profilePresence = profilePanel ? await verifyPanelMessage(guild, profilePanel.channelId, profilePanel.messageId, panelPresenceCache) : null;
     const vcPresence = await mapWithConcurrency(
-      vcPanels,
+      targetVcPanels,
       PANEL_VERIFY_CONCURRENCY,
       (panel) => verifyPanelMessage(guild, panel.channelId, panel.panelMessageId, panelPresenceCache),
     );
     const issues = [];
     if (settings?.profileIntroductionChannelId && !profilePanel) issues.push(issue("profile_panel_missing", "プロフィール登録パネルの保存情報がありません。", false));
-    if (settings?.vcControlCategoryId && totalVcPanels === 0) issues.push(issue("vc_panel_missing", "VCコントロールパネルの保存情報がありません。", false));
+    if (profilePanel && settings?.profileIntroductionChannelId && profilePanel.channelId !== settings.profileIntroductionChannelId
+      && profilePresence?.checked === true && profilePresence.status !== "unknown") {
+      issues.push(issue("profile_panel_channel_mismatch", "保存済みプロフィール登録パネルの設置先が現在の設定と一致しません。", false));
+    }
+    const persistedTargetIds = new Set(targetVcPanels.map((panel) => panel.channelId));
+    const missingTargetPanelIds = targetVoiceChannels
+      .map((channel) => channel.id)
+      .filter((channelId) => !persistedTargetIds.has(channelId));
+    if (settings?.vcControlCategoryId && missingTargetPanelIds.length > 0) {
+      issues.push(issue("vc_panel_missing", `対象VC ${missingTargetPanelIds.length}件のコントロールパネル保存情報がありません。`, false));
+    }
     if (profilePresence?.checked && profilePresence.exists === false) issues.push(issue("profile_panel_message_missing", "プロフィール登録パネルのDiscordメッセージを確認できません。", false));
     const missingVcPanels = vcPresence.filter((presence) => presence.checked && presence.exists === false);
-    if (missingVcPanels.length) issues.push(issue("vc_panel_message_missing", `VCコントロールパネルのDiscordメッセージを${missingVcPanels.length}件確認できません。`, false));
+    const incompleteVcPanels = targetVcPanels.filter((panel) => !panel?.panelMessageId);
+    if (missingVcPanels.length || incompleteVcPanels.length) {
+      issues.push(issue("vc_panel_message_missing", `VCコントロールパネルのDiscordメッセージを${missingVcPanels.length + incompleteVcPanels.length}件確認できません。`, false));
+    }
     const unknownPanelChecks = [profilePresence, ...vcPresence].filter((presence) => presence?.status === "unknown");
     if (unknownPanelChecks.length) issues.push(issue("panel_check_failed", `Discord APIの一時エラーにより常設パネルを${unknownPanelChecks.length}件確認できません。`, false));
-    const repairableIssueCodes = new Set(["profile_panel_missing", "vc_panel_missing", "profile_panel_message_missing", "vc_panel_message_missing"]);
+    const repairableIssueCodes = new Set(["profile_panel_missing", "profile_panel_channel_mismatch", "vc_panel_missing", "profile_panel_message_missing", "vc_panel_message_missing"]);
     modules.panels = makeModule({
       key: "panels",
       label: "常設パネル",
       summary: `プロフィール ${profilePanel ? "1" : "0"}件 / VCコントロール ${totalVcPanels}件`,
-      details: { profile: profilePanel ? { channelId: profilePanel.channelId, messageId: profilePanel.messageId, updatedAt: profilePanel.updatedAt, discordMessageExists: profilePresence?.checked ? profilePresence.exists : null } : null, voiceControlCount: totalVcPanels, verifiedVoiceControlCount: vcPanels.length, verificationTruncated: totalVcPanels > vcPanels.length, voiceControls: vcPanels.map((panel, index) => ({ channelId: panel.channelId, messageId: panel.panelMessageId, updatedAt: panel.updatedAt, discordMessageExists: vcPresence[index]?.checked ? vcPresence[index].exists : null })) },
+      details: { profile: profilePanel ? { channelId: profilePanel.channelId, messageId: profilePanel.messageId, updatedAt: profilePanel.updatedAt, discordMessageExists: profilePresence?.checked ? profilePresence.exists : null } : null, voiceControlCount: totalVcPanels, targetVoiceControlCount: targetVoiceChannels.length, persistedTargetVoiceControlCount: targetVcPanels.length, missingTargetVoiceChannelIds: missingTargetPanelIds, verifiedVoiceControlCount: targetVcPanels.length, verificationTruncated: totalVcPanels > targetVcPanels.length, voiceControls: targetVcPanels.map((panel, index) => ({ channelId: panel.channelId, messageId: panel.panelMessageId, updatedAt: panel.updatedAt, discordMessageExists: vcPresence[index]?.checked ? vcPresence[index].exists : null })) },
       issues,
       disabled: !settings?.profileIntroductionChannelId && !settings?.vcControlCategoryId,
       availableActions: issues.some((item) => repairableIssueCodes.has(item.code)) ? ["reinstall_panels"] : [],
@@ -728,7 +768,10 @@ async function collectSnapshot(guild, dependencies, options = {}) {
     rootCauseCount: uniqueIssues.length,
     availableActions: actions,
   };
-  const healthWrite = db.status === "disconnected" ? null : models.OperationalHealthState?.findOneAndUpdate?.(
+  // Reconciliation uses this snapshot as a strictly read-only observation.
+  // Preserve the historical default write for status-board/manual callers,
+  // while allowing explicit callers to suppress the health-state update.
+  const healthWrite = options.persistHealth === false || db.status === "disconnected" ? null : models.OperationalHealthState?.findOneAndUpdate?.(
     { guildId: guild.id },
     { $set: { databaseStatus: db.status, lastDatabaseCheckAt: now, lastDatabaseError: db.error ?? null, lastSnapshotStatus: snapshotStatus, lastSnapshotError: unknownModule ? "One or more operational modules could not be read" : null }, $setOnInsert: { guildId: guild.id } },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
@@ -748,7 +791,10 @@ export function createOperationalStatusService({ getGuildSettings, client, getSt
 
   async function getOperationalStatusSnapshot(guild, options = {}) {
     if (!guild?.id) throw new Error("A guild is required to build an operational status snapshot.");
-    return withTimeout(collectSnapshot(guild, dependencies, options), SNAPSHOT_BUILD_TIMEOUT_MS, "Operational status snapshot");
+    const snapshotDependencies = options.refreshPanelPresence
+      ? { ...dependencies, panelPresenceCache: null }
+      : dependencies;
+    return withTimeout(collectSnapshot(guild, snapshotDependencies, options), SNAPSHOT_BUILD_TIMEOUT_MS, "Operational status snapshot");
   }
 
   async function recordStartupRestore({ results = [], completedAt = new Date() } = {}) {

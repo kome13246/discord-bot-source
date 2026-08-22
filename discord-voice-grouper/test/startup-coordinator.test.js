@@ -35,6 +35,8 @@ test("Ready処理は通常復元後に後段復元を行い、状態を確定す
     processCallWait: async () => order.push("call-wait"),
     retryCallWaitNotifications: async () => order.push("call-wait-retry"),
     scheduleCallWait: () => order.push("schedule"),
+    startRepair: async () => order.push("repair"),
+    startReconciliation: async () => order.push("reconciliation"),
     logger: { log: () => {}, warn: () => {}, error: () => {} },
     now: () => new Date("2026-08-06T00:00:00.000Z"),
   });
@@ -42,7 +44,7 @@ test("Ready処理は通常復元後に後段復元を行い、状態を確定す
   await handler({ user: { tag: "test-bot" } });
   assert.deepEqual(order, [
     "watchdog", "migrate", "main", "panel", "board-start", "board-restore",
-    "call-wait", "call-wait-retry", "schedule",
+    "call-wait", "call-wait-retry", "schedule", "repair", "reconciliation",
   ]);
   assert.deepEqual(restoreState, { completed: true, failed: false, failures: [] });
   assert.deepEqual(recorded.results.map((result) => result.name), ["main", "panel"]);

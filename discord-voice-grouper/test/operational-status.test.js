@@ -6,6 +6,7 @@ import { buildOperationalStatusPayload, createOperationalStatusBoardService } fr
 import { createKokuchiRecoveryService } from "../src/kokuchi-recovery-service.js";
 import { createOperationalManagementService } from "../src/operational-management-service.js";
 import { createOperationalStatusService, makeModule } from "../src/operational-status-service.js";
+import { extractRepairCandidates } from "../src/reconciliation-service.js";
 import { startHealthServer } from "../src/health-server.js";
 
 function emptyModel() {
@@ -546,6 +547,38 @@ test("Discord API一時障害はパネル欠損や再設置候補にしない", 
   assert.equal(snapshot.modules.panels.availableActions.includes("reinstall_panels"), false);
 });
 
+test("保存済みプロフィール・Oteboパネルのchannel driftを検出し、修復候補へ渡す", async () => {
+  const models = emptyModels();
+  models.ProfileRegistrationPanel = {
+    findOne: () => ({ lean: async () => ({ guildId: "guild-id", channelId: "profile-old", messageId: "profile-message" }) }),
+  };
+  models.OteboRecruitmentPanel = {
+    findOne: () => ({ lean: async () => ({ guildId: "guild-id", channelId: "otebo-old", messageId: "otebo-message" }) }),
+  };
+  const panelMessage = { id: "message" };
+  const oldProfile = { id: "profile-old", messages: { fetch: async () => panelMessage } };
+  const oldOtebo = { id: "otebo-old", messages: { fetch: async () => panelMessage } };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({
+      profileIntroductionChannelId: "profile-new",
+      callWaitEnabled: true,
+      callWaitRoleId: "role",
+      callWaitNoticeChannelId: "otebo-new",
+    }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  const snapshot = await service.getOperationalStatusSnapshot({
+    id: "guild-id",
+    channels: { cache: new Map([[oldProfile.id, oldProfile], [oldOtebo.id, oldOtebo]]), fetch: async (id) => id === oldProfile.id ? oldProfile : id === oldOtebo.id ? oldOtebo : null },
+  });
+  assert.equal(snapshot.modules.panels.issues.some((item) => item.code === "profile_panel_channel_mismatch"), true);
+  assert.equal(snapshot.modules.recruitment.issues.some((item) => item.code === "otebo_panel_channel_mismatch"), true);
+  const candidates = extractRepairCandidates({ status: "ok", reports: [{ checks: [] }] }, snapshot);
+  assert.deepEqual(candidates.map((candidate) => candidate.key), ["otebo_panel.ensure", "profile_panel.ensure"]);
+});
+
 test("ボード削除失敗を永続化し、次回refreshで削除を完了する", async () => {
   let board = { guildId: "guild-id", channelId: "channel-id", messageId: "message-id", pendingMessageDeletions: [], removalPending: false };
   let deletionFails = true;
@@ -732,6 +765,23 @@ test("単一のMongoDB障害をモジュール数分だけ重複計上しない"
   assert.equal(snapshot.rootCauseCount, 1);
 });
 
+test("read-only operational snapshots do not persist OperationalHealthState", async () => {
+  const models = emptyModels();
+  let healthWrites = 0;
+  models.OperationalHealthState.findOneAndUpdate = async () => {
+    healthWrites += 1;
+    return null;
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({}),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  await service.getOperationalStatusSnapshot({ id: "guild-id", channels: { cache: new Map() } }, { persistHealth: false, readOnly: true });
+  assert.equal(healthWrites, 0);
+});
+
 test("Discordパネル存在確認を短時間キャッシュする", async () => {
   const models = emptyModels();
   models.ProfileRegistrationPanel = { findOne: () => ({ lean: async () => ({ channelId: "panel-channel", messageId: "panel-message" }) }) };
@@ -749,6 +799,42 @@ test("Discordパネル存在確認を短時間キャッシュする", async () =
   await service.getOperationalStatusSnapshot(guild);
   await service.getOperationalStatusSnapshot(guild);
   assert.equal(fetches, 1);
+});
+
+test("VCパネル照合は対象VC集合と保存レコード集合を比較し、部分欠落を修復候補にする", async () => {
+  const models = emptyModels();
+  const persisted = [
+    { guildId: "guild-id", channelId: "target-a", panelMessageId: "message-a" },
+    // Stale records outside the configured category must not hide target-b.
+    { guildId: "guild-id", channelId: "stale-channel", panelMessageId: "stale-message" },
+  ];
+  models.VoiceChannelControl = {
+    find: () => ({ lean: async () => persisted }),
+    countDocuments: async () => persisted.length,
+  };
+  const targetA = { id: "target-a", type: 2, parentId: "category" };
+  const targetB = { id: "target-b", type: 2, parentId: "category" };
+  const parent = { id: "parent", type: 2, parentId: "category" };
+  const reminderParent = { id: "reminder", type: 2, parentId: "category" };
+  const outside = { id: "outside", type: 2, parentId: "other-category" };
+  const guild = {
+    id: "guild-id",
+    channels: { cache: new Map([targetA, targetB, parent, reminderParent, outside].map((channel) => [channel.id, channel])) },
+  };
+  const service = createOperationalStatusService({
+    getGuildSettings: async () => ({ vcControlCategoryId: "category", parentChannelId: "parent", voiceReminderParentChannelIds: ["reminder"] }),
+    client: readyClient(),
+    getDatabaseStatus: async () => ({ status: "connected", error: null }),
+    models,
+  });
+  const snapshot = await service.getOperationalStatusSnapshot(guild);
+  const panelIssue = snapshot.modules.panels.issues.find((item) => item.code === "vc_panel_missing");
+  assert.ok(panelIssue);
+  assert.equal(snapshot.modules.panels.details.targetVoiceControlCount, 2);
+  assert.deepEqual(snapshot.modules.panels.details.missingTargetVoiceChannelIds, ["target-b"]);
+  assert.equal(snapshot.modules.panels.availableActions.includes("reinstall_panels"), true);
+  const candidates = extractRepairCandidates({}, snapshot);
+  assert.equal(candidates.some((candidate) => candidate.key === "voice_control_panels.ensure"), true);
 });
 
 test("HTTP readinessはMongoDBの非同期ping結果を待って判定する", async () => {

@@ -4,6 +4,7 @@ import {
   TextInputBuilder, TextInputStyle,
 } from "discord.js";
 import { clearLegacyVoiceControlTimers, deleteVoiceControl, getVoiceControl, upsertVoiceControl } from "./voice-channel-control-store.js";
+import { acquireMongoLease, releaseMongoLease, renewMongoLease } from "./mongo-lease-lock-store.js";
 import {
   cancelVoiceExitSchedule, cancelVoiceExitSchedulesForChannel, claimVoiceExitSchedule,
   createVoiceExitNoticeDeletion, deleteClaimedVoiceExitSchedule, deleteVoiceExitNoticeDeletion,
@@ -71,15 +72,44 @@ function hasRequiredVoiceExitScheduleFields(schedule) {
   return Boolean(schedule?._id && schedule.guildId && schedule.userId && schedule.voiceChannelId && schedule.scheduledAt);
 }
 
-export function createVoiceChannelControlService({ getGuildSettings, sendOperationalLog = async () => {}, setVoiceChannelStatus = async (channel, status) => channel.setVoiceChannelStatus?.(status) }) {
-  const getSettings = (guild) => getGuildSettings(guild.id).catch(() => null);
-  const isTarget = (channel, settings) => channel?.type === ChannelType.GuildVoice
-    && !(Array.isArray(settings?.voiceReminderParentChannelIds)
-      ? settings.voiceReminderParentChannelIds
-      : [settings?.voiceReminderParentChannelId])
-      .includes(channel.id)
+function isMissingDiscordResource(error) {
+  return error?.code === 10003 || error?.code === 10008 || error?.status === 404
+    || String(error?.code) === "10003" || String(error?.code) === "10008";
+}
+
+// Keep the target definition in one place so event handlers, settings
+// application and operational reconciliation cannot disagree about which
+// voice channels should have a control panel.
+export function isVoiceChannelControlTarget(channel, settings) {
+  const categoryId = settings?.vcControlCategoryId;
+  if (typeof categoryId !== "string" || categoryId.trim().length === 0) return false;
+  const reminderParents = Array.isArray(settings?.voiceReminderParentChannelIds)
+    ? settings.voiceReminderParentChannelIds
+    : [settings?.voiceReminderParentChannelId];
+  return channel?.type === ChannelType.GuildVoice
+    && !reminderParents.includes(channel.id)
     && channel.id !== settings?.parentChannelId
-    && channel.parentId === settings?.vcControlCategoryId;
+    && channel.parentId === categoryId;
+}
+
+export function createVoiceChannelControlService({
+  getGuildSettings,
+  sendOperationalLog = async () => {},
+  setVoiceChannelStatus = async (channel, status) => channel.setVoiceChannelStatus?.(status),
+  acquireLease = acquireMongoLease,
+  renewLease = renewMongoLease,
+  releaseLease = releaseMongoLease,
+  getVoiceControlRecord = getVoiceControl,
+  upsertVoiceControlRecord = upsertVoiceControl,
+  deleteVoiceControlRecord = deleteVoiceControl,
+  clearLegacyTimers = clearLegacyVoiceControlTimers,
+  leaseMs = 30_000,
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+  logger = console,
+} = {}) {
+  const getSettings = (guild) => getGuildSettings(guild.id).catch(() => null);
+  const isTarget = isVoiceChannelControlTarget;
   const logFailure = async (processName, context, error, guild = context?.guild) => {
     if (!guild?.id) {
       console.error(`退出予定 ${processName}に失敗しました。guildId=${context?.guildId ?? "unknown"} userId=${context?.userId ?? "unknown"} voiceChannelId=${context?.voiceChannelId ?? context?.channelId ?? "unknown"} error=${error?.message ?? error}`);
@@ -118,13 +148,94 @@ export function createVoiceChannelControlService({ getGuildSettings, sendOperati
   }
 
   async function ensurePanel(channel) {
-    const settings = await getSettings(channel.guild);
-    if (!isTarget(channel, settings)) return;
-    const record = await getVoiceControl(channel.guild.id, channel.id);
-    let message = record?.panelMessageId ? await channel.messages.fetch(record.panelMessageId).catch(() => null) : null;
-    if (message) await message.edit(panel(channel));
-    else message = await channel.send(panel(channel));
-    await upsertVoiceControl(channel.guild.id, channel.id, { panelMessageId: message.id });
+    if (!channel?.guild?.id || !channel?.id) return { status: "not-configured", beforeDiscord: true };
+    let settings;
+    try {
+      settings = await getGuildSettings(channel.guild.id);
+    } catch (error) {
+      return { status: "unknown", reason: "settings-fetch-failed", error, unknownOutcome: true };
+    }
+    if (!settings) return { status: "unknown", reason: "settings-unavailable", unknownOutcome: true };
+    if (!isTarget(channel, settings)) return { status: "not-configured", beforeDiscord: true };
+    if (!hasChannelSendPermission(channel, channel.guild)) return { status: "blocked", reason: "permissions", beforeDiscord: true };
+
+    const lease = await acquireLease(`voice-control-panel:${channel.guild.id}:${channel.id}`, { leaseMs });
+    if (!lease) return { status: "busy", reason: "lease-unavailable", beforeDiscord: true };
+    let leaseLost = false;
+    let heartbeatTimer = null;
+    const assertLease = async () => {
+      if (leaseLost) {
+        const error = new Error("Voice control panel lease was lost.");
+        error.code = "VOICE_CONTROL_PANEL_LEASE_LOST";
+        throw error;
+      }
+      const renewed = await renewLease(lease, { leaseMs });
+      if (renewed === false) {
+        leaseLost = true;
+        const error = new Error("Voice control panel lease was lost.");
+        error.code = "VOICE_CONTROL_PANEL_LEASE_LOST";
+        throw error;
+      }
+    };
+    heartbeatTimer = typeof setIntervalFn === "function"
+      ? setIntervalFn(() => { void assertLease().catch(() => { leaseLost = true; }); }, Math.max(1, Math.floor(Number(leaseMs) / 3)))
+      : null;
+    heartbeatTimer?.unref?.();
+    try {
+      await assertLease();
+      const record = await getVoiceControlRecord(channel.guild.id, channel.id);
+      let message = null;
+      let createdMessage = false;
+      if (record?.panelMessageId) {
+        try {
+          message = await channel.messages.fetch(record.panelMessageId);
+        } catch (error) {
+          if (!isMissingDiscordResource(error)) return { status: "unknown", reason: "panel-fetch-failed", error, unknownOutcome: true };
+        }
+      }
+      await assertLease();
+      if (message) {
+        try {
+          await message.edit(panel(channel));
+        } catch (error) {
+          return { status: "unknown", reason: "panel-edit-outcome-unknown", error, unknownOutcome: true };
+        }
+      } else {
+        try {
+          message = await channel.send(panel(channel));
+          createdMessage = true;
+        } catch (error) {
+          return { status: "unknown", reason: "panel-send-outcome-unknown", error, unknownOutcome: true };
+        }
+      }
+      await assertLease();
+      try {
+        await upsertVoiceControlRecord(channel.guild.id, channel.id, { panelMessageId: message.id });
+      } catch (error) {
+        let compensationStatus = "unknown";
+        if (createdMessage) {
+          try {
+            await assertLease();
+            await message?.delete?.();
+            compensationStatus = "deleted";
+          } catch (deleteError) {
+            if (isMissingDiscordResource(deleteError)) compensationStatus = "already-absent";
+            else compensationStatus = "unknown";
+          }
+        } else {
+          compensationStatus = "not-attempted-existing-message";
+        }
+        return { status: "unknown", reason: "panel-state-save-outcome-unknown", error, compensationStatus, unknownOutcome: true };
+      }
+      await assertLease();
+      return { status: message && record?.panelMessageId === message.id ? "updated" : "created", messageId: message.id };
+    } catch (error) {
+      if (error?.code === "VOICE_CONTROL_PANEL_LEASE_LOST") return { status: "unknown", reason: "lease-lost", error, unknownOutcome: true };
+      return { status: "unknown", reason: "panel-operation-unknown", error, unknownOutcome: true };
+    } finally {
+      if (heartbeatTimer) clearIntervalFn(heartbeatTimer);
+      await releaseLease(lease).catch(() => {});
+    }
   }
 
   async function notify(schedule, alreadyClaimed = false) {
@@ -228,10 +339,25 @@ export function createVoiceChannelControlService({ getGuildSettings, sendOperati
   }
 
   async function restore(client) {
-    await clearLegacyVoiceControlTimers();
+    await clearLegacyTimers();
     for (const guild of client.guilds.cache.values()) {
-      const settings = await getSettings(guild);
-      for (const channel of guild.channels.cache.values()) if (isTarget(channel, settings)) await ensurePanel(channel).catch((error) => logFailure("パネル復旧", { guildId: guild.id, voiceChannelId: channel.id }, error, guild));
+      let settings;
+      try {
+        settings = await getGuildSettings(guild.id);
+      } catch (error) {
+        logger.warn?.(`VCコントロールパネル設定を確認できません: guild=${guild.id} status=unknown`);
+        continue;
+      }
+      if (!settings) {
+        logger.warn?.(`VCコントロールパネル設定を確認できません: guild=${guild.id} status=unknown`);
+        continue;
+      }
+      for (const channel of guild.channels.cache.values()) if (isTarget(channel, settings)) {
+        const result = await ensurePanel(channel).catch((error) => ({ status: "unknown", error, unknownOutcome: true }));
+        if (["unknown", "blocked"].includes(result?.status)) {
+          logger.warn?.(`VCコントロールパネル復旧を確認できません: guild=${guild.id} channel=${channel.id} status=${result.status}`);
+        }
+      }
     }
     for (const schedule of await listInterruptedVoiceExitSchedules()) {
       const guild = client.guilds.cache.get(schedule.guildId);
@@ -265,7 +391,7 @@ export function createVoiceChannelControlService({ getGuildSettings, sendOperati
     } catch (error) {
       await logFailure("VC削除時の自動取消", { guildId: channel.guild.id, voiceChannelId: channel.id }, error, channel.guild);
     }
-    await deleteVoiceControl(channel.guild.id, channel.id).catch(() => {});
+    await deleteVoiceControlRecord(channel.guild.id, channel.id).catch(() => {});
   }
 
   async function handleVoiceState(oldState, newState) {

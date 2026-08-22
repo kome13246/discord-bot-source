@@ -1,3 +1,5 @@
+import { isVoiceChannelControlTarget } from "../voice-channel-control-service.js";
+
 export function registerDiscordEventHandlers({
   client,
   Events,
@@ -88,7 +90,14 @@ export function registerDiscordEventHandlers({
 
   client.on(Events.ChannelCreate, async (channel) => {
     if (channel.type === ChannelType.GuildVoice) {
-      await services.voiceChannelControl.ensurePanel(channel).catch((error) => logger.error("VC control panel create failed:", error));
+      try {
+        const result = await services.voiceChannelControl.ensurePanel(channel);
+        if (["unknown", "blocked"].includes(result?.status)) {
+          logger.warn(`VC control panel create did not complete: guild=${channel.guildId ?? channel.guild?.id ?? "unknown"} channel=${channel.id} status=${result.status} reason=${result.reason ?? "unspecified"}`);
+        }
+      } catch (error) {
+        logger.error("VC control panel create failed:", error);
+      }
     }
     if (channel.guildId) requestOperationalStatusRefresh(channel.guildId, "channel-create");
   });
@@ -103,10 +112,17 @@ export function registerDiscordEventHandlers({
   client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
     if (newChannel.type !== ChannelType.GuildVoice) return;
     const settings = await getGuildSettings(newChannel.guild.id).catch(() => null);
-    const wasTarget = oldChannel.parentId === settings?.vcControlCategoryId;
-    const isTarget = newChannel.parentId === settings?.vcControlCategoryId;
+    const wasTarget = isVoiceChannelControlTarget(oldChannel, settings);
+    const isTarget = isVoiceChannelControlTarget(newChannel, settings);
     if (isTarget && !wasTarget) {
-      await services.voiceChannelControl.ensurePanel(newChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
+      try {
+        const result = await services.voiceChannelControl.ensurePanel(newChannel);
+        if (["unknown", "blocked"].includes(result?.status)) {
+          logger.warn(`VC control panel update did not complete: guild=${newChannel.guild?.id ?? newChannel.guildId ?? "unknown"} channel=${newChannel.id} status=${result.status} reason=${result.reason ?? "unspecified"}`);
+        }
+      } catch (error) {
+        logRecoverableError("Recoverable asynchronous operation failed", error);
+      }
     }
     if (!isTarget && wasTarget) {
       await services.voiceChannelControl.cleanup(newChannel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));

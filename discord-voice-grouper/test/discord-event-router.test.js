@@ -10,17 +10,18 @@ const Events = {
   ChannelUpdate: "channelUpdate",
 };
 
-function setup({ shuttingDown = false } = {}) {
+function setup({ shuttingDown = false, settings = {}, ensurePanelResult = undefined } = {}) {
   const listeners = new Map();
   const calls = [];
-  const record = (name) => async () => { calls.push(name); };
+  const warnings = [];
+  const record = (name) => async () => { calls.push(name); return ensurePanelResult; };
   registerDiscordEventHandlers({
     client: { on: (event, listener) => listeners.set(event, listener) },
     Events,
     ChannelType: { GuildVoice: 2 },
     debugLogs: false,
     isShuttingDown: () => shuttingDown,
-    getGuildSettings: async () => ({}),
+    getGuildSettings: async () => settings,
     requestOperationalStatusRefresh: () => {},
     logRecoverableError: () => {},
     services: {
@@ -36,9 +37,9 @@ function setup({ shuttingDown = false } = {}) {
       handleProfileVoiceState: record("profile-voice"),
       handleVoiceStateUpdate: record("voice-update"),
     },
-    logger: { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+    logger: { log: () => {}, warn: (...args) => warnings.push(args.join(" ")), error: () => {}, debug: () => {} },
   });
-  return { listeners, calls };
+  return { listeners, calls, warnings };
 }
 
 test("Discordイベントルーターはメッセージ処理の順序を維持する", async () => {
@@ -53,4 +54,23 @@ test("終了処理中は新しいDiscordイベント処理を開始しない", a
   await listeners.get(Events.MessageCreate)({});
   await listeners.get(Events.GuildMemberAdd)({});
   assert.deepEqual(calls, []);
+});
+
+test("ChannelCreate/ChannelUpdateはensurePanelのunknown・blocked結果を黙殺せず警告する", async () => {
+  const created = setup({
+    settings: { vcControlCategoryId: "category" },
+    ensurePanelResult: { status: "unknown", reason: "timeout" },
+  });
+  await created.listeners.get(Events.ChannelCreate)({ id: "created", type: 2, guildId: "guild-id" });
+  assert.equal(created.warnings.some((message) => message.includes("status=unknown")), true);
+
+  const updated = setup({
+    settings: { vcControlCategoryId: "category" },
+    ensurePanelResult: { status: "blocked", reason: "permissions" },
+  });
+  await updated.listeners.get(Events.ChannelUpdate)(
+    { id: "voice", type: 2, parentId: "other", guild: { id: "guild-id" } },
+    { id: "voice", type: 2, parentId: "category", guild: { id: "guild-id" } },
+  );
+  assert.equal(updated.warnings.some((message) => message.includes("status=blocked")), true);
 });

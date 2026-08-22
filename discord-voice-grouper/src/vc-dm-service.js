@@ -303,6 +303,7 @@ export function createVcDmService({
   now = () => new Date(),
   requestOperationalStatusRefresh = () => {},
   storeOverrides = {},
+  panelServiceOverride = null,
 } = {}) {
   if (!client) throw new Error("VC DM service requires a Discord client.");
   const voiceSessions = new Map();
@@ -340,7 +341,7 @@ export function createVcDmService({
     updateNewVcDmResult: storeOverrides.updateNewVcDmResult ?? updateNewVcDmResult,
   };
 
-  const panelService = createVcDmPanelService({
+  const panelService = panelServiceOverride ?? createVcDmPanelService({
     getGuildSettings,
     client,
     sendOperationalLog,
@@ -1398,8 +1399,22 @@ export function createVcDmService({
       clearReminderTimersForGuild(guild.id);
       const panel = await panelService.removePanel(guild, "settings-disabled").catch((error) => {
         logger.warn?.(`VC DM panel removal after disable failed guild=${guild.id}: ${error.message}`);
-        return { status: "failed", error };
+        return { status: "remove-failed", error };
       });
+      // Do not report the feature as disabled until panel removal has a
+      // definite outcome.  In particular, removed_with_errors/stopped and
+      // unknown lease/API results must reach settings-apply so the job is
+      // blocked or retried instead of being marked applied.
+      if (!panel || !["removed", "not-found", "absent"].includes(panel.status)) {
+        const explicitRetry = panel?.retryable === true
+          || ["busy", "retry", "retry_wait", "lease-unavailable"].includes(panel?.status);
+        const uncertainStatus = panel?.status === "unknown" || panel?.status === "uncertain"
+          ? panel.status
+          : explicitRetry
+            ? panel.status
+            : "remove-failed";
+        return { ...panel, status: uncertainStatus, panel };
+      }
       await requestDailyStatusRefresh(guild, "settings-disabled", "settings-changed");
       return { status: "disabled", panel };
     }

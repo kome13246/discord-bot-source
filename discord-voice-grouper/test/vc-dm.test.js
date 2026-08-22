@@ -561,6 +561,23 @@ test("日次無効化・パネル整理・ハッシュ抑止・運用ステー�
   assert.match(panelSource, /includeUpdatedAt/);
 });
 
+test("VC DM disable propagates panel removal failure instead of reporting disabled", async () => {
+  const client = { guilds: { cache: new Map() } };
+  const service = createVcDmService({
+    client,
+    getGuildSettings: async () => ({ vcDmEnabled: false }),
+    acquireMongoLease: async () => ({ lockKey: "lease" }),
+    releaseMongoLease: async () => {},
+    panelServiceOverride: { removePanel: async () => ({ status: "removed_with_errors", deletionErrors: 1 }), shutdown: async () => {} },
+    requestOperationalStatusRefresh: async () => { throw new Error("must not refresh after failed removal"); },
+    logger: { warn: () => {}, error: () => {} },
+  });
+  const result = await service.onSettingsChanged({ id: "guild-1" });
+  assert.equal(result.status, "remove-failed");
+  assert.equal(result.panel.status, "removed_with_errors");
+  service.shutdown();
+});
+
 test("再加入者の有効参加記録は在籍状態を同一原子更新で復元する", () => {
   const validAt = new Date("2026-08-03T08:00:00.000Z");
   const pipeline = buildVcDmParticipationUpdatePipeline(validAt, { joinedAt: new Date("2026-08-01T08:00:00.000Z") });

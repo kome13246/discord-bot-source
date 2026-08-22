@@ -21,6 +21,7 @@ export function createInteractionHandler({
 
     try {
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith("setup:")) return handlers.handleSetupInteraction(interaction);
       if (interaction.customId.startsWith("vcdm:")) return services.vcDm.handleInteraction(interaction);
       if (interaction.customId.startsWith("operational:")) return services.operationalManagement.handle(interaction);
       if (
@@ -67,7 +68,18 @@ export function createInteractionHandler({
       return services.vcDm.handleInteraction(interaction);
     }
 
+    // Setup uses Discord's typed channel/role select menus in addition to
+    // string selects.  discord.js does not classify typed selects as string
+    // selects, so route them explicitly before the string-select branch.
+    if (
+      (interaction.isChannelSelectMenu?.() || interaction.isRoleSelectMenu?.())
+      && interaction.customId.startsWith("setup:")
+    ) {
+      return handlers.handleSetupInteraction(interaction);
+    }
+
     if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith("setup:")) return handlers.handleSetupInteraction(interaction);
       if (interaction.customId.startsWith("operational:")) return services.operationalManagement.handle(interaction);
       if (interaction.customId.startsWith(`${ids.splitReviewSelect}:`)) return handlers.handleSplitReviewSelect(interaction);
       if (interaction.customId.startsWith("vc_control:")) return services.voiceChannelControl.handle(interaction);
@@ -92,6 +104,9 @@ export function createInteractionHandler({
     const commandHandler = {
       splitvc: handlers.handleSplitVoice,
       botstatus: services.operationalManagement.handleCommand,
+      config: handlers.handleConfig,
+      checkbot: handlers.handleCheckbot,
+      setup: handlers.handleSetup,
       "setup-profile": handlers.handleSetupProfile,
       addwadai: handlers.handleAddWadai,
       showwadai: handlers.handleShowWadai,

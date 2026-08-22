@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FUKYO_MESSAGE, cleanFukyoThemeName, getLatestDueFukyoSlot, getNextFukyoSlot, normalizeFukyoThemeName, selectFukyoTheme } from "../src/fukyo-theme-service.js";
+import { FUKYO_MESSAGE, cleanFukyoThemeName, createFukyoThemeService, getLatestDueFukyoSlot, getNextFukyoSlot, normalizeFukyoThemeName, selectFukyoTheme } from "../src/fukyo-theme-service.js";
 
 test("テーマ名は表示用の安全な一行と重複比較用の正規形に分ける", () => {
   assert.equal(cleanFukyoThemeName("  ゲーム\n\t"), "ゲーム");
@@ -48,4 +48,35 @@ test("起動時補完の対象は直近で到来済みのJST月曜日6時の週�
   assert.equal(getLatestDueFukyoSlot(new Date("2026-08-02T20:59:00Z")).weekKey, "2026-07-27");
   assert.equal(getLatestDueFukyoSlot(new Date("2026-08-02T21:00:00Z")).weekKey, "2026-08-03");
   assert.equal(getLatestDueFukyoSlot(new Date("2026-08-02T21:01:00Z")).weekKey, "2026-08-03");
+});
+
+test("布教設定の有効化は管理設定とenabledAtのcompanion patchを同じversioned writerへ渡す", async () => {
+  const writes = [];
+  const replies = [];
+  const service = createFukyoThemeService({
+    getGuildSettings: async () => ({ guildId: "guild1", configRevision: 4, fukyoWeeklyThemeEnabled: false }),
+    saveGuildSettings: async () => { throw new Error("runtime writer must not handle enabledAt"); },
+    saveVersionedGuildConfiguration: async (...args) => {
+      writes.push(args);
+      return { guildId: "guild1", configRevision: 5, fukyoWeeklyThemeEnabled: true, fukyoThemeChannelId: null };
+    },
+    sendOperationalLog: async () => {},
+    acquireMongoLease: async () => ({ leaseId: "lease" }),
+    releaseMongoLease: async () => {},
+  });
+  await service.updateSetting({
+    guildId: "guild1",
+    user: { id: "actor" },
+    options: {
+      getChannel: () => null,
+      getBoolean: () => true,
+    },
+    reply: async (payload) => replies.push(payload),
+  });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0][0], "guild1");
+  assert.deepEqual(writes[0][1], { fukyoWeeklyThemeEnabled: true });
+  assert.equal(writes[0][2].expectedRevision, 4);
+  assert.equal(writes[0][2].companionPatch.fukyoWeeklyThemeEnabledAt instanceof Date, true);
+  assert.equal(replies.length, 1);
 });

@@ -368,6 +368,91 @@ export const settingCommand = new SlashCommandBuilder()
       ),
   );
 
+export const configCommand = new SlashCommandBuilder()
+  .setName("config")
+  .setDescription("管理者設定の履歴・現在値・差分を安全に表示します")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  .setDMPermission(false)
+  .addSubcommand((subcommand) => subcommand
+    .setName("history")
+    .setDescription("設定変更履歴を表示します")
+    .addIntegerOption((option) => option
+      .setName("limit")
+      .setDescription("表示件数（1〜20）")
+      .setMinValue(1)
+      .setMaxValue(20)
+      .setRequired(false)))
+  .addSubcommand((subcommand) => subcommand
+    .setName("show")
+    .setDescription("現在または指定リビジョンの設定を表示します")
+    .addIntegerOption((option) => option
+      .setName("revision")
+      .setDescription("リビジョン（省略時は現在）")
+      .setMinValue(0)
+      .setRequired(false)))
+  .addSubcommand((subcommand) => subcommand
+    .setName("diff")
+    .setDescription("2つの設定リビジョンの差分を表示します")
+    .addIntegerOption((option) => option
+      .setName("from")
+      .setDescription("比較元リビジョン")
+      .setMinValue(0)
+      .setRequired(true))
+    .addIntegerOption((option) => option
+      .setName("to")
+      .setDescription("比較先リビジョン")
+      .setMinValue(0)
+      .setRequired(true)))
+  .addSubcommand((subcommand) => subcommand
+    .setName("rollback")
+    .setDescription("指定した設定リビジョンを新しいリビジョンとして適用します")
+    .addIntegerOption((option) => option
+      .setName("revision")
+      .setDescription("戻す対象リビジョン")
+      .setMinValue(0)
+      .setRequired(true))
+    .addStringOption((option) => option
+      .setName("reason")
+      .setDescription("ロールバック理由（任意）")
+      .setMaxLength(500)
+      .setRequired(false)))
+  .addSubcommand((subcommand) => subcommand
+    .setName("apply_status")
+    .setDescription("設定適用ジョブの状態を確認します")
+    .addIntegerOption((option) => option
+      .setName("revision")
+      .setDescription("確認するリビジョン（省略時は最新）")
+      .setMinValue(1)
+      .setRequired(false)))
+  .addSubcommand((subcommand) => subcommand
+    .setName("apply_retry")
+    .setDescription("失敗・再試行待ちの適用ジョブを再試行します")
+    .addIntegerOption((option) => option
+      .setName("revision")
+      .setDescription("再試行するリビジョン")
+      .setMinValue(1)
+      .setRequired(true)))
+  .addSubcommand((subcommand) => subcommand
+    .setName("reconcile_status")
+    .setDescription("30分間隔の読み取り専用照合結果を表示します"))
+  .addSubcommand((subcommand) => subcommand
+    .setName("repair_status")
+    .setDescription("確認済み候補の自動修復ジョブ状態を表示します"))
+  .addSubcommand((subcommand) => subcommand
+    .setName("repair_retry")
+    .setDescription("停止した修復ジョブを有限回だけ再検証します")
+    .addStringOption((option) => option
+      .setName("action")
+      .setDescription("再検証する修復アクション")
+      .setRequired(true)
+      .addChoices(
+        { name: "status board", value: "status_board.ensure" },
+        { name: "profile panel", value: "profile_panel.ensure" },
+        { name: "otebo panel", value: "otebo_panel.ensure" },
+        { name: "voice control panels", value: "voice_control_panels.ensure" },
+      )));
+
+
 export const showReviewCommand = new SlashCommandBuilder()
   .setName("show")
   .setDescription("会話練習会の感想集計を表示します")
@@ -389,6 +474,34 @@ export const botStatusCommand = new SlashCommandBuilder()
   .addSubcommand((subcommand) => subcommand.setName("show").setDescription("現在状態をEphemeral表示します"))
   .addSubcommand((subcommand) => subcommand.setName("refresh").setDescription("状態を再取得してボードを更新します"))
   .addSubcommand((subcommand) => subcommand.setName("manage").setDescription("管理操作メニューを表示します"));
+
+export const checkBotCommand = new SlashCommandBuilder()
+  .setName("checkbot")
+  .setDescription("Botの設定・対象・実効権限を読み取り確認します")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  .setDMPermission(false)
+  .addStringOption((option) => option
+    .setName("feature")
+    .setDescription("確認する機能（省略時は全機能）")
+    .addChoices(
+      { name: "全機能", value: "all" },
+      { name: "splitvc", value: "splitvc" },
+      { name: "kokuchi", value: "kokuchi" },
+      { name: "callwait", value: "callwait" },
+      { name: "vc_dm", value: "vc_dm" },
+      { name: "forms", value: "forms" },
+      { name: "profile", value: "profile" },
+      { name: "voice_control", value: "voice_control" },
+      { name: "status_board", value: "status_board" },
+      { name: "fukyo", value: "fukyo" },
+    )
+    .setRequired(false));
+
+export const setupCommand = new SlashCommandBuilder()
+  .setName("setup")
+  .setDescription("機能別の初期設定を下書きして確認後に確定します")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  .setDMPermission(false);
 
 export const addWadaiCommand = new SlashCommandBuilder()
   .setName("addwadai")
@@ -491,7 +604,10 @@ export const commands = [
   setupProfileCommand.toJSON(),
   splitVoiceCommand.toJSON(),
   settingCommand.toJSON(),
+  configCommand.toJSON(),
   botStatusCommand.toJSON(),
+  checkBotCommand.toJSON(),
+  setupCommand.toJSON(),
   showReviewCommand.toJSON(),
   addWadaiCommand.toJSON(),
   showWadaiCommand.toJSON(),
