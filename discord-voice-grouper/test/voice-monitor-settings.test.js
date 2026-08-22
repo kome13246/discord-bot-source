@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { settingCommand } from "../src/commands.js";
+import { createVoiceSplitFeature } from "../src/features/voice-split.js";
 import { normalizeGuildSettings } from "../src/settings-store.js";
+import { formatVoiceReminderParentChannelMentions, getVoiceReminderParentChannelIds } from "../src/voice-reminder-settings.js";
 
 test("voice reminder parent settings normalize to a deduplicated array", () => {
   assert.deepEqual(
@@ -19,6 +21,40 @@ test("voice reminder parent settings normalize to a deduplicated array", () => {
     "parent-a",
   );
 });
+
+test("/setting show向けのVC集合親VC表示は設定された全チャンネルを保持する", () => {
+  const settings = {
+    voiceReminderParentChannelIds: ["parent-a", "parent-b", "parent-a", "parent-c"],
+    voiceReminderParentChannelId: "parent-a",
+  };
+  assert.deepEqual(getVoiceReminderParentChannelIds(settings), ["parent-a", "parent-b", "parent-c"]);
+  assert.equal(
+    formatVoiceReminderParentChannelMentions(settings),
+    "<#parent-a> <#parent-b> <#parent-c>",
+  );
+  assert.equal(
+    formatVoiceReminderParentChannelMentions({ voiceReminderParentChannelIds: [], voiceReminderParentChannelId: "legacy-parent" }),
+    "<#legacy-parent>",
+  );
+
+  const feature = createVoiceSplitFeature({
+    DEFAULT_NOTICE_WAIT_MINUTES: 25,
+    DEFAULT_ROLE_REMOVE_WAIT_MINUTES: 150,
+    DEFAULT_TRANSFER_WAIT_SECONDS: 30,
+    DEFAULT_WAITING_VC_NAME: "途中参加部屋",
+    getCallWaitIntervalMinutes: () => 30,
+    getCallWaitNoticeChannelId: () => null,
+    getCallWaitPromptChannelId: () => null,
+    getKokuchiAnnouncementChannelId: () => null,
+    getOteboQuickConfirmSeconds: () => 30,
+    normalizeKokuchiEventTime: (value) => value,
+  });
+  assert.match(
+    feature.formatCurrentSettings(settings),
+    /対象VC親: <#parent-a> <#parent-b> <#parent-c>/,
+  );
+});
+
 test("zatudan exposes multiple PB parent VC selectors", () => {
   const zatudan = settingCommand.options.find((option) => option.name === "zatudan");
   const optionNames = zatudan?.options?.map((option) => option.name) ?? [];

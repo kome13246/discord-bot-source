@@ -628,7 +628,7 @@ async function collectSnapshot(guild, dependencies, options = {}) {
       Math.max(MAX_STATUS_RECORDS, targetVoiceChannelIds.size),
     );
     const targetVcPanels = vcPanels.filter((panel) => targetVoiceChannelIds.has(panel?.channelId));
-    const totalVcPanels = vcPanelCount ?? vcPanels.length;
+    const storedVcPanelCount = vcPanelCount ?? vcPanels.length;
     const profilePresence = profilePanel ? await verifyPanelMessage(guild, profilePanel.channelId, profilePanel.messageId, panelPresenceCache) : null;
     const vcPresence = await mapWithConcurrency(
       targetVcPanels,
@@ -660,8 +660,8 @@ async function collectSnapshot(guild, dependencies, options = {}) {
     modules.panels = makeModule({
       key: "panels",
       label: "常設パネル",
-      summary: `プロフィール ${profilePanel ? "1" : "0"}件 / VCコントロール ${totalVcPanels}件`,
-      details: { profile: profilePanel ? { channelId: profilePanel.channelId, messageId: profilePanel.messageId, updatedAt: profilePanel.updatedAt, discordMessageExists: profilePresence?.checked ? profilePresence.exists : null } : null, voiceControlCount: totalVcPanels, targetVoiceControlCount: targetVoiceChannels.length, persistedTargetVoiceControlCount: targetVcPanels.length, missingTargetVoiceChannelIds: missingTargetPanelIds, verifiedVoiceControlCount: targetVcPanels.length, verificationTruncated: totalVcPanels > targetVcPanels.length, voiceControls: targetVcPanels.map((panel, index) => ({ channelId: panel.channelId, messageId: panel.panelMessageId, updatedAt: panel.updatedAt, discordMessageExists: vcPresence[index]?.checked ? vcPresence[index].exists : null })) },
+      summary: `プロフィール ${profilePanel ? "1" : "0"}件 / VCコントロール ${targetVcPanels.length}/${targetVoiceChannels.length}件`,
+      details: { profile: profilePanel ? { channelId: profilePanel.channelId, messageId: profilePanel.messageId, updatedAt: profilePanel.updatedAt, discordMessageExists: profilePresence?.checked ? profilePresence.exists : null } : null, voiceControlCount: storedVcPanelCount, targetVoiceControlCount: targetVoiceChannels.length, persistedTargetVoiceControlCount: targetVcPanels.length, ignoredStoredVoiceControlCount: Math.max(0, storedVcPanelCount - targetVcPanels.length), missingTargetVoiceChannelIds: missingTargetPanelIds, verifiedVoiceControlCount: targetVcPanels.length, verificationTruncated: false, voiceControls: targetVcPanels.map((panel, index) => ({ channelId: panel.channelId, messageId: panel.panelMessageId, updatedAt: panel.updatedAt, discordMessageExists: vcPresence[index]?.checked ? vcPresence[index].exists : null })) },
       issues,
       disabled: !settings?.profileIntroductionChannelId && !settings?.vcControlCategoryId,
       availableActions: issues.some((item) => repairableIssueCodes.has(item.code)) ? ["reinstall_panels"] : [],

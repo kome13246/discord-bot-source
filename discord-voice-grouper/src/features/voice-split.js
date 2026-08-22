@@ -1,3 +1,8 @@
+import {
+  formatVoiceReminderParentChannelMentions,
+  getVoiceReminderParentChannelIds as getConfiguredVoiceReminderParentChannelIds,
+} from "../voice-reminder-settings.js";
+
 export function createVoiceSplitFeature(dependencies) {
   const {
     AUTO_SPLIT_THRESHOLD,
@@ -1630,12 +1635,7 @@ export function createVoiceSplitFeature(dependencies) {
   }
   
   function getVoiceReminderParentChannelIds(settings) {
-    const configured = settings?.voiceReminderParentChannelIds
-      ?? settings?.voiceReminderParentChannelId;
-    return [...new Set(
-      (Array.isArray(configured) ? configured : [configured])
-        .filter((channelId) => typeof channelId === "string" && channelId.length > 0),
-    )];
+    return getConfiguredVoiceReminderParentChannelIds(settings);
   }
   
   async function resolveVoiceReminderParentChannel(guild, settings, sourceChannel = null) {
@@ -5386,6 +5386,7 @@ export function createVoiceSplitFeature(dependencies) {
   
     function formatCurrentSettings(settings) {
       if (!settings) return "設定はまだ保存されていません。";
+      const voiceReminderParentChannels = formatVoiceReminderParentChannelMentions(settings);
       return [
         "VC未参加者・長期不参加者向けDM",
         `有効: ${settings.vcDmEnabled === true ? "有効" : "無効"}`,
@@ -5407,7 +5408,7 @@ export function createVoiceSplitFeature(dependencies) {
         "",
         "【VC集合】",
         `有効: ${settings.voiceReminderEnabled === false ? "無効" : "有効"}`,
-        `対象VC親: ${getVoiceReminderParentChannelIds(settings).length ? getVoiceReminderParentChannelIds(settings).map((id) => `<#${id}>`).join(" ") : "未設定"}`,
+        `対象VC親: ${voiceReminderParentChannels}`,
         `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,
         "",
         "【kokuchi】",
@@ -5457,7 +5458,7 @@ export function createVoiceSplitFeature(dependencies) {
         "",
         "【雑談・VC集合】",
         `機能: ${settings.voiceReminderEnabled === false ? "無効" : "有効"}`,
-        `対象PB親VC: ${getVoiceReminderParentChannelIds(settings).length ? getVoiceReminderParentChannelIds(settings).map((id) => `<#${id}>`).join(" ") : "未設定"}`,
+        `対象PB親VC: ${formatVoiceReminderParentChannelMentions(settings)}`,
         `対象子VCカテゴリ: ${settings.voiceReminderChildCategoryId ? `<#${settings.voiceReminderChildCategoryId}>` : "未設定"}`,
         `明示的な監視VC: ${Array.isArray(settings.voiceMonitorVoiceChannelIds) && settings.voiceMonitorVoiceChannelIds.length ? settings.voiceMonitorVoiceChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定（子VCカテゴリ判定を使用）"}`,
         `参加者ロール: ${settings.voiceParticipantRoleId ? `<@&${settings.voiceParticipantRoleId}>` : "未設定"}`,

@@ -138,28 +138,28 @@ export const settingCommand = new SlashCommandBuilder()
       .addChannelOption((option) =>
         option
           .setName("voice_reminder_parent_channel_2")
-          .setDescription("VC繝ｪ繝槭う繝ｳ繝繝ｼ蟇ｾ雎｡縺ｮPB隕ｪVC 2")
+          .setDescription("VCリマインダー対象のPB親VC 2")
           .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
           .setRequired(false),
       )
       .addChannelOption((option) =>
         option
           .setName("voice_reminder_parent_channel_3")
-          .setDescription("VC繝ｪ繝槭う繝ｳ繝繝ｼ蟇ｾ雎｡縺ｮPB隕ｪVC 3")
+          .setDescription("VCリマインダー対象のPB親VC 3")
           .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
           .setRequired(false),
       )
       .addChannelOption((option) =>
         option
           .setName("voice_reminder_parent_channel_4")
-          .setDescription("VC繝ｪ繝槭う繝ｳ繝繝ｼ蟇ｾ雎｡縺ｮPB隕ｪVC 4")
+          .setDescription("VCリマインダー対象のPB親VC 4")
           .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
           .setRequired(false),
       )
       .addChannelOption((option) =>
         option
           .setName("voice_reminder_parent_channel_5")
-          .setDescription("VC繝ｪ繝槭う繝ｳ繝繝ｼ蟇ｾ雎｡縺ｮPB隕ｪVC 5")
+          .setDescription("VCリマインダー対象のPB親VC 5")
           .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
           .setRequired(false),
       )

@@ -21,7 +21,5 @@ const schema = new mongoose.Schema({
   pendingMessageDeletions: { type: [pendingDeletionSchema], default: [] },
 }, { timestamps: true, minimize: false });
 
-schema.index({ guildId: 1 }, { unique: true });
-
 export const OperationalStatusBoard = mongoose.models.OperationalStatusBoard
   ?? mongoose.model("OperationalStatusBoard", schema);

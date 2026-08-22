@@ -55,7 +55,6 @@ const schema = new mongoose.Schema({
   schemaVersion: { type: Number, required: true, min: 1, default: 1 },
 }, { strict: true, timestamps: true, minimize: false });
 
-schema.index({ guildId: 1 }, { unique: true });
 schema.index({ nextRunAt: 1, status: 1 });
 schema.index({ status: 1, completedAt: -1 });
 
