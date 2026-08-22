@@ -111,10 +111,12 @@ discord-voice-grouper/
 - `src/bump-reminder-store.js`: DISBOARD bumpリマインドの予約を保存します。
 - `src/commands.js`: スラッシュコマンドの定義です。
 - `src/grouping.js`: 3人組・4人組に分ける計算ロジックです。
-- `src/settings-store.js`: `/setting` で保存したPB連携、募集、VCリマインダー、話題、ログ、フォーム設定を読み書きします。
+- `src/settings-store.js`: MongoDBのGuildSettingsと、旧形式設定の読み取り時移行を扱います。現在の設定の正本はMongoDBです。
+- `src/settings-configuration.js`、`src/configuration-service.js`: 管理設定のallowlist、正規化、リビジョンCAS、履歴・差分、適用ジョブを扱います。
+- `src/reconciliation-service.js`、`src/reconciliation-repair-service.js`: 30分間隔の読み取り専用照合と、確認済み候補だけの安全な修復を扱います。
 - `src/mongodb.js`: MongoDB Atlasへの接続・切断を管理します。
 - `src/register-commands.js`: Discordへスラッシュコマンドを登録します。
-- `data/settings.json`: `/setting` や話題コマンドで保存したサーバー別設定です。
+- `data/settings.json`: 旧形式設定が存在する場合の読み取り時移行用です。現在の設定の正本ではなく、通常の設定更新先でもありません。
 - `data/bump-reminders.json`: 予約中のDISBOARD bumpリマインドです。
 - `.env.example`: `.env` を作るための見本です。
 
@@ -478,6 +480,7 @@ RenderのEnvironment Variablesに次を登録します。
 | --- | --- |
 | `DISCORD_TOKEN` | Discord Developer Portalで取得したBot Token |
 | `DISCORD_CLIENT_ID` | Discord ApplicationのClient ID |
+| `MONGODB_URI` | GuildSettings、履歴、適用ジョブ、照合結果を保存するMongoDB接続文字列 |
 | `DISBOARD_BOT_ID` | 任意。通常は未設定でOK |
 | `DISCORD_GUILD_ID` | テスト用サーバーだけに登録したい場合のみ設定 |
 
@@ -491,10 +494,11 @@ Renderのログに `DISCORD_TOKEN is required.` と出る場合は、Environment
 ログに `No package.json found` や `ENOENT` が出る場合は、Root Directoryの指定がずれている可能性が高いです。
 ログに `Cannot find module` が出る場合は、Build Commandが `npm install` になっているか確認してください。
 
-Renderでは `/setting` で保存したファイルが再デプロイや再起動で消える場合があります。
-確実に残したい設定は、RenderのEnvironment Variablesに `PB_PARTICIPANT_ROLE_ID`、`PB_SPLIT_MODE`、`PB_PARENT_CHANNEL_ID`、`PB_CHILD_CATEGORY_ID`、`PB_WAITING_VC_CATEGORY_ID`、`PB_WAITING_VC_NAME`、`PB_VOICE_REMINDER_ENABLED`、`PB_VOICE_REMINDER_CHANNEL_ID`、`PB_VOICE_REMINDER_PARENT_CHANNEL_ID` または `PB_VOICE_REMINDER_PARENT_CHANNEL_IDS`、`PB_VOICE_REMINDER_CHILD_CATEGORY_ID`、`PB_WADAI_CHANNEL_ID`、`PB_POST_SPLIT_WADAI_CHANNEL_ID`、`PB_SPLIT_START_CHANNEL_ID`、`PB_GATHERING_VOICE_CHANNEL_ID`、`PB_KOKUCHI_MENTION_ROLE_IDS`、`PB_SPLIT_FEEDBACK_CHANNEL_ID`、`PB_LOG_CHANNEL_ID`、`PB_FORM_CHANNEL_ID`、`PB_FORM_SEND_CHANNEL_ID`、`PB_FORM_MODERATOR_ROLE_ID`、`PB_TRANSFER_WAIT_SECONDS`、`PB_NOTICE_WAIT_MINUTES`、`PB_ROLE_REMOVE_WAIT_MINUTES`、`PB_CALL_WAIT_ENABLED`、`PB_CALL_WAIT_ROLE_ID`、`PB_CALL_WAIT_PROMPT_CHANNEL_ID`、`PB_CALL_WAIT_NOTICE_CHANNEL_ID`、`PB_CALL_WAIT_VOICE_CATEGORY_ID`、`PB_CALL_WAIT_INTERVAL_MINUTES`、`PB_OTEBO_QUICK_CONFIRM_SECONDS` として入れてください。
-募集チャンネルや募集メンションロール、登録した話題など、Environment Variablesに対応していない `/setting` 項目は `data/settings.json` に保存されます。
-Renderで永続ディスクを使っていない場合、再デプロイ後に `/setting splitvc`、`/setting zatudan`、`/setting kokuchi` などで再設定が必要になることがあります。
+Renderでも管理設定の保存先はMongoDBです。再デプロイでGuildSettingsが消えないよう、`MONGODB_URI`は必ず同じデータベースを指定してください。
+`PB_*` 環境変数は、Renderなどで環境由来の既定値を使いたい場合だけ設定してください。環境変数だけの値は設定リビジョンのスナップショットへ混入せず、`/setting` または `/setup` でMongoDBへ保存した管理設定が履歴の対象になります。
+現在の `/setting` と `/setup` の管理設定、設定リビジョン、適用ジョブ、30分照合結果、修復ジョブはMongoDBへ保存されます。Bot本体と既存のMongoDB接続を使うため、追加サーバーや別データベースは必要ありません。
+`data/settings.json` は旧形式設定が存在する場合の読み取り時移行用で、現行の正本ではありません。`data/bump-reminders.json` は従来どおりファイル予約のため、再起動後も予約を残したい場合だけRenderの永続ディスク等を検討してください。
+管理設定のリビジョンと適用ジョブを原子的に作成するには、MongoDBのトランザクションが必要です。AtlasやReplica Set等では利用できますが、standalone MongoDBではversioned更新を安全側で拒否し、設定変更を行いません。
 
 ### 5. デプロイする
 
@@ -622,6 +626,23 @@ PB連携、募集、VCリマインダー、話題、ログ、フォーム、通�
 | `call_wait_interval_minutes` | `30`、`45`、`60` 分から選べます。毎日JST 0:00基準の固定スロットで実行します。 |
 
 `/setting` を使うにはサーバー管理権限が必要です。
+
+### 管理設定・照合・安全修復
+
+管理運用は、設定変更とDiscord上の実体確認・反映を分離しています。以下の管理コマンドはサーバー内（guild-only）かつManageGuild権限が必要で、管理情報を含む応答はEphemeralです。
+
+- `/checkbot [feature]`: `all`（省略時）、`splitvc`、`kokuchi`、`callwait`、`vc_dm`、`forms`、`profile`、`voice_control`、`status_board`、`fukyo` の設定対象・対象チャンネル/VC/ロール・Botの実効権限を読み取り確認します。設定変更、権限変更、送信、ロール操作、VC操作は行いません。`/setup`とは独立した診断コマンドです。
+- `/setup`: 1回につき1機能の下書きを作成し、機能選択→入力→レビュー→確定またはキャンセルを行います。本人の下書きは再実行で再開でき、1 guildにつきactive/committing下書きは1件、TTLは30分です。Discordのguild所属・種別を再検証し、レビューで確定したときだけversioned writerと適用ジョブを1回通します。入力中はGuildSettingsを変更しません。
+- `/config history`、`/config show`、`/config diff`: 設定リビジョンの履歴・スナップショット・差分を確認します。
+- `/config rollback`、`/config apply_status`、`/config apply_retry`: CAS付きロールバック、適用ジョブの状態確認、失敗/再試行待ちジョブの有限回再試行を行います。競合時は上書きせず、適用失敗は設定保存済みとして扱います。
+- `/config reconcile_status`: 最新の30分照合結果を確認します。初回はready後の既存復元が終わってから実行され、その後は仕様固定の1,800,000ms間隔です。照合は読み取り専用で、unknown・API一時障害・権限不明は修復候補にしません。
+- `/config repair_status`、`/config repair_retry`: 確認済み修復ジョブの状態を確認し、停止したジョブを有限回だけ再検証・再試行します。
+
+自動修復のallowlistは `status_board.ensure`、`profile_panel.ensure`、`otebo_panel.ensure`、`voice_control_panels.ensure` の4種だけです。設定値、設定リビジョン、権限、ロール、kokuchi、callwait、DMの設定や状態を自動変更しません。実行直前と実行後に読み取り検証し、候補が消えた場合だけ完了扱いにします。結果不明はblocked、既知の実行前一時失敗だけretry_waitとし、自動試行・手動再試行とも上限とcircuit-openがあります。
+
+Botは既存の同一MongoDB接続と同一プロセスで動作し、別サーバーや別データベースは必要ありません。起動時に新しいcollectionのindex作成と設定リビジョンのbackfillを行います。設定更新ではGuildSettings、リビジョン履歴、適用ジョブをMongoDB transactionで原子的に作成します。Atlas/Replica Set等のtransaction対応環境が必須で、standalone MongoDBではversioned更新をfail closed（変更せず拒否）します。
+
+運用確認は、`/checkbot` → `/config reconcile_status` → `/config repair_status` の順に行い、必要な場合だけ `/config repair_retry`、`/config apply_retry`、`/config rollback` を実行してください。照合・修復の保存データには秘密、設定全文、メンバー識別子、メッセージ本文を含めません。
 
 待機時間オプション:
 
@@ -1158,6 +1179,7 @@ DISBOARD_BOT_ID=302050872383242240
 
 - テスト中は `DISCORD_GUILD_ID` を使うと、コマンド反映が速くて扱いやすいです。
 - 複数サーバーで使う場合は、動作確認後にグローバルコマンド登録へ切り替えると便利です。
+- 起動時の復元・index作成完了後に30分照合と修復workerが開始します。`/checkbot`で設定と権限、`/config reconcile_status`で観測、`/config repair_status`で修復ジョブを確認してください。
 - 30人を超えても処理できますが、結果メッセージが長くなりすぎる場合はDiscord側の文字数制限に注意してください。
 - 参加者名はDiscord上の表示名を使います。
 - `shuffle` オプションは現在ありません。分け方は常にランダムです。

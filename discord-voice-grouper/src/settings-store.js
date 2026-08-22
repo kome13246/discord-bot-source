@@ -2,6 +2,9 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { GuildSettings } from "./models/guild-settings.js";
 import mongoose from "mongoose";
+import { CONFIG_SCHEMA_VERSION, normalizeConfigurationRevision } from "./settings-configuration.js";
+import { createConfigurationService, createEffectiveConfigurationWriter } from "./configuration-service.js";
+import { SettingsApplyJob } from "./models/settings-apply-job.js";
 
 const settingsPath = resolve(process.cwd(), "data", "settings.json");
 let legacyCache;
@@ -17,7 +20,14 @@ export async function getGuildSettings(guildId) {
     if (legacy) {
       document = await GuildSettings.findOneAndUpdate(
         { guildId },
-        { $setOnInsert: { ...removeUndefined(legacy), guildId } },
+        {
+          $setOnInsert: {
+            ...removeUndefined(legacy),
+            guildId,
+            configRevision: 0,
+            configSchemaVersion: CONFIG_SCHEMA_VERSION,
+          },
+        },
         { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, lean: true },
       );
     } else {
@@ -48,6 +58,11 @@ export function mergeGuildSettingsWithEnvironmentDefaults(
 /** Backward-compatible, idempotent read-time normalization. */
 export function normalizeGuildSettings(settings = {}) {
   const result = { ...settings };
+  result.configRevision = normalizeConfigurationRevision(result.configRevision);
+  const schemaVersion = Number(result.configSchemaVersion);
+  result.configSchemaVersion = Number.isInteger(schemaVersion) && schemaVersion > 0
+    ? schemaVersion
+    : CONFIG_SCHEMA_VERSION;
   result.splitMode = ["direct", "partybeast"].includes(result.splitMode)
     ? result.splitMode
     : "direct";
@@ -126,7 +141,15 @@ export async function patchGuildSettings(guildId, patch) {
   const legacy = (await readLegacySettings())[guildId] ?? {};
   const saved = await GuildSettings.findOneAndUpdate(
     { guildId },
-    { $set: cleanPatch, $setOnInsert: { ...removeUndefined(legacy), guildId } },
+    {
+      $set: cleanPatch,
+      $setOnInsert: {
+        ...removeUndefined(legacy),
+        guildId,
+        configRevision: 0,
+        configSchemaVersion: CONFIG_SCHEMA_VERSION,
+      },
+    },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true, runValidators: true, lean: true },
   );
   const { _id, __v, guildId: ignoredGuildId, ...settings } = saved;
@@ -135,6 +158,20 @@ export async function patchGuildSettings(guildId, patch) {
 
 export async function saveGuildSettings(guildId, patch) {
   return patchGuildSettings(guildId, patch);
+}
+
+/** Explicit name for the non-versioned runtime/lifecycle write path. */
+export async function saveRuntimeGuildSettings(guildId, patch) {
+  return patchGuildSettings(guildId, patch);
+}
+
+/** Explicit versioned administrator configuration write path. */
+export async function saveVersionedGuildSettings(guildId, patch, options) {
+  const service = createConfigurationService({ applyJobModel: SettingsApplyJob });
+  return createEffectiveConfigurationWriter({
+    updateConfiguration: service.updateConfiguration,
+    getGuildSettings,
+  })(guildId, patch, options);
 }
 
 /**
@@ -667,7 +704,7 @@ async function readLegacySettings() {
   return legacyCache;
 }
 
-function getEnvironmentSettings(guildId) {
+export function getEnvironmentSettings(guildId) {
   if (process.env.DISCORD_GUILD_ID && process.env.DISCORD_GUILD_ID !== guildId) return null;
   const value = (name) => process.env[name];
   const bool = (name) => parseOptionalBoolean(value(name));

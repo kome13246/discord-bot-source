@@ -31,7 +31,7 @@ import {
   getPairKeysFromGroups,
   shuffle,
 } from "./grouping.js";
-import { cancelKokuchiTimedActions, claimCallWaitPendingNotice, claimOteboRecruitmentSlot, clearOteboRecruitmentConfirmation, deleteOteboRecruitmentIfOnlyMember, failCallWaitPendingNotice, getGuildSettings, patchGuildSettingsForKokuchiEvent, recoverInterruptedCallWaitPendingNotices, recoverInterruptedCallWaitPrompts, recoverInterruptedKokuchiGatheringReminders, releaseOteboRecruitmentSlot, replaceNestedObject, saveGuildSettings, transitionCallWaitPrompt, transitionKokuchiGatheringReminder, transitionOteboRecruitmentSlot, transitionKokuchiTimedAction, transitionOteboRecruitment, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
+import { cancelKokuchiTimedActions, claimCallWaitPendingNotice, claimOteboRecruitmentSlot, clearOteboRecruitmentConfirmation, deleteOteboRecruitmentIfOnlyMember, failCallWaitPendingNotice, getEnvironmentSettings, getGuildSettings, patchGuildSettingsForKokuchiEvent, recoverInterruptedCallWaitPendingNotices, recoverInterruptedCallWaitPrompts, recoverInterruptedKokuchiGatheringReminders, releaseOteboRecruitmentSlot, replaceNestedObject, saveGuildSettings, transitionCallWaitPrompt, transitionKokuchiGatheringReminder, transitionOteboRecruitmentSlot, transitionKokuchiTimedAction, transitionOteboRecruitment, updateCallWaitPromptMember, updateOteboRecruitmentParticipant, unsetNestedObject } from "./settings-store.js";
 import { cancelKokuchiScheduledActions, claimAction, failAction, finishAction, getPendingActions, recoverInterruptedActions, retryAction, scheduleAction, scheduleSingleGuildAction } from "./scheduled-action-store.js";
 import { SplitProcessSession } from "./models/split-process-session.js";
 import { SplitReview } from "./models/split-review.js";
@@ -54,8 +54,13 @@ import { ProfileRegistrationPanel } from "./models/profile-registration-panel.js
 import { OteboRecruitmentPanel } from "./models/otebo-recruitment-panel.js";
 import { CallWaitRoleGeneration } from "./models/call-wait-role-generation.js";
 import { OperationalActionLog } from "./models/operational-action-log.js";
+import { GuildSettingsRevision } from "./models/guild-settings-revision.js";
+import { SettingsApplyJob } from "./models/settings-apply-job.js";
+import { GuildSetupDraft } from "./models/setup-draft.js";
 import { OperationalHealthState } from "./models/operational-health-state.js";
 import { OperationalStatusBoard } from "./models/operational-status-board.js";
+import { ReconciliationObservation } from "./models/reconciliation-observation.js";
+import { ReconciliationRepairJob } from "./models/reconciliation-repair-job.js";
 import { acquireMongoLease, releaseMongoLease, renewMongoLease } from "./mongo-lease-lock-store.js";
 import { handleProfileVoiceState, restoreProfiles } from "./profile-service.js";
 import { createProfileRegistrationPanelService } from "./profile-registration-panel-service.js";
@@ -120,6 +125,16 @@ import { createKokuchiFeature } from "./features/kokuchi.js";
 import { createRecruitmentFeature } from "./features/recruitment.js";
 import { createVoiceSplitFeature } from "./features/voice-split.js";
 import { createGuildOperationsFeature } from "./features/guild-operations.js";
+import { createCheckbotFeature } from "./features/checkbot.js";
+import { createConfigurationFeature } from "./features/configuration.js";
+import { createSetupFeature } from "./features/setup.js";
+import { createSettingsValidationService } from "./settings-validation-service.js";
+import { createConfigurationService, createEffectiveConfigurationWriter } from "./configuration-service.js";
+import { createSettingsApplyDispatcher, createSettingsApplyService } from "./settings-apply-service.js";
+import { createCallWaitSettingsReconciler } from "./callwait-settings-reconciler.js";
+import { createReconciliationService } from "./reconciliation-service.js";
+import { createReconciliationRepairService } from "./reconciliation-repair-service.js";
+import { createSetupDraftService } from "./setup-service.js";
 import { toCurrentGroupMemberIds } from "./split-waiting-utils.js";
 import {
   canCloseGatheringVcAfterSplit,
@@ -319,6 +334,63 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
+const settingsValidationService = createSettingsValidationService({
+  getGuildSettings,
+  getStatusBoard: async (guildId) => {
+    const query = OperationalStatusBoard.findOne({ guildId });
+    return typeof query.lean === "function" ? query.lean() : query;
+  },
+  logger: console,
+});
+let settingsApplyService = null;
+let reconciliationService = null;
+let reconciliationRepairService = null;
+const configurationService = createConfigurationService({ logger: console, applyJobModel: SettingsApplyJob });
+const rawSaveVersionedGuildConfiguration = createEffectiveConfigurationWriter({
+  updateConfiguration: configurationService.updateConfiguration,
+  getGuildSettings,
+});
+// The writer remains the single versioned entrypoint used by /setting and
+// future /setup.  Applying the committed revision is best-effort after the
+// transaction; a Discord failure is reported as an apply-job state rather
+// than being confused with a configuration-save failure.
+const saveVersionedGuildConfiguration = async (guildId, patch, options = {}) => {
+  const settings = await rawSaveVersionedGuildConfiguration(guildId, patch, options);
+  if (!settingsApplyService || !settings?.revision) return settings;
+  try {
+    const apply = await settingsApplyService.applyCommittedRevision(guildId, settings.revision);
+    return { ...settings, apply };
+  } catch (error) {
+    console.error(`Settings apply request failed after revision ${settings.revision}:`, error);
+    return { ...settings, apply: { status: "retry_wait", revision: settings.revision, lastError: String(error?.message ?? error) } };
+  }
+};
+const setupDraftService = createSetupDraftService({
+  draftModel: GuildSetupDraft,
+  configurationService,
+  getGuildSettings,
+  getGuild: (guildId) => client.guilds.cache.get(guildId) ?? null,
+  saveVersionedGuildConfiguration,
+  logger: console,
+});
+const setupFeature = createSetupFeature({
+  draftService: setupDraftService,
+  getGuildSettings,
+  configurationService,
+  logger: console,
+});
+const configurationFeature = createConfigurationFeature({
+  configurationService,
+  applyService: () => settingsApplyService,
+  reconciliationService: () => reconciliationService,
+  repairService: () => reconciliationRepairService,
+  logger: console,
+});
+const checkbotFeature = createCheckbotFeature({
+  getGuildSettings,
+  validationService: settingsValidationService,
+  logger: console,
+});
 const bumpReminderFeature = createBumpReminderFeature({
   client,
   disboardBotId: DISBOARD_BOT_ID,
@@ -353,6 +425,7 @@ const profileFeature = createProfileFeature({
   acquireMongoLease,
   releaseMongoLease,
   saveGuildSettingsWithCurrent,
+  saveVersionedGuildConfiguration,
   replyOrFollowUp,
   formatSettings,
 });
@@ -1012,6 +1085,7 @@ function getOteboVoiceStatusTimerKey(...args) { return recruitmentFeature.getOte
 const fukyoThemeService = createFukyoThemeService({
   getGuildSettings,
   saveGuildSettings,
+  saveVersionedGuildConfiguration,
   sendOperationalLog,
   acquireMongoLease,
   releaseMongoLease,
@@ -1033,6 +1107,63 @@ const operationalStatusBoardService = createOperationalStatusBoardService({
   acquireMongoLease,
   renewMongoLease,
   releaseMongoLease,
+  logger: console,
+});
+reconciliationRepairService = createReconciliationRepairService({
+  repairJobModel: ReconciliationRepairJob,
+  validationService: settingsValidationService,
+  operationalStatusService,
+  getGuild: (guildId) => client.guilds.cache.get(guildId) ?? null,
+  getGuilds: () => client.guilds.cache,
+  getGuildSettings,
+  operationalStatusBoardService,
+  profileRegistrationPanelService,
+  oteboRecruitmentPanelService,
+  voiceChannelControlService,
+  logger: console,
+});
+reconciliationService = createReconciliationService({
+  client,
+  validationService: settingsValidationService,
+  operationalStatusService,
+  observationModel: ReconciliationObservation,
+  onObservation: (observation) => reconciliationRepairService?.enqueueObservation(observation),
+  logger: console,
+});
+const callWaitSettingsReconciler = createCallWaitSettingsReconciler({
+  saveGuildSettingsWithCurrent,
+  endCallWaitInterestsForRecruitment,
+  deleteCallWaitPrompt,
+  deleteCallWaitMessage,
+  callWaitFollowupTimers,
+  logger: console,
+});
+const settingsApplyDispatcher = createSettingsApplyDispatcher({
+  getGuild: (guildId) => client.guilds.cache.get(guildId) ?? null,
+  getGuildSettings,
+  operationalStatusBoardService,
+  profileRegistrationPanelService,
+  oteboRecruitmentPanelService,
+  vcDmService,
+  voiceChannelControlService,
+  voiceMonitorSessions,
+  isVoiceChannelMonitored,
+  stopVoiceMonitorSession,
+  reconcilePersistedVoiceParticipantRoleGrants,
+  rescheduleCurrentKokuchiEvent,
+  requestOperationalStatusRefresh,
+  fukyoThemeService,
+  callWaitReconciler: callWaitSettingsReconciler,
+  logger: console,
+});
+settingsApplyService = createSettingsApplyService({
+  jobModel: SettingsApplyJob,
+  configurationService,
+  getGuildSettings,
+  getEnvironmentSettings,
+  getGuild: (guildId) => client.guilds.cache.get(guildId) ?? null,
+  dispatcher: settingsApplyDispatcher,
+  validationService: settingsValidationService,
   logger: console,
 });
 const kokuchiRecoveryService = createKokuchiRecoveryService({
@@ -1078,6 +1209,7 @@ const guildOperationsFeature = createGuildOperationsFeature({
   VoiceParticipantRoleGrant,
   acquireMongoLease,
   callWaitFollowupTimers,
+  callWaitSettingsReconciler,
   classifyGatheringVcRestoreBlock,
   countUniqueParticipantIds,
   createWadaiTopicId,
@@ -1118,6 +1250,7 @@ const guildOperationsFeature = createGuildOperationsFeature({
   rescheduleCurrentKokuchiEvent,
   restoreGatheringVcPermissionAfterSplit,
   saveGuildSettingsWithCurrent,
+  saveVersionedGuildConfiguration,
   splitReviewFeature,
   stopVoiceMonitorSession,
   validateOteboSettings,
@@ -1189,6 +1322,9 @@ client.once(Events.ClientReady, createReadyHandler({
     discordReadyWatchdog = null;
   },
   migrate: migrateKokuchiEventState,
+  settingsApplyTasks: [
+    { name: "settings-apply-jobs", run: () => settingsApplyService?.processAvailable({ maxJobs: 100 }) },
+  ],
   restoreTasks: [
     { name: "call-wait-prompts", run: recoverInterruptedCallWaitPrompts },
     { name: "call-wait-pending-notices", run: recoverInterruptedCallWaitPendingNotices },
@@ -1213,6 +1349,9 @@ client.once(Events.ClientReady, createReadyHandler({
   lateRestoreTasks: [
     { name: "otebo-recruitment-panel", run: () => oteboRecruitmentPanelService.restore(client) },
   ],
+  workerStartTasks: [
+    { name: "settings-apply-worker", run: () => settingsApplyService?.start() },
+  ],
   updateRestoreState: ({ completed, failed, failures }) => {
     startupRestoreCompleted = completed;
     startupRestoreFailed = failed;
@@ -1226,6 +1365,8 @@ client.once(Events.ClientReady, createReadyHandler({
   processCallWait: processCallWaitForAllGuilds,
   retryCallWaitNotifications: retryPendingCallWaitEndNotifications,
   scheduleCallWait: scheduleNextCallWaitTick,
+  startRepair: () => reconciliationRepairService?.start(),
+  startReconciliation: () => reconciliationService?.start(),
 }));
 
 
@@ -1267,6 +1408,10 @@ client.on(Events.InteractionCreate, createInteractionHandler({
     fukyoTheme: fukyoThemeService,
   },
   handlers: {
+    handleConfig: configurationFeature.handleConfig,
+    handleCheckbot: checkbotFeature.handleCheckbot,
+    handleSetup: setupFeature.handleSetup,
+    handleSetupInteraction: setupFeature.handleInteraction,
     handleSplitReviewButton: splitReviewFeature.handleSplitReviewButton,
     handleSplitRandomTopicButton,
     handleBosyuButton: bosyuFeature.handleBosyuButton,
@@ -1599,6 +1744,9 @@ client.on(Events.InteractionCreate, createInteractionHandler({
       console.warn(`Marked ${staleIds.length} duplicate active call-wait follow-up action(s) as failed during index migration.`);
     }
     await Promise.all([
+      GuildSettingsRevision.createIndexes(),
+      SettingsApplyJob.createIndexes(),
+      GuildSetupDraft.createIndexes(),
       ensureVoiceParticipantRoleGrantIndexes(),
       BumpReminder.createIndexes(),
       ScheduledAction.createIndexes(),
@@ -1615,6 +1763,8 @@ client.on(Events.InteractionCreate, createInteractionHandler({
       CallWaitRoleGeneration.createIndexes(),
       OperationalStatusBoard.createIndexes(),
       OperationalHealthState.createIndexes(),
+      ReconciliationObservation.createIndexes(),
+      ReconciliationRepairJob.createIndexes(),
       OperationalActionLog.createIndexes(),
       VcDmDailyRun.createIndexes(),
       VcDmMemberTracking.createIndexes(),
@@ -1622,10 +1772,22 @@ client.on(Events.InteractionCreate, createInteractionHandler({
       VcDmPanel.createIndexes(),
       VcDmReminder.createIndexes(),
     ]);
+    try {
+      await configurationService.backfillGuildSettings();
+    } catch (error) {
+      if (error?.code === "CONFIGURATION_TRANSACTIONS_UNAVAILABLE") {
+        console.warn("GuildSettings revision metadata backfill deferred: MongoDB transactions are unavailable.");
+      } else {
+        throw error;
+      }
+    }
   }
 
   shutdownController = createShutdownController({
     stopServices: [
+      () => reconciliationService?.shutdown(),
+      () => reconciliationRepairService?.shutdown(),
+      () => settingsApplyService?.shutdown(),
       () => voiceSplitFeature.shutdown(),
       () => vcDmService.shutdown(),
       () => bumpReminderFeature.shutdown(),

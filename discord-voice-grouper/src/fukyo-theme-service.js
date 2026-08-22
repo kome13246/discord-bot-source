@@ -63,6 +63,12 @@ function reply(interaction, content) {
   return interaction.reply(payload);
 }
 
+// Configuration writes can fail after the interaction has already been
+// acknowledged.  Keep that acknowledgement out of the value returned to
+// callers: discord.js Message objects are truthy and used to make callers
+// mistake a conflict/error notice for a successful settings write.
+export const FUKYO_CONFIGURATION_SAVE_FAILED = Object.freeze({ ok: false });
+
 function splitText(text, max = 1900) {
   const output = []; let current = "";
   for (const line of text.split("\n")) {
@@ -73,7 +79,7 @@ function splitText(text, max = 1900) {
   return output;
 }
 
-export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, sendOperationalLog, acquireMongoLease, releaseMongoLease, requestOperationalStatusRefresh = () => {} }) {
+export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, saveVersionedGuildConfiguration = null, sendOperationalLog, acquireMongoLease, releaseMongoLease, requestOperationalStatusRefresh = () => {} }) {
   let timer = null;
   let client = null;
   let stopped = false;
@@ -94,6 +100,40 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
 
   function themes(settings) {
     return Array.isArray(settings?.fukyoThemes) ? settings.fukyoThemes.filter((theme) => theme?.id && theme?.name && theme?.normalizedName) : [];
+  }
+
+  async function saveFukyoConfiguration(interaction, currentSettings, patch, reason, { companionPatch = {} } = {}) {
+    try {
+      let settings;
+      if (typeof saveVersionedGuildConfiguration !== "function") {
+        // Keep the legacy test/in-process adapter semantically equivalent to
+        // the versioned writer: the activation timestamp is still a runtime
+        // field, but must move with a false -> true update when no transaction
+        // writer has been injected.
+        settings = await saveGuildSettings(interaction.guildId, { ...patch, ...companionPatch });
+      } else {
+        settings = await saveVersionedGuildConfiguration(interaction.guildId, patch, {
+          expectedRevision: Number.isInteger(Number(currentSettings?.configRevision))
+            ? Number(currentSettings.configRevision)
+            : 0,
+          actorUserId: interaction.user?.id ?? null,
+          source: "setting",
+          reason,
+          companionPatch,
+        });
+      }
+      return { ok: true, settings };
+    } catch (error) {
+      if (error?.code === "CONFIGURATION_REVISION_CONFLICT") {
+        await reply(interaction, "設定が別の管理者によって先に更新されました。現在の設定を再表示してから、もう一度実行してください。上書きは行っていません。");
+        return { ...FUKYO_CONFIGURATION_SAVE_FAILED, reason: "revision-conflict", error };
+      }
+      if (error?.code === "CONFIGURATION_TRANSACTIONS_UNAVAILABLE") {
+        await reply(interaction, "設定の安全な履歴保存に必要なMongoDBトランザクションが利用できないため、設定を変更しませんでした。");
+        return { ...FUKYO_CONFIGURATION_SAVE_FAILED, reason: "transactions-unavailable", error };
+      }
+      throw error;
+    }
   }
 
   async function chooseTheme(guildId, currentThemes, explicitIndex = null) {
@@ -203,11 +243,13 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
         const settings = await getGuildSettings(interaction.guildId); const current = themes(settings);
         if (current.some((theme) => theme.normalizedName === normalizedName)) return { duplicate: true };
         const next = [...current, { id: crypto.randomUUID(), name, normalizedName }];
-        await saveGuildSettings(interaction.guildId, { fukyoThemes: next });
+        const saved = await saveFukyoConfiguration(interaction, settings, { fukyoThemes: next }, "fukyo-theme-add");
+        if (!saved.ok) return { conflict: true };
         refreshStatus(interaction.guildId, "fukyo-theme-add");
         return { name };
       });
       if (!locked.locked) return reply(interaction, "別の布教テーマ操作を処理中です。少し待ってから再実行してください。");
+      if (locked.value?.conflict) return;
       return reply(interaction, locked.value.duplicate ? "同じ布教テーマがすでに登録されています。" : `布教テーマ「${name}」を追加しました。`);
     },
     async showThemes(interaction) {
@@ -224,13 +266,16 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
       const locked = await withGuildLock(interaction.guildId, async () => {
         const settings = await getGuildSettings(interaction.guildId); const current = themes(settings); const target = current[number - 1];
         if (!target) return null;
-        current.splice(number - 1, 1); await saveGuildSettings(interaction.guildId, { fukyoThemes: current });
+        current.splice(number - 1, 1);
+        const saved = await saveFukyoConfiguration(interaction, settings, { fukyoThemes: current }, "fukyo-theme-delete");
+        if (!saved.ok) return { conflict: true };
         const state = await getFukyoThemeState(interaction.guildId);
         if (state) await saveFukyoThemeState(interaction.guildId, { ...state, usedThemeIds: (state.usedThemeIds ?? []).filter((id) => id !== target.id) });
         refreshStatus(interaction.guildId, "fukyo-theme-delete");
         return target;
       });
       if (!locked.locked) return reply(interaction, "別の布教テーマ操作を処理中です。少し待ってから再実行してください。");
+      if (locked.value?.conflict) return;
       return reply(interaction, locked.value ? `布教テーマ「${locked.value.name}」を削除しました。` : "その番号の布教テーマはありません。");
     },
     async sendTheme(interaction) {
@@ -255,11 +300,19 @@ export function createFukyoThemeService({ getGuildSettings, saveGuildSettings, s
       if (!channel && enabled === null) return reply(interaction, "channel または enabled を指定してください。");
       if (channel && ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) return reply(interaction, "投稿先にはテキストチャンネルを指定してください。");
       const previous = await getGuildSettings(interaction.guildId);
-      const patch = { ...(channel ? { fukyoThemeChannelId: channel.id } : {}), ...(enabled === null ? {} : { fukyoWeeklyThemeEnabled: enabled, ...(enabled && previous?.fukyoWeeklyThemeEnabled !== true ? { fukyoWeeklyThemeEnabledAt: new Date() } : {}) }) };
-      const saved = await saveGuildSettings(interaction.guildId, patch);
+      const patch = { ...(channel ? { fukyoThemeChannelId: channel.id } : {}), ...(enabled === null ? {} : { fukyoWeeklyThemeEnabled: enabled }) };
+      const companionPatch = enabled && previous?.fukyoWeeklyThemeEnabled !== true
+        ? { fukyoWeeklyThemeEnabledAt: new Date() }
+        : {};
+      const outcome = await saveFukyoConfiguration(interaction, previous, patch, "fukyo-setting", { companionPatch });
+      if (!outcome.ok) return;
+      const saved = outcome.settings;
       if (enabled === false) scheduleNext();
       refreshStatus(interaction.guildId, "fukyo-setting");
-      return reply(interaction, `布教テーマ設定を更新しました。\n投稿先: ${saved.fukyoThemeChannelId ? `<#${saved.fukyoThemeChannelId}>` : "未設定"}\n自動投稿: ${saved.fukyoWeeklyThemeEnabled ? "有効" : "無効"}`);
+      const applyStatus = saved.apply?.status === "applied"
+        ? "Discordへの関連処理も完了しました。"
+        : "設定は保存済みです。Discordへの適用状態は /config apply_status で確認できます。";
+      return reply(interaction, `布教テーマ設定を更新しました。${applyStatus}\n投稿先: ${saved.fukyoThemeChannelId ? `<#${saved.fukyoThemeChannelId}>` : "未設定"}\n自動投稿: ${saved.fukyoWeeklyThemeEnabled ? "有効" : "無効"}`);
     },
   };
 }

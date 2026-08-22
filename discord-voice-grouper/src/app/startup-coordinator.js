@@ -9,8 +9,10 @@ export async function settleStartupTasks(tasks) {
 export function createReadyHandler({
   clearReadyWatchdog,
   migrate,
+  settingsApplyTasks = [],
   restoreTasks,
   lateRestoreTasks = [],
+  workerStartTasks = [],
   updateRestoreState,
   recordStartupRestore,
   statusBoard,
@@ -20,6 +22,8 @@ export function createReadyHandler({
   processCallWait,
   retryCallWaitNotifications,
   scheduleCallWait,
+  startRepair = null,
+  startReconciliation = null,
   logger = console,
   now = () => new Date(),
 }) {
@@ -28,9 +32,19 @@ export function createReadyHandler({
     logger.log(`Logged in as ${readyClient.user.tag}`);
     await migrate().catch((error) => logger.error("Failed to migrate kokuchi event state:", error));
 
+    // Configuration apply jobs can touch the same Discord resources as panel
+    // and VC restoration.  Run that queue in its own settled phase first;
+    // keeping both sets in one Promise.allSettled would reintroduce a startup
+    // race where an old revision restores over a just-applied setting.
     const results = [
+      ...await settleStartupTasks(settingsApplyTasks),
       ...await settleStartupTasks(restoreTasks),
       ...await settleStartupTasks(lateRestoreTasks),
+      // Workers must not start until every Discord-facing restore task has
+      // settled.  In particular, start() registers a timer before returning,
+      // so putting it in lateRestoreTasks still allows the first worker tick
+      // to race a long late restore.
+      ...await settleStartupTasks(workerStartTasks),
     ];
     const failures = results
       .filter((result) => result.status === "rejected")
@@ -66,5 +80,14 @@ export function createReadyHandler({
     await processCallWait().catch((error) => logger.error("Initial call-wait processing failed:", error));
     await retryCallWaitNotifications().catch((error) => logger.error("Initial call-wait end-notification retry failed:", error));
     scheduleCallWait();
+    if (startRepair) {
+      await startRepair(readyClient).catch((error) => logger.error("Initial reconciliation repair worker failed:", error));
+    }
+    if (startReconciliation) {
+      // The service dispatches its first read-only run here, after all restore
+      // work and the status-board restore have completed.  It may return
+      // immediately while the guild loop drains in the background.
+      await startReconciliation(readyClient).catch((error) => logger.error("Initial reconciliation failed:", error));
+    }
   };
 }

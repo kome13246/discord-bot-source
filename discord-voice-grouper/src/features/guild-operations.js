@@ -16,6 +16,7 @@ export function createGuildOperationsFeature(dependencies) {
     VoiceParticipantRoleGrant,
     acquireMongoLease,
     callWaitFollowupTimers,
+    callWaitSettingsReconciler,
     classifyGatheringVcRestoreBlock,
     countUniqueParticipantIds,
     createWadaiTopicId,
@@ -56,6 +57,7 @@ export function createGuildOperationsFeature(dependencies) {
     rescheduleCurrentKokuchiEvent,
     restoreGatheringVcPermissionAfterSplit,
     saveGuildSettingsWithCurrent,
+    saveVersionedGuildConfiguration,
     splitReviewFeature,
     stopVoiceMonitorSession,
     validateOteboSettings,
@@ -63,6 +65,49 @@ export function createGuildOperationsFeature(dependencies) {
     voiceChannelControlService,
     voiceMonitorSessions,
   } = dependencies;
+
+  function applyStatusText(settings) {
+    const status = settings?.apply?.status;
+    if (!status) return "設定履歴に保存しました。Discordへの反映状態は /config apply_status で確認できます。";
+    if (status === "applied") return "Discordへの関連機能反映も完了しました。";
+    if (status === "blocked") return "設定は保存済みですが、Discordへの反映は安全のため停止しました。/config apply_status で確認してください。";
+    if (status === "failed") return "設定は保存済みですが、Discordへの反映に失敗しました。/config apply_retry で再試行できます。";
+    return "設定は保存済みです。Discordへの反映は再試行待ちです。/config apply_status で確認してください。";
+  }
+
+  async function saveAdminConfiguration(interaction, currentSettings, patch, reason) {
+    if (typeof saveVersionedGuildConfiguration !== "function") {
+      return saveGuildSettingsWithCurrent(interaction.guildId, currentSettings, patch);
+    }
+    try {
+      return await saveVersionedGuildConfiguration(interaction.guildId, patch, {
+        expectedRevision: Number.isInteger(Number(currentSettings?.configRevision))
+          ? Number(currentSettings.configRevision)
+          : 0,
+        actorUserId: interaction.user?.id ?? null,
+        source: "setting",
+        reason,
+      });
+    } catch (error) {
+      if (error?.code === "CONFIGURATION_REVISION_CONFLICT") {
+        await replyOrFollowUp(interaction, {
+          content: "設定が別の管理者によって先に更新されました。現在の設定を再表示してから、もう一度実行してください。上書きは行っていません。",
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return null;
+      }
+      if (error?.code === "CONFIGURATION_TRANSACTIONS_UNAVAILABLE") {
+        await replyOrFollowUp(interaction, {
+          content: "設定の安全な履歴保存に必要なMongoDBトランザクションが利用できないため、設定を変更しませんでした。MongoDBをレプリカセットまたはAtlasで実行してください。",
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return null;
+      }
+      throw error;
+    }
+  }
 
   async function isOteboRecruitmentPanelDisplayAllowed(guild, settings) {
     if (settings?.callWaitEnabled !== true) return false;
@@ -99,21 +144,21 @@ export function createGuildOperationsFeature(dependencies) {
     }
     return true;
   }
-  
+
   async function handleProfileRegistrationPanelMessage(message) {
     if (!message.guild || message.author?.bot || message.webhookId || message.system || message.channel?.isThread?.()) return;
     const settings = await getGuildSettings(message.guild.id);
     if (settings?.profileIntroductionChannelId !== message.channelId) return;
     await profileRegistrationPanelService.requestProfileRegistrationPanelMove(message.guild, "human-message");
   }
-  
+
   async function handleOteboRecruitmentPanelMessage(message) {
     if (!message.guild || message.author?.bot || message.webhookId || message.system || message.channel?.isThread?.()) return;
     const settings = await getGuildSettings(message.guild.id);
     if (getCallWaitNoticeChannelId(settings) !== message.channelId) return;
     await oteboRecruitmentPanelService.requestOteboRecruitmentPanelMove(message.guild, "human-message");
   }
-  
+  //
   
   async function handleSetting(interaction) {
     if (!interaction.inGuild()) {
@@ -150,35 +195,23 @@ export function createGuildOperationsFeature(dependencies) {
       const channel = interaction.options.getChannel("channel", false);
       const remove = interaction.options.getBoolean("remove", false) === true;
       if (remove && channel) {
-        await interaction.editReply("解除時はchannelを指定せずremove=trueにしてください。");
+        await interaction.editReply({ content: "解除時はchannelを指定せずremove=trueにしてください。", allowedMentions: { parse: [] } });
         return;
       }
       if (!remove && !channel) {
-        await interaction.editReply("channelを指定するか、remove=trueで既存ボードを解除してください。");
+        await interaction.editReply({ content: "channelを指定するか、remove=trueで既存ボードを解除してください。", allowedMentions: { parse: [] } });
         return;
       }
-      let result;
-      try {
-        result = remove
-          ? await operationalStatusBoardService.remove(interaction.guild)
-          : await operationalStatusBoardService.configure(interaction.guild, channel);
-      } catch (error) {
-        await interaction.editReply(`ステータスボード設定に失敗しました: ${error?.message ?? error}`);
-        return;
-      }
-      const message = remove
-        ? result.status === "removed"
-          ? "ステータスボードを解除しました。"
-          : result.status === "cleanup-pending"
-            ? "ステータスボードの更新を停止しました。Discordメッセージの削除は再試行中です。"
-            : result.status === "busy"
-              ? "別のステータスボード操作が進行中です。少し待ってから再実行してください。"
-              : "ステータスボードは設定されていません。"
-        : result.status === "cleanup-pending"
-          ? "ステータスボードを設置しました。旧メッセージの削除は再試行中です。"
-          : `ステータスボードを設置しました: ${result.status}`;
-      await interaction.editReply(message);
-      requestOperationalStatusRefresh(interaction.guildId, "status-board-setting");
+      const current = await getGuildSettings(interaction.guildId);
+      const settings = await saveAdminConfiguration(interaction, current, {
+        statusBoardChannelId: remove ? null : channel.id,
+      }, remove ? "status-board-remove" : "status-board-setting");
+      if (!settings) return;
+      const apply = settings.apply ?? settings.applyResult ?? null;
+      const applyStatus = apply?.status
+        ? `\nDiscordへの適用状態: ${apply.status === "applied" ? "適用済み" : "保存済み・適用待ち"}`
+        : "\n設定履歴へ保存しました。Discordへの反映状態は /config apply_status で確認できます。";
+      await interaction.editReply({ content: `${remove ? "ステータスボード解除設定" : "ステータスボード設置設定"}を保存しました。${applyStatus}`, allowedMentions: { parse: [] } });
       return;
     }
   
@@ -199,15 +232,13 @@ export function createGuildOperationsFeature(dependencies) {
       if (interaction.commandName === "show" && interaction.options.getSubcommand() === "review") {
         await splitReviewFeature.handleShowReview(interaction); return;
       }
-      const settings = await saveGuildSettingsWithCurrent(interaction.guildId, await getGuildSettings(interaction.guildId), {
+      const settings = await saveAdminConfiguration(interaction, await getGuildSettings(interaction.guildId), {
         ...(category ? { vcControlCategoryId: category.id } : {}),
         ...(notifyRole ? { vcControlNotifyRoleId: notifyRole.id } : {}),
         ...(exitScheduleKeepMessage === null ? {} : { voiceExitScheduleKeepMessage: exitScheduleKeepMessage }),
-      });
-      await replyOrFollowUp(interaction, { content: `VCコントロール設定を保存しました。\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}\n退出予定通知を残す: ${settings.voiceExitScheduleKeepMessage !== false ? "はい" : "いいえ"}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
-      if (category) {
-        for (const channel of interaction.guild.channels.cache.values()) if (channel.type === ChannelType.GuildVoice && channel.parentId === category.id) await voiceChannelControlService.ensurePanel(channel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
-      }
+      }, "vc-control-setting");
+      if (!settings) return;
+      await replyOrFollowUp(interaction, { content: `VCコントロール設定を保存しました。\n対象カテゴリ: ${settings.vcControlCategoryId ? `<#${settings.vcControlCategoryId}>` : "未設定"}\n通知ロール: ${settings.vcControlNotifyRoleId ? `<@&${settings.vcControlNotifyRoleId}>` : "未設定"}\n退出予定通知を残す: ${settings.voiceExitScheduleKeepMessage !== false ? "はい" : "いいえ"}\n${applyStatusText(settings)}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
       return;
     }
   
@@ -346,13 +377,15 @@ export function createGuildOperationsFeature(dependencies) {
     }
   
     const currentSettings = await getGuildSettings(interaction.guildId);
-    const settings = await saveGuildSettingsWithCurrent(
-      interaction.guildId,
+    const settings = await saveAdminConfiguration(
+      interaction,
       currentSettings,
       patch,
+      "setting-command",
     );
+    if (!settings) return;
     await replyOrFollowUp(interaction, {
-      content: `設定を保存しました。\n\n${formatSettings(settings)}`,
+      content: `設定を保存しました。\n${applyStatusText(settings)}\n\n${formatSettings(settings)}`,
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
@@ -641,17 +674,16 @@ export function createGuildOperationsFeature(dependencies) {
     if (mentionRole) roleIds.add(mentionRole.id);
     if (removeMentionRole) roleIds.delete(removeMentionRole.id);
   
-    const settings = await saveGuildSettingsWithCurrent(interaction.guildId, current, {
+    const settings = await saveAdminConfiguration(interaction, current, {
       ...(channel ? { kokuchiAnnouncementChannelId: channel.id, wadaiChannelId: channel.id, splitStartChannelId: channel.id } : {}),
       ...(overviewChannel ? { kokuchiOverviewChannelId: overviewChannel.id } : {}),
       ...(gatheringVoiceChannel ? { gatheringVoiceChannelId: gatheringVoiceChannel.id } : {}),
       ...(parsedEventTime ? { kokuchiEventTime: parsedEventTime } : {}),
       ...(mentionRole || removeMentionRole ? { kokuchiMentionRoleIds: [...roleIds] } : {}),
-    });
-    const rescheduled = await rescheduleCurrentKokuchiEvent(interaction.guild, current, settings);
-    await vcDmService.onSettingsChanged(interaction.guild).catch((error) => logRecoverableError("VC DM kokuchi-setting follow-up failed", error));
+    }, "kokuchi-setting");
+    if (!settings) return;
     await replyOrFollowUp(interaction, {
-      content: `設定を保存しました。${rescheduled ? " 未実行の告知後続処理を再計算しました。" : ""}\n\n${formatSettings(settings)}`,
+      content: `設定を保存しました。${applyStatusText(settings)}\n\n${formatSettings(settings)}`,
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
@@ -702,8 +734,8 @@ export function createGuildOperationsFeature(dependencies) {
       ...(!targetCategory && targetChannels ? { vcDmTargetCategoryId: null, vcDmTargetChannelIds: targetChannels.ids } : {}),
       ...(excludedChannels ? { vcDmExcludedChannelIds: excludedChannels.ids } : {}),
     };
-    const settings = await saveGuildSettingsWithCurrent(interaction.guildId, current, patch);
-    await vcDmService.onSettingsChanged(interaction.guild).catch((error) => logRecoverableError("VC DM setting follow-up failed", error));
+    const settings = await saveAdminConfiguration(interaction, current, patch, "vc-dm-setting");
+    if (!settings) return;
     const status = settings.vcDmEnabled === true
       ? (settings.vcDmPanelChannelId
         && (settings.vcDmTargetCategoryId || settings.vcDmTargetChannelIds?.length)
@@ -712,7 +744,7 @@ export function createGuildOperationsFeature(dependencies) {
         : "有効（パネル・対象VC・kokuchi event_time の追加設定が必要です）")
       : "無効";
     await replyOrFollowUp(interaction, {
-      content: `VC未参加者・長期不参加者向けDM機能を${status}に設定しました。\n\n対象確認パネル: ${settings.vcDmPanelChannelId ? `<#${settings.vcDmPanelChannelId}>` : "未設定"}\n対象VCカテゴリ: ${settings.vcDmTargetCategoryId ? `<#${settings.vcDmTargetCategoryId}>` : "未設定"}\n対象VC個別指定: ${settings.vcDmTargetChannelIds?.length ? settings.vcDmTargetChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定"}\n対象外VC: ${settings.vcDmExcludedChannelIds?.length ? settings.vcDmExcludedChannelIds.map((id) => `<#${id}>`).join(" ") : "なし"}\n\n${formatSettings(settings)}`,
+      content: `VC未参加者・長期不参加者向けDM機能を${status}に設定しました。\n${applyStatusText(settings)}\n\n対象確認パネル: ${settings.vcDmPanelChannelId ? `<#${settings.vcDmPanelChannelId}>` : "未設定"}\n対象VCカテゴリ: ${settings.vcDmTargetCategoryId ? `<#${settings.vcDmTargetCategoryId}>` : "未設定"}\n対象VC個別指定: ${settings.vcDmTargetChannelIds?.length ? settings.vcDmTargetChannelIds.map((id) => `<#${id}>`).join(" ") : "未設定"}\n対象外VC: ${settings.vcDmExcludedChannelIds?.length ? settings.vcDmExcludedChannelIds.map((id) => `<#${id}>`).join(" ") : "なし"}\n\n${formatSettings(settings)}`,
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
@@ -798,54 +830,31 @@ export function createGuildOperationsFeature(dependencies) {
         return;
       }
     }
-    let settings = await saveGuildSettingsWithCurrent(
-      interaction.guildId,
+    let settings = await saveAdminConfiguration(
+      interaction,
       currentSettings,
       patch,
+      "callwait-setting",
     );
-  
-    if (
-      currentSettings?.callWaitPrompt &&
-      (callWaitEnabled === false ||
-        callWaitPromptChannel)
-    ) {
-      await endCallWaitInterestsForRecruitment(interaction.guildId, currentSettings.callWaitPrompt.messageId);
-      await deleteCallWaitPrompt(interaction.guild, currentSettings.callWaitPrompt);
-      settings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
-        callWaitPrompt: null,
+    if (!settings) return;
+    const applyStatus = applyStatusText(settings);
+  // Reconcile runtime callwait state through the shared apply service.
+    // Versioned saves are reconciled by the apply job.  The fallback path
+    // still uses the same idempotent service, avoiding two independent cleanup
+    // implementations while keeping runtime fields out of revision history.
+    if (!settings?.apply && callWaitSettingsReconciler?.reconcile) {
+      const reconciliation = await callWaitSettingsReconciler.reconcile({
+        guild: interaction.guild,
+        currentSettings,
+        nextSettings: settings,
       });
-    }
-  
-    if (
-      currentSettings?.callWaitSkippedNotice &&
-      (callWaitEnabled === false || callWaitPromptChannel)
-    ) {
-      await deleteCallWaitMessage(interaction.guild, currentSettings.callWaitSkippedNotice);
-      settings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
-        callWaitSkippedNotice: null,
-      });
-    }
-  
-    if (callWaitEnabled === false) {
-      const actionPrefix = `callwait-followup:${interaction.guildId}:`;
-      for (const [actionKey, followupTimer] of callWaitFollowupTimers.entries()) {
-        if (actionKey.startsWith(actionPrefix)) {
-          clearTimeout(followupTimer);
-          callWaitFollowupTimers.delete(actionKey);
-        }
+      if (reconciliation?.status === "unknown") {
+        await replyOrFollowUp(interaction, { content: "設定は保存済みですが、callwaitのDiscord状態を確認できないため反映を停止しました。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
       }
-  
-      settings = await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
-        callWaitPendingNotice: null,
-      });
     }
-  
-    await oteboRecruitmentPanelService.ensureOteboRecruitmentPanel(interaction.guild).catch((error) => {
-      logRecoverableError("Otebo recruitment panel ensure after call-wait setting change failed", error);
-    });
   
     await replyOrFollowUp(interaction, {
-      content: `通話待機システム設定を保存しました。\n\n${formatSettings(settings)}`,
+      content: `通話待機システム設定を保存しました。${applyStatus}\n\n${formatSettings(settings)}`,
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
@@ -903,11 +912,13 @@ export function createGuildOperationsFeature(dependencies) {
     }
   
     const currentSettings = await getGuildSettings(interaction.guildId);
-    const settings = await saveGuildSettingsWithCurrent(
-      interaction.guildId,
+    const settings = await saveAdminConfiguration(
+      interaction,
       currentSettings,
       patch,
+      "zatudan-setting",
     );
+    if (!settings) return;
     const roleChangedWithActiveSession = Boolean(
       voiceParticipantRole
         && currentSettings?.voiceParticipantRoleId
@@ -915,26 +926,8 @@ export function createGuildOperationsFeature(dependencies) {
         && [...voiceMonitorSessions.values()].some((session) => session.guildId === interaction.guildId),
     );
   
-    const sessions = [...voiceMonitorSessions.values()]
-      .filter((session) => session.guildId === interaction.guildId);
-    for (const session of sessions) {
-      const shouldKeepSession = settings.voiceReminderEnabled !== false
-        && await isVoiceChannelMonitored(interaction.guild, settings, session.voiceChannelId);
-      if (shouldKeepSession) continue;
-      const voiceChannel = await interaction.guild.channels.fetch(session.voiceChannelId).catch(() => null);
-      await stopVoiceMonitorSession(session, interaction.guild, voiceChannel, settings).catch((error) => {
-        logRecoverableError("Failed to clean up invalid voice monitor session", error);
-      });
-    }
-  
-    if (patch.voiceReminderEnabled === false) {
-      await reconcilePersistedVoiceParticipantRoleGrants(interaction.guild, settings).catch((error) => {
-        logRecoverableError("Failed to reconcile disabled voice monitor grants", error);
-      });
-    }
-  
     await replyOrFollowUp(interaction, {
-      content: `VC集合フォーム設定を保存しました。\n\n${formatSettings(settings)}${roleChangedWithActiveSession ? "\n\n現在進行中の雑談VCセッションでは、セッション開始時の旧ロールが終了まで使用されます。新しいロールは新規セッションから使用されます。" : ""}`,
+      content: `VC集合フォーム設定を保存しました。${applyStatusText(settings)}\n\n${formatSettings(settings)}${roleChangedWithActiveSession ? "\n\n現在進行中の雑談VCセッションでは、セッション開始時の旧ロールが終了まで使用されます。新しいロールは新規セッションから使用されます。" : ""}`,
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
@@ -989,11 +982,12 @@ export function createGuildOperationsFeature(dependencies) {
     };
   
     topics[category].push(nextTopic);
-    await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
+    const saved = await saveAdminConfiguration(interaction, settings, {
       wadaiTopics: topics,
       wadaiTopicsVersion: 2,
-      wadaiDaily: null,
-    });
+    }, "wadai-add");
+    if (!saved) return;
+    await saveGuildSettingsWithCurrent(interaction.guildId, saved, { wadaiDaily: null });
   
     await replyOrFollowUp(interaction, {
       content: `話題を追加しました。\n${topics[category].length}. ${content}`,
@@ -1060,11 +1054,12 @@ export function createGuildOperationsFeature(dependencies) {
     }
   
     const [deleted] = categoryTopics.splice(deleteIndex, 1);
-    await saveGuildSettingsWithCurrent(interaction.guildId, settings, {
+    const saved = await saveAdminConfiguration(interaction, settings, {
       wadaiTopics: topics,
       wadaiTopicsVersion: 2,
-      wadaiDaily: null,
-    });
+    }, "wadai-delete");
+    if (!saved) return;
+    await saveGuildSettingsWithCurrent(interaction.guildId, saved, { wadaiDaily: null });
   
     await replyOrFollowUp(interaction, {
       content: `話題を削除しました。\n${deleted.text}`,

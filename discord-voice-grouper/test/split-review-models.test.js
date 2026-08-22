@@ -22,6 +22,7 @@ test("splitvc direct mode creates five-seat rooms and keeps PB as an explicit co
   assert.match(source, /const DIRECT_CHILD_USER_LIMIT = 5/);
   assert.match(source, /name: `会話練習会\(\$\{index \+ 1\}\)`/);
   assert.match(source, /userLimit: DIRECT_CHILD_USER_LIMIT/);
+  assert.match(source, /childChannelIds: channels\.map\(\(\{ channel \}\) => channel\.id\)/);
   assert.match(source, /autoCancelWhen: options\.splitMode === "direct"/);
   assert.match(source, /Math\.min\(now \+ DIRECT_EMPTY_GRACE_MS, finishAt\)/);
   assert.match(source, /async function processDirectCleanupRequiredSession\(/);

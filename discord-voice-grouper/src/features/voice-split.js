@@ -3013,6 +3013,11 @@ export function createVoiceSplitFeature(dependencies) {
     const participantRoleGrantedMemberIds = new Set();
     const groupSummaries = [];
     const channels = await createDirectChildChannels(groups, config);
+    await sendSplitRandomTopicPanels({
+      guild: config.guild,
+      settings: config.settings,
+      childChannelIds: channels.map(({ channel }) => channel.id),
+    });
 
     for (const [index, group] of groups.entries()) {
       const entry = channels[index];

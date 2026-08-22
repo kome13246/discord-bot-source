@@ -146,7 +146,7 @@ export function createOteboRecruitmentPanelService({
     }
 
     const lease = await acquireLease(`otebo-panel:${guild.id}:${channel.id}`, { leaseMs: 30_000 });
-    if (!lease) return { status: "lease-unavailable" };
+    if (!lease) return { status: "lease-unavailable", reason: "lease-unavailable", retryable: true, beforeDiscord: true, preMutation: true };
     try {
       const latestSettings = await getGuildSettings(guild.id);
       if (noticeChannelId(latestSettings) !== channel.id || !await canShowPanel(guild, latestSettings)) {

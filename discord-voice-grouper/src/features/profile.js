@@ -35,10 +35,37 @@ export function createProfileFeature({
   acquireMongoLease,
   releaseMongoLease,
   saveGuildSettingsWithCurrent,
+  saveVersionedGuildConfiguration = null,
   replyOrFollowUp,
   formatSettings,
 }) {
   const profilePublicationLocks = new Set();
+
+  async function saveProfileConfiguration(interaction, previousSettings, patch) {
+    if (typeof saveVersionedGuildConfiguration !== "function") {
+      return saveGuildSettingsWithCurrent(interaction.guildId, previousSettings, patch);
+    }
+    try {
+      return await saveVersionedGuildConfiguration(interaction.guildId, patch, {
+        expectedRevision: Number.isInteger(Number(previousSettings?.configRevision))
+          ? Number(previousSettings.configRevision)
+          : 0,
+        actorUserId: interaction.user?.id ?? null,
+        source: "setting",
+        reason: "profile-setting",
+      });
+    } catch (error) {
+      if (error?.code === "CONFIGURATION_REVISION_CONFLICT") {
+        await replyOrFollowUp(interaction, { content: "設定が別の管理者によって先に更新されました。現在の設定を再表示してから、もう一度実行してください。上書きは行っていません。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+        return null;
+      }
+      if (error?.code === "CONFIGURATION_TRANSACTIONS_UNAVAILABLE") {
+        await replyOrFollowUp(interaction, { content: "設定の安全な履歴保存に必要なMongoDBトランザクションが利用できないため、設定を変更しませんでした。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+        return null;
+      }
+      throw error;
+    }
+  }
 
   async function handleSetupProfile(interaction) {
     if (!interaction.inGuild() || !interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
@@ -260,27 +287,25 @@ export function createProfileFeature({
     const previousSettings = await getGuildSettings(interaction.guildId);
     const channel = interaction.options.getChannel("introduction_channel", false);
     if (!channel) {
-      const settings = await saveGuildSettingsWithCurrent(interaction.guildId, previousSettings, { profileIntroductionChannelId: null });
-      await profileRegistrationPanelService.removeProfileRegistrationPanel(interaction.guild).catch((error) => {
-        logRecoverableError("Profile registration panel removal after setting clear failed", error);
-      });
-      await replyOrFollowUp(interaction, { content: `自己紹介チャンネルの設定を解除しました。\n\n${formatSettings(settings)}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+      const settings = await saveProfileConfiguration(interaction, previousSettings, { profileIntroductionChannelId: null });
+      if (!settings) return;
+      await replyOrFollowUp(interaction, { content: `自己紹介チャンネルの設定を解除しました。${formatApplyStatus(settings)}\n\n${formatSettings(settings)}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
       return;
     }
     if (channel.type !== ChannelType.GuildText || !canSendPublicProfile(channel, interaction.guild)) {
       await replyOrFollowUp(interaction, { content: "Botが閲覧・メッセージ送信・Embed送信できるテキストチャンネルを指定してください。", flags: MessageFlags.Ephemeral });
       return;
     }
-    const settings = await saveGuildSettingsWithCurrent(interaction.guildId, previousSettings, { profileIntroductionChannelId: channel.id });
-    if (previousSettings?.profileIntroductionChannelId !== channel.id) {
-      await profileRegistrationPanelService.removeProfileRegistrationPanel(interaction.guild).catch((error) => {
-        logRecoverableError("Profile registration panel removal after channel change failed", error);
-      });
-    }
-    await profileRegistrationPanelService.ensureProfileRegistrationPanel(interaction.guild).catch((error) => {
-      logRecoverableError("Profile registration panel ensure after setting change failed", error);
-    });
-    await replyOrFollowUp(interaction, { content: `自己紹介チャンネルを <#${channel.id}> に設定しました。\n\n${formatSettings(settings)}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+    const settings = await saveProfileConfiguration(interaction, previousSettings, { profileIntroductionChannelId: channel.id });
+    if (!settings) return;
+    await replyOrFollowUp(interaction, { content: `自己紹介チャンネルを <#${channel.id}> に設定しました。${formatApplyStatus(settings)}\n\n${formatSettings(settings)}`, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  }
+
+  function formatApplyStatus(settings) {
+    const status = settings?.apply?.status;
+    if (status === "applied") return " Discordへのパネル反映も完了しました。";
+    if (status === "blocked" || status === "failed") return " 設定は保存済みですが、Discordへのパネル反映を確認できません。/config apply_status を確認してください。";
+    return " 設定履歴へ保存しました。Discordへのパネル反映状態は /config apply_status で確認できます。";
   }
 
   return {
@@ -291,4 +316,3 @@ export function createProfileFeature({
     handleProfileIntroductionSetting,
   };
 }
-

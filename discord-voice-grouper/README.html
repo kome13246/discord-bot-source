@@ -46,6 +46,7 @@
       <a href="#overview">できること</a>
       <a href="#setup">セットアップ</a>
       <a href="#commands">コマンド</a>
+      <a href="#safe-operations">安全な管理運用</a>
       <a href="#button-recruitment">ボタン募集</a>
       <a href="#render">Render</a>
       <a href="#trouble">トラブルシュート</a>
@@ -91,6 +92,22 @@
       <p class="small">旧来の募集コマンドや、時間を選ぶボタン募集モードは現行コマンドとして登録していません。</p>
     </section>
 
+    <section id="safe-operations">
+      <h2>安全な管理運用</h2>
+      <p>管理運用は設定変更、読み取り照合、Discordへの反映を分離しています。次の管理コマンドはサーバー内専用・ManageGuild権限必須・Ephemeral応答です。</p>
+      <ul>
+        <li><code>/checkbot [feature]</code>（省略時<code>all</code>）は、設定対象とBotの実効権限を読み取り確認します。設定変更、送信、ロール操作、VC操作は行わず、<code>/setup</code>とは独立しています。</li>
+        <li><code>/setup</code>は1機能ずつ下書き、レビュー、確定、キャンセルします。本人の下書きを再開でき、1 guildにつき1件、TTLは30分です。確定時だけversioned writerと適用ジョブを通します。</li>
+        <li><code>/config history</code>、<code>show</code>、<code>diff</code>、<code>rollback</code>、<code>apply_status</code>、<code>apply_retry</code>で履歴・差分・適用状態を管理します。</li>
+        <li><code>/config reconcile_status</code>はready後の復元完了後に開始する30分固定の読み取り専用照合、<code>repair_status</code>と<code>repair_retry</code>は確認済み修復ジョブを表示・有限回再検証します。</li>
+      </ul>
+      <div class="note warning">
+        <p>自動修復allowlistは<code>status_board.ensure</code>、<code>profile_panel.ensure</code>、<code>otebo_panel.ensure</code>、<code>voice_control_panels.ensure</code>の4種だけです。設定値、権限、ロール、kokuchi、callwait、DMは自動変更しません。実行直前・実行後に再検証し、unknown/API不明は候補化または自動再試行しません。blocked、circuit-open、手動再試行にも上限があります。</p>
+        <p>Botは同じプロセスと既存MongoDB接続を使います。起動時にcollection/index作成とrevision backfillを行いますが、GuildSettings・revision・apply jobの原子性にはAtlas/Replica Set等のMongoDB transaction対応が必要です。standaloneではversioned更新を拒否します。</p>
+        <p>観測・修復jobには秘密、設定全文、メンバー識別子、メッセージ本文を保存しません。運用確認は<code>/checkbot</code> → <code>/config reconcile_status</code> → <code>/config repair_status</code>の順で行ってください。</p>
+      </div>
+    </section>
+
     <section id="button-recruitment">
       <h2>ボタン募集</h2>
       <p><code>call_wait_notice_channel</code>の最下部に、次の常設パネルを表示します。</p>
@@ -120,7 +137,7 @@
           <tr><th>通話待機の主な環境変数</th><td><code>PB_CALL_WAIT_ENABLED</code>、<code>PB_CALL_WAIT_ROLE_ID</code>、<code>PB_CALL_WAIT_PROMPT_CHANNEL_ID</code>、<code>PB_CALL_WAIT_NOTICE_CHANNEL_ID</code>、<code>PB_CALL_WAIT_VOICE_CATEGORY_ID</code>、<code>PB_CALL_WAIT_INTERVAL_MINUTES</code>、<code>PB_OTEBO_QUICK_CONFIRM_SECONDS</code></td></tr>
         </tbody>
       </table>
-      <p>Renderでは、<code>/setting</code>で保存したサーバー設定を永続化するためMongoDB接続を維持してください。スラッシュコマンド変更後は<code>npm run register</code>を再実行します。</p>
+      <p>Renderでも管理設定、revision、apply job、照合結果、修復jobは既存のMongoDBへ保存されます。追加サーバーや別DBは不要ですが、同じ<code>MONGODB_URI</code>を指定してください。<code>data/settings.json</code>は旧形式設定の読み取り時移行用で、<code>data/bump-reminders.json</code>だけはファイル予約です。設定リビジョンとapply jobの原子性にはtransaction対応MongoDBが必要で、standaloneではversioned更新を拒否します。スラッシュコマンド変更後は<code>npm run register</code>を再実行します。</p>
     </section>
 
     <section id="trouble">

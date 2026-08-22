@@ -85,10 +85,12 @@ test("Interactionルーターはコマンドを対応する機能へ渡す", asy
   const { calls, route } = createHarness();
   await route(interaction({ commandName: "splitvc", isChatInputCommand: () => true }));
   await route(interaction({ commandName: "botstatus", isChatInputCommand: () => true }));
+  await route(interaction({ commandName: "config", isChatInputCommand: () => true }));
   await route(interaction({ commandName: "show", isChatInputCommand: () => true }));
   assert.deepEqual(calls, [
     "handleSplitVoice",
     "operationalManagement.handleCommand",
+    "handleConfig",
     "handleShowReview",
   ]);
 });
@@ -103,4 +105,17 @@ test("終了処理中は機能へ渡さずephemeral応答する", async () => {
   }));
   assert.deepEqual(calls, []);
   assert.equal(replyPayload.flags, 64);
+});
+
+test("Interactionルーターはsetupのチャンネル選択・ロール選択をセットアップハンドラーへ渡す", async () => {
+  const { calls, route } = createHarness();
+  await route(interaction({
+    customId: "setup:channel:session:field",
+    isChannelSelectMenu: () => true,
+  }));
+  await route(interaction({
+    customId: "setup:role:session:field",
+    isRoleSelectMenu: () => true,
+  }));
+  assert.deepEqual(calls, ["handleSetupInteraction", "handleSetupInteraction"]);
 });

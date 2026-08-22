@@ -163,6 +163,40 @@ test("remove clears state when Discord reports an unknown message", async () => 
   assert.equal(deleted, true);
 });
 
+test("remove keeps state and reports failure when Discord deletion is not confirmed", async () => {
+  const state = { guildId: "guild", channelId: "intro", messageId: "message" };
+  let deletePanelCalls = 0;
+  const message = { delete: async () => { throw new Error("permission denied"); } };
+  const channel = { id: "intro", messages: { fetch: async () => message } };
+  const service = createProfileRegistrationPanelService({
+    getPanel: async () => state,
+    deletePanel: async () => { deletePanelCalls += 1; },
+    sendOperationalLog: async () => {},
+    logger: { error: () => {} },
+  });
+  const result = await service.removeProfileRegistrationPanel({ id: "guild", channels: { fetch: async () => channel } });
+  assert.equal(result.status, "remove-failed");
+  assert.equal(result.retryable, true);
+  assert.equal(deletePanelCalls, 0);
+  assert.equal(state.messageId, "message");
+});
+
+test("remove does not report removed when durable state deletion fails", async () => {
+  const state = { guildId: "guild", channelId: "intro", messageId: "message" };
+  const message = { delete: async () => {} };
+  const channel = { id: "intro", messages: { fetch: async () => message } };
+  const service = createProfileRegistrationPanelService({
+    getPanel: async () => state,
+    deletePanel: async () => { throw new Error("database unavailable"); },
+    sendOperationalLog: async () => {},
+    logger: { error: () => {} },
+  });
+  const result = await service.removeProfileRegistrationPanel({ id: "guild", channels: { fetch: async () => channel } });
+  assert.equal(result.status, "save-failed");
+  assert.equal(result.retryable, true);
+  assert.equal(state.messageId, "message");
+});
+
 test("an unavailable lease leaves the current panel untouched and sends nothing", async () => {
   const events = [];
   const channel = createGuildChannel({ messages: new Map(), events });
