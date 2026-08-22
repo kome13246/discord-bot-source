@@ -1649,32 +1649,87 @@ client.on(Events.InteractionCreate, createInteractionHandler({
     }
   }
 
-  async function loginDiscordClient() {
-    console.log("Attempting to login to Discord...");
+async function testDiscordHttp() {
+  const tests = [
+    {
+      name: "Gateway (no auth)",
+      url: "https://discord.com/api/v10/gateway",
+      auth: false,
+    },
+    {
+      name: "Gateway Bot (auth)",
+      url: "https://discord.com/api/v10/gateway/bot",
+      auth: true,
+    },
+    {
+      name: "Current Bot User",
+      url: "https://discord.com/api/v10/users/@me",
+      auth: true,
+    },
+  ];
 
-    discordReadyWatchdog = setTimeout(() => {
-      if (!client.isReady()) {
-        console.error(
-          `Discord client did not become ready within 30 seconds. wsStatus=${client.ws.status}`,
+  for (const test of tests) {
+    try {
+      const startedAt = Date.now();
+
+      const response = await fetch(test.url, {
+        headers: test.auth
+          ? { Authorization: `Bot ${DISCORD_TOKEN}` }
+          : {},
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      const body = await response.text();
+
+      console.log(
+        `[Discord HTTP Test] ${test.name}: status=${response.status} time=${Date.now() - startedAt}ms`,
+      );
+
+      if (!response.ok) {
+        console.log(
+          `[Discord HTTP Test] ${test.name} body:`,
+          body.slice(0, 500),
         );
       }
-    }, 30_000);
-
-    try {
-      await client.login(DISCORD_TOKEN);
     } catch (error) {
-      if (discordReadyWatchdog) {
-        clearTimeout(discordReadyWatchdog);
-        discordReadyWatchdog = null;
-      }
       console.error(
-        "Failed to login to Discord. Check DISCORD_TOKEN and bot application settings.",
+        `[Discord HTTP Test] ${test.name} failed:`,
         error,
       );
-      throw error;
     }
   }
+}
 
+async function loginDiscordClient() {
+  console.log("Testing Discord HTTP connectivity...");
+  await testDiscordHttp();
+
+  console.log("Attempting to login to Discord...");
+
+  discordReadyWatchdog = setTimeout(() => {
+    if (!client.isReady()) {
+      console.error(
+        `Discord client did not become ready within 30 seconds. wsStatus=${client.ws.status}`,
+      );
+    }
+  }, 30_000);
+
+  try {
+    await client.login(DISCORD_TOKEN);
+  } catch (error) {
+    if (discordReadyWatchdog) {
+      clearTimeout(discordReadyWatchdog);
+      discordReadyWatchdog = null;
+    }
+
+    console.error(
+      "Failed to login to Discord. Check DISCORD_TOKEN and bot application settings.",
+      error,
+    );
+
+    throw error;
+  }
+}
   async function startBot() {
     console.log(`Node.js runtime: ${process.version}`);
     console.log(`discord.js version: ${discordJsVersion}`);
