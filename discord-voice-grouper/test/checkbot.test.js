@@ -10,7 +10,7 @@ import {
   CHECKBOT_STATUSES,
   createSettingsValidationService,
 } from "../src/settings-validation-service.js";
-import { createCheckbotFeature, buildCheckbotEmbeds, embedTextLength } from "../src/features/checkbot.js";
+import { createCheckbotFeature, buildCheckbotEmbeds, embedTextLength, totalEmbedTextLength } from "../src/features/checkbot.js";
 
 const allPermissions = new PermissionsBitField([
   PermissionFlagsBits.ViewChannel,
@@ -410,6 +410,7 @@ test("large checkbot output stays within Discord embed limits and preserves over
   }));
   const embeds = buildCheckbotEmbeds({ reports });
   assert.ok(embeds.length <= 10);
+  assert.ok(totalEmbedTextLength(embeds) <= 6000);
   for (const embed of embeds) {
     assert.ok((embed.title ?? "").length <= 256);
     assert.ok((embed.description ?? "").length <= 4096);
@@ -424,5 +425,5 @@ test("large checkbot output stays within Discord embed limits and preserves over
   const overflow = embeds.find((embed) => embed.title.includes("省略あり"));
   assert.ok(overflow);
   assert.match(overflow.description, /省略/);
-  assert.ok(overflow.fields.some((field) => field.value.includes("詳細")));
+  assert.ok(embeds.some((embed) => embed.fields.some((field) => field.value.includes("詳細"))));
 });

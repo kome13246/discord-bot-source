@@ -34,6 +34,7 @@ const MAX_EMBED_FIELDS = 25;
 const MAX_EMBEDS = 10;
 const MAX_EMBED_TEXT = 6_000;
 const PAGE_TITLE_RESERVE = 32;
+const OVERFLOW_NOTICE = "結果が長いため一部を省略しました。省略分は /checkbot feature:<機能名> で個別に確認してください。";
 
 function shorten(value, max) {
   const text = String(value ?? "").replace(/\u0000/g, "").trim();
@@ -93,7 +94,7 @@ function reportEmbeds(report) {
   let pageFields = [];
   const createCandidate = (candidateFields) => ({
     ...base,
-    title: `${STATUS_EMOJI[status] ?? "❔"} ${featureLabel(report?.feature)}`,
+    title: shorten(`${STATUS_EMOJI[status] ?? "❔"} ${featureLabel(report?.feature)}`, MAX_FIELD_NAME),
     fields: candidateFields,
   });
   for (const field of fields) {
@@ -109,8 +110,73 @@ function reportEmbeds(report) {
   if (pageFields.length > 0 || pages.length === 0) pages.push(createCandidate(pageFields));
   return pages.map((embed, index) => ({
     ...embed,
-    title: pages.length > 1 ? `${embed.title} (${index + 1}/${pages.length})` : embed.title,
+    title: pages.length > 1
+      ? shorten(`${embed.title} (${index + 1}/${pages.length})`, MAX_FIELD_NAME)
+      : embed.title,
   }));
+}
+
+function totalEmbedTextLength(embeds) {
+  return embeds.reduce((total, embed) => total + embedTextLength(embed), 0);
+}
+
+/**
+ * Discord's 6,000-character embed limit is shared by every embed in one
+ * message. Keep the first useful results and reserve an embed which tells the
+ * administrator how to inspect anything that could not fit.
+ */
+function limitMessageEmbedText(embeds) {
+  if (totalEmbedTextLength(embeds) <= MAX_EMBED_TEXT) return embeds;
+
+  const notice = {
+    title: "❔ checkbot（省略あり）",
+    color: STATUS_COLOR[CHECKBOT_STATUSES.UNKNOWN],
+    description: OVERFLOW_NOTICE,
+    fields: [],
+    footer: { text: "Developer PortalのIntentは手動確認が必要です。" },
+  };
+  const contentBudget = MAX_EMBED_TEXT - embedTextLength(notice);
+  const retained = [];
+  let used = 0;
+  let truncated = false;
+
+  // Leave one of Discord's ten embed slots for the overflow notice.
+  for (const source of embeds.slice(0, MAX_EMBEDS - 1)) {
+    const base = { ...source, fields: [] };
+    const baseLength = embedTextLength(base);
+    if (used + baseLength > contentBudget) {
+      truncated = true;
+      break;
+    }
+    retained.push(base);
+    used += baseLength;
+
+    for (const field of source.fields ?? []) {
+      const fieldLength = String(field.name ?? "").length + String(field.value ?? "").length;
+      if (used + fieldLength <= contentBudget) {
+        retained.at(-1).fields.push(field);
+        used += fieldLength;
+        continue;
+      }
+
+      const valueBudget = contentBudget - used - String(field.name ?? "").length;
+      if (valueBudget > 0) {
+        const clippedValue = valueBudget < 3
+          ? "…"
+          : (shorten(field.value, valueBudget) || "…");
+        const clippedField = { ...field, value: clippedValue };
+        retained.at(-1).fields.push(clippedField);
+        used += String(clippedField.name ?? "").length + String(clippedField.value ?? "").length;
+      }
+      truncated = true;
+      break;
+    }
+    if (truncated) break;
+  }
+
+  // Reaching the source-embed cap also means later results were omitted.
+  if (retained.length < embeds.length) truncated = true;
+  return truncated ? [...retained, notice] : retained;
 }
 
 /** Build plain JSON embeds so the formatter remains easy to test without a Discord client. */
@@ -131,7 +197,7 @@ export function buildCheckbotEmbeds(result) {
   // validators from producing an invalid response.
   if (embeds.length > MAX_EMBEDS) {
     const overflow = embeds.slice(MAX_EMBEDS - 1).flatMap((embed) => embed.fields ?? []);
-    const overflowDescription = "結果が長いため一部を省略しました。省略分は /checkbot feature:<機能名> で個別に確認してください。";
+    const overflowDescription = OVERFLOW_NOTICE;
     const retained = [];
     for (const field of overflow) {
       if (retained.length >= MAX_EMBED_FIELDS) break;
@@ -157,10 +223,10 @@ export function buildCheckbotEmbeds(result) {
       footer: { text: "Developer PortalのIntentは手動確認が必要です。" },
     });
   }
-  return embeds;
+  return limitMessageEmbedText(embeds);
 }
 
-export { embedTextLength };
+export { embedTextLength, totalEmbedTextLength };
 
 function hasManageGuild(interaction) {
   try {
