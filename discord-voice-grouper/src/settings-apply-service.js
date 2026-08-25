@@ -429,7 +429,7 @@ export function createSettingsApplyService({
       },
       $inc: { attemptCount: 1 },
     };
-    const query = jobModel.findOneAndUpdate(filter, update, { sort: { createdAt: 1, _id: 1 }, new: true, returnDocument: "after" });
+    const query = jobModel.findOneAndUpdate(filter, update, { sort: { createdAt: 1, _id: 1 }, returnDocument: "after" });
     return plain(await executeQuery(query));
   }
 
@@ -465,7 +465,7 @@ export function createSettingsApplyService({
       leaseOwner: job.leaseOwner ?? workerId,
     };
     if (typeof jobModel.findOneAndUpdate === "function") {
-      const query = jobModel.findOneAndUpdate(filter, update, { new: true, returnDocument: "after" });
+      const query = jobModel.findOneAndUpdate(filter, update, { returnDocument: "after" });
       return plain(await executeQuery(query));
     }
     if (typeof jobModel.updateOne === "function") return jobModel.updateOne(filter, update);
@@ -488,7 +488,7 @@ export function createSettingsApplyService({
         const query = jobModel.findOneAndUpdate(
           { guildId: job.guildId, revision: job.revision, status: "processing", leaseOwner: owner },
           { $set: { leaseExpiresAt: new Date(at.getTime() + Math.max(1, Number(leaseMs) || DEFAULT_LEASE_MS)), updatedAt: at } },
-          { new: true, returnDocument: "after" },
+          { returnDocument: "after" },
         );
         const row = plain(await executeQuery(query));
         if (!row) leaseLost = true;
@@ -785,7 +785,7 @@ export function createSettingsApplyService({
            },
            $inc: { manualRetryCount: 1 },
          },
-        { new: true, returnDocument: "after" },
+        { returnDocument: "after" },
       );
       return plain(await executeQuery(query));
     }

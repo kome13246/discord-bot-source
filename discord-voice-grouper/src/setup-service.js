@@ -114,7 +114,7 @@ export function createSetupDraftService({
 
   async function findOneAndUpdate(filter, update, options = {}) {
     if (typeof draftModel.findOneAndUpdate !== "function") return null;
-    return plain(await resolveQuery(draftModel.findOneAndUpdate(filter, update, { new: true, returnDocument: "after", ...options })));
+    return plain(await resolveQuery(draftModel.findOneAndUpdate(filter, update, { returnDocument: "after", ...options })));
   }
 
   async function expireIfNeeded(draft) {

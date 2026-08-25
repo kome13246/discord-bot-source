@@ -1279,7 +1279,7 @@ export function createVoiceSplitFeature(dependencies) {
         $set: failureState,
         $setOnInsert: { guildId: guild.id, memberId, roleId, grantedByBot: ownershipConfirmed === true, sourceType: "voice_monitor", sourceId },
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: "after" },
     ).catch((persistenceError) => {
       logRecoverableError("Failed to persist voice participant role failure", persistenceError);
       return null;

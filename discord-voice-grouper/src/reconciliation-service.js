@@ -275,7 +275,7 @@ export function createReconciliationService({
         // and existing rows.  Supplying it again via $setOnInsert causes a
         // MongoDB update-path conflict during the first insert.
         { $set: update },
-        { upsert: true, new: true, returnDocument: "after", setDefaultsOnInsert: true },
+        { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
       ));
     }
     if (typeof observationModel.create === "function") return observationModel.create(update);
