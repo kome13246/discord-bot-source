@@ -95,6 +95,49 @@ test("Interactionルーターはコマンドを対応する機能へ渡す", asy
   ]);
 });
 
+test("Interactionルーターは各コマンドの応答を先取りしない", async () => {
+  const acknowledgements = [];
+  const route = createInteractionHandler({
+    isShuttingDown: () => false,
+    messageFlags: { Ephemeral: 64 },
+    services: {
+      vcDm: {},
+      operationalManagement: {},
+      voiceChannelControl: {},
+      fukyoTheme: {},
+    },
+    handlers: {
+      handleCheckbot: async (current) => {
+        assert.equal(current.deferred, false);
+        await current.deferReply({ flags: 64 });
+      },
+      handleConfig: async (current) => {
+        assert.equal(current.deferred, false);
+        await current.deferReply({ flags: 64 });
+      },
+      handleSetup: async (current) => {
+        assert.equal(current.deferred, false);
+        await current.deferReply({ flags: 64 });
+      },
+    },
+    ids,
+  });
+
+  for (const commandName of ["checkbot", "config", "setup"]) {
+    const current = interaction({
+      commandName,
+      isChatInputCommand: () => true,
+      deferReply: async () => {
+        acknowledgements.push(commandName);
+        current.deferred = true;
+      },
+    });
+    await route(current);
+  }
+
+  assert.deepEqual(acknowledgements, ["checkbot", "config", "setup"]);
+});
+
 test("終了処理中は機能へ渡さずephemeral応答する", async () => {
   const { calls, route } = createHarness({ shuttingDown: true });
   let replyPayload;

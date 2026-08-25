@@ -100,7 +100,6 @@ export function createInteractionHandler({
     }
 
     if (!interaction.isChatInputCommand()) return;
-
     const commandHandler = {
       splitvc: handlers.handleSplitVoice,
       botstatus: services.operationalManagement.handleCommand,

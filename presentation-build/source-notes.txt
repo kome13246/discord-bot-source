@@ -1,0 +1,67 @@
+Slide 1 — Title
+[Sources]
+- User decisions in this Codex task: implement ranked features 4, 5, and 6; separate permission check command; reconciliation every 30 minutes.
+- Local repository: C:\Users\yonem\Documents\GitHub\discord-bot-source\discord-voice-grouper
+
+Slide 2 — Decision
+[Sources]
+- User decisions in this Codex task: feature 4 becomes /checkbot, feature 5 runs every 30 minutes, feature 6 covers safe setup and configuration management.
+
+Slide 3 — Architecture
+[Sources]
+- Local repository: src/features/checkbot.js
+- Local repository: src/reconciliation-service.js
+- Local repository: src/setup-service.js
+- Local repository: src/configuration-service.js
+
+Slide 4 — /checkbot
+[Sources]
+- Local repository: src/features/checkbot.js
+- Local repository: src/settings-validation-service.js
+- Local tests: test/checkbot.test.js
+
+Slide 5 — Reconciliation
+[Sources]
+- Local repository: src/reconciliation-service.js
+- Local repository: src/reconciliation-repair-service.js
+- Local models: src/models/reconciliation-observation.js; src/models/reconciliation-repair-job.js
+- Local tests: test/reconciliation.test.js; test/reconciliation-repair.test.js; test/p1-p2-regressions.test.js
+
+Slide 6 — /setup
+[Sources]
+- Local repository: src/setup-service.js
+- Local repository: src/features/setup.js
+- Local model: src/models/setup-draft.js
+- Local tests: test/setup.test.js; test/p1-p2-regressions.test.js
+
+Slide 7 — /config
+[Sources]
+- Local repository: src/configuration-service.js
+- Local repository: src/features/configuration.js
+- Local repository: src/settings-apply-service.js
+- Local model: src/models/settings-apply-job.js
+- Local tests: test/configuration-revision.test.js; test/settings-apply.test.js; test/p1-p2-regressions.test.js
+
+Slide 8 — Fail-safe policy
+[Sources]
+- Local repository: src/reconciliation-repair-service.js
+- Local repository: src/configuration-service.js
+- Local repository: src/setup-service.js
+- Local tests: test/reconciliation-repair.test.js; test/configuration-revision.test.js; test/p1-p2-regressions.test.js
+
+Slide 9 — Final audit fixes
+[Sources]
+- Local tests: test/configuration-revision.test.js
+- Local tests: test/reconciliation.test.js; test/reconciliation-repair.test.js
+- Local tests: test/setup.test.js; test/checkbot.test.js; test/p1-p2-regressions.test.js
+- Final review results recorded in this Codex task.
+
+Slide 10 — Verification
+[Sources]
+- Final verification recorded in this Codex task: 173 related tests passed; 372 full-suite tests passed; lint passed; git diff --check passed (line-ending warnings only).
+- Local package scripts: package.json
+
+Slide 11 — Handoff
+[Sources]
+- Final review recorded in this Codex task: no unresolved major defect found in the code-level review.
+- Residual validation limitation recorded in this Codex task: real Discord and MongoDB staging smoke test has not yet been run.
