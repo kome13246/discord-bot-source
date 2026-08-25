@@ -1,0 +1,34 @@
+Communication job
+By the end of the deck, maintainers and project stakeholders should understand what was implemented, how safety was designed, and why code-level release confidence is high: the three selected features are complete, the final audit closed the important boundary cases, and the full regression suite passes.
+
+Audience
+Bot maintainers, server administrators, and project stakeholders.
+
+Narrative arc (11 slides)
+1. Title — Discord Bot 長期運用基盤 / 実装完了レポート
+2. Decision — 4位・5位・6位を一つの運用基盤として実装
+3. Architecture — 診断・観測・変更の3層
+4. /checkbot — 変更せずに権限とリソースを診断
+5. 30-minute reconciliation — 観測と修復を分離
+6. /setup — 30分TTLの安全な下書きワークフロー
+7. /config — 履歴・差分・適用・ロールバック
+8. Fail-safe policy — 不明なら止める、成功を推測しない
+9. Final audit — 重大境界条件を9項目で閉じた
+10. Verification — 実装者と監督者を分離し、372件で確認
+11. Handoff — コードレベルのゲート通過、残るのは実環境スモーク
+
+Design system
+- Codex Grid-inspired 1280x720 white canvas.
+- Japanese-capable Yu Gothic typography; black ink; pale gray structural panels.
+- One deliberate Discord-inspired accent (#5865F2) and a light accent tint.
+- Flat composition, thin rules, no decorative gradients, no repeated UI-card dashboard.
+- Minimum body size 17px; slide titles 38–42px; deck title 58–64px.
+
+Selected Codex Grid layout references
+- slide-01: sparse title hierarchy.
+- slide-06: three-column capability comparison.
+- slide-17: process/timeline.
+- slide-19: metric-led evidence.
+
+Source policy
+Every slide receives speaker notes with a [Sources] block pointing to the local repository files and/or the user decisions summarized in source-notes.txt.

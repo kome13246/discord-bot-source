@@ -1,0 +1,294 @@
+{"kind":"deck","id":"pr/jqb6qh","name":"Deck"}
+{"kind":"layout","layoutId":"3430e54a-3231-4446-9fc4-539bb0a38ad7","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"dcaa1dd5-bc82-47a9-8aad-6cd75064b664","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/5ww42n","slide":1,"title":"DISCORD BOT / IMPLEMENTATION REPORT","textShapes":5}
+{"kind":"textbox","id":"sh/3i947u18","slide":1,"name":"cover-kicker","text":"DISCORD BOT / IMPLEMENTATION REPORT","textPreview":"DISCORD BOT / IMPLEMENTATION REPORT","textChars":35,"textLines":1,"bbox":[48,42,650,30]}
+{"kind":"textbox","id":"sh/oji5gz2t","slide":1,"name":"cover-title","text":"長期運用基盤\n実装完了レポート","textPreview":"長期運用基盤 | 実装完了レポート","textChars":15,"textLines":2,"bbox":[48,164,850,190]}
+{"kind":"textbox","id":"sh/pkrm94je","slide":1,"name":"cover-subtitle","text":"/checkbot・30分reconciliation・安全な設定管理","textPreview":"/checkbot・30分reconciliation・安全な設定管理","textChars":35,"textLines":1,"bbox":[52,392,850,44]}
+{"kind":"shape","id":"sh/ql0nipkj","slide":1,"name":"cover-rule","bbox":[48,470,790,0.2]}
+{"kind":"textbox","id":"sh/bm9obu14","slide":1,"name":"cover-date","text":"2026.08  /  discord-voice-grouper","textPreview":"2026.08  /  discord-voice-grouper","textChars":33,"textLines":1,"bbox":[52,500,590,30]}
+{"kind":"shape","id":"sh/cn25kz2p","slide":1,"name":"cover-bar-1","bbox":[1018,128,34,430]}
+{"kind":"shape","id":"sh/dob6d4ja","slide":1,"name":"cover-bar-2","bbox":[1072,225,34,333]}
+{"kind":"shape","id":"sh/6pgn65kf","slide":1,"name":"cover-bar-3","bbox":[1126,325,34,233]}
+{"kind":"textbox","id":"sh/7qp4za10","slide":1,"name":"cover-num","text":"01","textPreview":"01","textChars":2,"textLines":1,"bbox":[1184,670,48,22]}
+{"kind":"notes","id":"nt/5ww42n","slide":1,"text":"この資料は、今回選定した3機能の実装内容、安全設計、最終監査、検証結果を一つの運用ストーリーとして説明します。\n\n[Sources]\n- User decisions in this Codex task: implement ranked features 4, 5, and 6; separate permission check command; reconciliation every 30 minutes.\n- Local repository: C:\\Users\\yonem\\Documents\\GitHub\\discord-bot-source\\discord-voice-grouper"}
+{"kind":"slide","id":"sl/cm25vq","slide":2,"title":"LONG-TERM OPERATIONS","textShapes":16}
+{"kind":"textbox","id":"sh/ud0j2t8z","slide":2,"name":"kicker-2","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/hgb2d87a","slide":2,"name":"title-2","text":"3つの機能を、一つの運用基盤として実装","textPreview":"3つの機能を、一つの運用基盤として実装","textChars":19,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/gf2143qp","slide":2,"name":"header-rule-2","bbox":[48,155,1184,0.2]}
+{"kind":"textbox","id":"sh/3itkfypg","slide":2,"name":"decision-big","text":"4 / 5 / 6","textPreview":"4 / 5 / 6","textChars":9,"textLines":1,"bbox":[48,196,340,100]}
+{"kind":"textbox","id":"sh/2hkj6t8v","slide":2,"name":"decision-caption","text":"診断・定期観測・安全な変更を\n切れ目なくつなぐ","textPreview":"診断・定期観測・安全な変更を | 切れ目なくつなぐ","textChars":23,"textLines":2,"bbox":[48,306,330,92]}
+{"kind":"textbox","id":"sh/p4b2h87m","slide":2,"name":"decision-support","text":"単発の便利機能ではなく、\n1年規模の保守を支える仕組みにした。","textPreview":"単発の便利機能ではなく、 | 1年規模の保守を支える仕組みにした。","textChars":31,"textLines":2,"bbox":[48,438,330,84]}
+{"kind":"textbox","id":"sh/432183q1","slide":2,"name":"d4-num","text":"04","textPreview":"04","textChars":2,"textLines":1,"bbox":[454,190,58,34]}
+{"kind":"textbox","id":"sh/b6dkjipc","slide":2,"name":"d4-title","text":"/checkbot を /setup から分離","textPreview":"/checkbot を /setup から分離","textChars":23,"textLines":1,"bbox":[532,185,650,38]}
+{"kind":"textbox","id":"sh/q5kjad87","slide":2,"name":"d4-body","text":"権限と対象リソースだけを、変更せずに確認する。","textPreview":"権限と対象リソースだけを、変更せずに確認する。","textChars":23,"textLines":1,"bbox":[532,228,650,28]}
+{"kind":"shape","id":"sh/on29cjed","slide":2,"name":"d4-rule","bbox":[454,273,730,0.2]}
+{"kind":"textbox","id":"sh/pobq5ofi","slide":2,"name":"d5-num","text":"05","textPreview":"05","textChars":2,"textLines":1,"bbox":[454,302,58,34]}
+{"kind":"textbox","id":"sh/2lkra9w7","slide":2,"name":"d5-title","text":"reconciliation は30分ごと","textPreview":"reconciliation は30分ごと","textChars":21,"textLines":1,"bbox":[532,297,650,38]}
+{"kind":"textbox","id":"sh/nmt83exs","slide":2,"name":"d5-body","text":"Discord上の実態と保存状態のずれを継続観測する。","textPreview":"Discord上の実態と保存状態のずれを継続観測する。","textChars":27,"textLines":1,"bbox":[532,340,650,28]}
+{"kind":"shape","id":"sh/crm9gje9","slide":2,"name":"d5-rule","bbox":[454,385,730,0.2]}
+{"kind":"textbox","id":"sh/xsvq9ofu","slide":2,"name":"d6-num","text":"06","textPreview":"06","textChars":2,"textLines":1,"bbox":[454,414,58,34]}
+{"kind":"textbox","id":"sh/apkre9w3","slide":2,"name":"d6-title","text":"設定変更を履歴・適用・復旧まで管理","textPreview":"設定変更を履歴・適用・復旧まで管理","textChars":17,"textLines":1,"bbox":[532,409,650,38]}
+{"kind":"textbox","id":"sh/bqt87exo","slide":2,"name":"d6-body","text":"下書き、差分、transaction、適用job、rollbackを一貫化。","textPreview":"下書き、差分、transaction、適用job、rollbackを一貫化。","textChars":38,"textLines":1,"bbox":[532,452,650,52]}
+{"kind":"textbox","id":"sh/kfm9k3el","slide":2,"name":"footer-label-2","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/lgvqd8fq","slide":2,"name":"footer-num-2","text":"02","textPreview":"02","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/cm25vq","slide":2,"text":"ユーザー指定の優先順位4・5・6を、そのまま三層の運用基盤に落とし込みました。4位は独立コマンド、5位は30分間隔、6位は設定変更の全ライフサイクルが要点です。\n\n[Sources]\n- User decisions in this Codex task: feature 4 becomes /checkbot, feature 5 runs every 30 minutes, feature 6 covers safe setup and configuration management."}
+{"kind":"slide","id":"sl/nof3w0","slide":3,"title":"LONG-TERM OPERATIONS","textShapes":15}
+{"kind":"textbox","id":"sh/zyt8fy1g","slide":3,"name":"kicker-3","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/0z2p83i1","slide":3,"name":"title-3","text":"診断 → 観測 → 変更の3層で長期運用を支える","textPreview":"診断 → 観測 → 変更の3層で長期運用を支える","textChars":24,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/l0bqhojm","slide":3,"name":"header-rule-3","bbox":[48,155,1184,0.2]}
+{"kind":"shape","id":"sh/m147at07","slide":3,"name":"arch-rail","bbox":[48,190,8,382]}
+{"kind":"textbox","id":"sh/n2d8jy1s","slide":3,"name":"arch-1-tag","text":"01  DIAGNOSE","textPreview":"01  DIAGNOSE","textChars":12,"textLines":1,"bbox":[82,188,220,32]}
+{"kind":"textbox","id":"sh/83m9c3id","slide":3,"name":"arch-1-title","text":"/checkbot","textPreview":"/checkbot","textChars":9,"textLines":1,"bbox":[82,224,250,42]}
+{"kind":"textbox","id":"sh/94vql8jy","slide":3,"name":"arch-1-body","text":"必要権限・チャンネル・ロール・機能別依存を\n読み取り専用で検証","textPreview":"必要権限・チャンネル・ロール・機能別依存を | 読み取り専用で検証","textChars":31,"textLines":2,"bbox":[350,216,760,62]}
+{"kind":"shape","id":"sh/2507y9k3","slide":3,"name":"arch-1-rule","bbox":[82,292,1090,0.2]}
+{"kind":"textbox","id":"sh/36987e1o","slide":3,"name":"arch-2-tag","text":"02  OBSERVE","textPreview":"02  OBSERVE","textChars":11,"textLines":1,"bbox":[82,316,220,32]}
+{"kind":"textbox","id":"sh/n6x0jqd0","slide":3,"name":"arch-2-title","text":"30分reconciliation","textPreview":"30分reconciliation","textChars":17,"textLines":1,"bbox":[82,352,300,42]}
+{"kind":"textbox","id":"sh/m5ojalcf","slide":3,"name":"arch-2-body","text":"保存設定とDiscord上の実態を比較し、\n観測結果と安全な修復候補を永続化","textPreview":"保存設定とDiscord上の実態を比較し、 | 観測結果と安全な修復候補を永続化","textChars":38,"textLines":2,"bbox":[430,344,680,62]}
+{"kind":"shape","id":"sh/9sf2l0vq","slide":3,"name":"arch-2-rule","bbox":[82,420,1090,0.2]}
+{"kind":"textbox","id":"sh/o761cvu5","slide":3,"name":"arch-3-tag","text":"03  CHANGE","textPreview":"03  CHANGE","textChars":10,"textLines":1,"bbox":[82,444,220,32]}
+{"kind":"textbox","id":"sh/z2d0f6do","slide":3,"name":"arch-3-title","text":"/setup + /config","textPreview":"/setup + /config","textChars":16,"textLines":1,"bbox":[82,480,300,42]}
+{"kind":"textbox","id":"sh/e14j6lc3","slide":3,"name":"arch-3-body","text":"変更を下書き・履歴・差分・適用job・\nrollbackとして追跡可能にする","textPreview":"変更を下書き・履歴・差分・適用job・ | rollbackとして追跡可能にする","textChars":38,"textLines":2,"bbox":[430,472,680,62]}
+{"kind":"textbox","id":"sh/14fihgvu","slide":3,"name":"arch-close","text":"READ-ONLY","textPreview":"READ-ONLY","textChars":9,"textLines":1,"bbox":[1120,220,100,22]}
+{"kind":"textbox","id":"sh/03618bu9","slide":3,"name":"arch-close2","text":"CONTROLLED WRITE","textPreview":"CONTROLLED WRITE","textChars":16,"textLines":1,"bbox":[1040,502,180,22]}
+{"kind":"textbox","id":"sh/ryd0b6ds","slide":3,"name":"footer-label-3","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/qx4j21c7","slide":3,"name":"footer-num-3","text":"03","textPreview":"03","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/nof3w0","slide":3,"text":"3機能は独立していますが、運用上は順序があります。まず診断し、次に定期観測し、必要なときだけ管理された書き込みへ進みます。\n\n[Sources]\n- Local repository: src/features/checkbot.js\n- Local repository: src/reconciliation-service.js\n- Local repository: src/setup-service.js\n- Local repository: src/configuration-service.js"}
+{"kind":"slide","id":"sl/6mmvvr","slide":4,"title":"LONG-TERM OPERATIONS","textShapes":21}
+{"kind":"textbox","id":"sh/o7q9wz61","slide":4,"name":"kicker-4","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/n6hs3u5g","slide":4,"name":"title-4","text":"/checkbot は、変更せずに実行可能性を診断する","textPreview":"/checkbot は、変更せずに実行可能性を診断する","textChars":27,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/m58rupob","slide":4,"name":"header-rule-4","bbox":[48,155,1184,0.2]}
+{"kind":"shape","id":"sh/14za1knq","slide":4,"name":"checkbot-command-bg","bbox":[48,193,465,146]}
+{"kind":"textbox","id":"sh/03q9sz65","slide":4,"name":"checkbot-command-label","text":"COMMAND","textPreview":"COMMAND","textChars":7,"textLines":1,"bbox":[74,213,180,22]}
+{"kind":"textbox","id":"sh/z2hszu5k","slide":4,"name":"checkbot-command","text":"/checkbot feature:all","textPreview":"/checkbot feature:all","textChars":21,"textLines":1,"bbox":[74,255,400,46]}
+{"kind":"textbox","id":"sh/e1orqpoz","slide":4,"name":"checkbot-note","text":"設定は変更しない / 結果はephemeral","textPreview":"設定は変更しない / 結果はephemeral","textChars":23,"textLines":1,"bbox":[74,307,400,22]}
+{"kind":"textbox","id":"sh/d0fqxkne","slide":4,"name":"checkbot-point-1","text":"1","textPreview":"1","textChars":1,"textLines":1,"bbox":[570,188,28,28]}
+{"kind":"textbox","id":"sh/cz69of6t","slide":4,"name":"checkbot-point-1-title","text":"管理者だけが実行","textPreview":"管理者だけが実行","textChars":8,"textLines":1,"bbox":[610,184,520,30]}
+{"kind":"textbox","id":"sh/y94be1o3","slide":4,"name":"checkbot-point-1-body","text":"ManageGuild必須・サーバー内限定・DM無効。","textPreview":"ManageGuild必須・サーバー内限定・DM無効。","textChars":27,"textLines":1,"bbox":[610,218,550,28]}
+{"kind":"shape","id":"sh/zadcn6po","slide":4,"name":"checkbot-r1","bbox":[570,257,610,0.2]}
+{"kind":"textbox","id":"sh/0bmtgb69","slide":4,"name":"checkbot-point-2","text":"2","textPreview":"2","textChars":1,"textLines":1,"bbox":[570,276,28,28]}
+{"kind":"textbox","id":"sh/lcvupg7u","slide":4,"name":"checkbot-point-2-title","text":"全対応機能を横断","textPreview":"全対応機能を横断","textChars":8,"textLines":1,"bbox":[610,272,520,30]}
+{"kind":"textbox","id":"sh/q5kba1o7","slide":4,"name":"checkbot-point-2-body","text":"機能別の権限、対象channel/role、依存設定を確認。","textPreview":"機能別の権限、対象channel/role、依存設定を確認。","textChars":30,"textLines":1,"bbox":[610,306,570,48]}
+{"kind":"shape","id":"sh/b6tcj6pc","slide":4,"name":"checkbot-r2","bbox":[570,365,610,0.2]}
+{"kind":"textbox","id":"sh/c72tcb6x","slide":4,"name":"checkbot-point-3","text":"3","textPreview":"3","textChars":1,"textLines":1,"bbox":[570,384,28,28]}
+{"kind":"textbox","id":"sh/d8vulg7i","slide":4,"name":"checkbot-point-3-title","text":"機能差を正しく判定","textPreview":"機能差を正しく判定","textChars":9,"textLines":1,"bbox":[610,380,520,30]}
+{"kind":"textbox","id":"sh/2hkb6h8v","slide":4,"name":"checkbot-point-3-body","text":"例：callwait通知はManageMessages必須、promptは不要。","textPreview":"例：callwait通知はManageMessages必須、promptは不要。","textChars":40,"textLines":1,"bbox":[610,414,570,48]}
+{"kind":"shape","id":"sh/3itcfmpg","slide":4,"name":"checkbot-status-rule","bbox":[48,510,1132,0.2]}
+{"kind":"shape","id":"sh/7mp8ni58","slide":4,"name":"status-ok","bbox":[54,544,12,12]}
+{"kind":"textbox","id":"sh/6lgrexon","slide":4,"name":"status-ok-label","text":"正常","textPreview":"正常","textChars":2,"textLines":1,"bbox":[76,536,95,28]}
+{"kind":"shape","id":"sh/to7qpsne","slide":4,"name":"status-warn","bbox":[226,544,12,12]}
+{"kind":"textbox","id":"sh/sny9gnmt","slide":4,"name":"status-warn-label","text":"警告・未設定","textPreview":"警告・未設定","textChars":6,"textLines":1,"bbox":[248,536,150,28]}
+{"kind":"shape","id":"sh/fa98r254","slide":4,"name":"status-bad","bbox":[448,544,12,12]}
+{"kind":"textbox","id":"sh/u90rix4z","slide":4,"name":"status-bad-label","text":"実行不能","textPreview":"実行不能","textChars":4,"textLines":1,"bbox":[470,536,120,28]}
+{"kind":"shape","id":"sh/hcratcna","slide":4,"name":"status-unknown","bbox":[636,544,12,12]}
+{"kind":"textbox","id":"sh/gbi9k7mp","slide":4,"name":"status-unknown-label","text":"確認不能","textPreview":"確認不能","textChars":4,"textLines":1,"bbox":[658,536,120,28]}
+{"kind":"textbox","id":"sh/ve58fy50","slide":4,"name":"status-next","text":"長い結果はfeature指定で個別確認","textPreview":"長い結果はfeature指定で個別確認","textChars":19,"textLines":1,"bbox":[850,536,330,28]}
+{"kind":"textbox","id":"sh/adwr6dof","slide":4,"name":"footer-label-4","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/0nax0fi1","slide":4,"name":"footer-num-4","text":"04","textPreview":"04","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/6mmvvr","slide":4,"text":"管理者は /setup を始める前に /checkbot を実行できます。読み取り専用で、機能ごとに実行不能・警告・確認不能を分けて返します。DMでは登録されず、結果はephemeralです。\n\n[Sources]\n- Local repository: src/features/checkbot.js\n- Local repository: src/settings-validation-service.js\n- Local tests: test/checkbot.test.js"}
+{"kind":"slide","id":"sl/dhhp9z","slide":5,"title":"LONG-TERM OPERATIONS","textShapes":24}
+{"kind":"textbox","id":"sh/vy58729w","slide":5,"name":"kicker-5","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/wze9g7qh","slide":5,"name":"title-5","text":"30分ごとの観測と自動修復を、明確に分離した","textPreview":"30分ごとの観測と自動修復を、明確に分離した","textChars":22,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/h0na9srm","slide":5,"name":"header-rule-5","bbox":[48,155,1184,0.2]}
+{"kind":"textbox","id":"sh/i1grix87","slide":5,"name":"recon-big","text":"30","textPreview":"30","textChars":2,"textLines":1,"bbox":[1007,34,104,76]}
+{"kind":"textbox","id":"sh/j2psb29s","slide":5,"name":"recon-min","text":"MIN","textPreview":"MIN","textChars":3,"textLines":1,"bbox":[1120,72,66,22]}
+{"kind":"shape","id":"sh/43y9k7qd","slide":5,"name":"recon-line","bbox":[84,330,1070,0.2]}
+{"kind":"shape","id":"sh/547adcry","slide":5,"name":"recon-dot-1","bbox":[79,322,17,17]}
+{"kind":"textbox","id":"sh/65grmh8j","slide":5,"name":"recon-stage-1","text":"OBSERVE","textPreview":"OBSERVE","textChars":7,"textLines":1,"bbox":[55,206,180,26]}
+{"kind":"textbox","id":"sh/r6psfm94","slide":5,"name":"recon-title-1","text":"読み取り専用で\n現状を収集","textPreview":"読み取り専用で | 現状を収集","textChars":13,"textLines":2,"bbox":[43,242,205,60]}
+{"kind":"textbox","id":"sh/76t0za54","slide":5,"name":"recon-body-1","text":"Discord APIと保存状態を比較","textPreview":"Discord APIと保存状態を比較","textChars":19,"textLines":1,"bbox":[43,352,205,46]}
+{"kind":"shape","id":"sh/m5kz654j","slide":5,"name":"recon-dot-2","bbox":[309,322,17,17]}
+{"kind":"textbox","id":"sh/98vi1knu","slide":5,"name":"recon-stage-2","text":"CANDIDATE","textPreview":"CANDIDATE","textChars":9,"textLines":1,"bbox":[278,206,180,26]}
+{"kind":"textbox","id":"sh/87mh8fmp","slide":5,"name":"recon-title-2","text":"allowlistだけを\n修復候補化","textPreview":"allowlistだけを | 修復候補化","textChars":18,"textLines":2,"bbox":[266,242,205,60]}
+{"kind":"textbox","id":"sh/z2tgva5s","slide":5,"name":"recon-body-2","text":"観測・理由・actionKeyを保存","textPreview":"観測・理由・actionKeyを保存","textChars":18,"textLines":1,"bbox":[266,352,205,46]}
+{"kind":"shape","id":"sh/yhkz2547","slide":5,"name":"recon-dot-3","bbox":[539,322,17,17]}
+{"kind":"textbox","id":"sh/l4bix0ny","slide":5,"name":"recon-stage-3","text":"PREFLIGHT","textPreview":"PREFLIGHT","textChars":9,"textLines":1,"bbox":[508,206,180,26]}
+{"kind":"textbox","id":"sh/k32h4fmd","slide":5,"name":"recon-title-3","text":"最新状態で\n再確認","textPreview":"最新状態で | 再確認","textChars":9,"textLines":2,"bbox":[496,242,205,60]}
+{"kind":"textbox","id":"sh/jyd07u5c","slide":5,"name":"recon-body-3","text":"対象・権限・必要性を確定","textPreview":"対象・権限・必要性を確定","textChars":12,"textLines":1,"bbox":[496,352,205,46]}
+{"kind":"shape","id":"sh/id4zep4r","slide":5,"name":"recon-dot-4","bbox":[769,322,17,17]}
+{"kind":"textbox","id":"sh/e5sbmxsb","slide":5,"name":"recon-stage-4","text":"REPAIR","textPreview":"REPAIR","textChars":6,"textLines":1,"bbox":[738,206,180,26]}
+{"kind":"textbox","id":"sh/z61cv2tg","slide":5,"name":"recon-title-4","text":"lease / fencingで\n一度だけ実行","textPreview":"lease / fencingで | 一度だけ実行","textChars":23,"textLines":2,"bbox":[726,242,205,60]}
+{"kind":"textbox","id":"sh/07ato7a1","slide":5,"name":"recon-body-4","text":"結果不明は再実行せず停止","textPreview":"結果不明は再実行せず停止","textChars":12,"textLines":1,"bbox":[726,352,205,46]}
+{"kind":"shape","id":"sh/18juxsbm","slide":5,"name":"recon-dot-5","bbox":[999,322,17,17]}
+{"kind":"textbox","id":"sh/m9sbqxs7","slide":5,"name":"recon-stage-5","text":"POSTFLIGHT","textPreview":"POSTFLIGHT","textChars":10,"textLines":1,"bbox":[968,206,180,26]}
+{"kind":"textbox","id":"sh/na1cz2ts","slide":5,"name":"recon-title-5","text":"drift消失を\n再検証","textPreview":"drift消失を | 再検証","textChars":12,"textLines":2,"bbox":[956,242,205,60]}
+{"kind":"textbox","id":"sh/obuts7ad","slide":5,"name":"recon-body-5","text":"残存・不明ならappliedにしない","textPreview":"残存・不明ならappliedにしない","textChars":18,"textLines":1,"bbox":[956,352,205,46]}
+{"kind":"shape","id":"sh/9c3u1cby","slide":5,"name":"recon-stop-bg","bbox":[48,472,1132,86]}
+{"kind":"textbox","id":"sh/id8beds3","slide":5,"name":"recon-stop-label","text":"FAIL-SAFE","textPreview":"FAIL-SAFE","textChars":9,"textLines":1,"bbox":[76,490,122,26]}
+{"kind":"textbox","id":"sh/3ehsnito","slide":5,"name":"recon-stop","text":"API不明・対象欠落・権限不足・Discord結果不明 → 自動修復せず BLOCK","textPreview":"API不明・対象欠落・権限不足・Discord結果不明 → 自動修復せず BLOCK","textChars":42,"textLines":1,"bbox":[210,482,920,42]}
+{"kind":"textbox","id":"sh/l8netgv6","slide":5,"name":"recon-stop-sub","text":"blocked / circuit_open は手動確認まで粘着し、次の30分観測で勝手に復活しない。","textPreview":"blocked / circuit_open は手動確認まで粘着し、次の30分観測で勝手に復活しない。","textChars":51,"textLines":1,"bbox":[210,524,920,26]}
+{"kind":"textbox","id":"sh/k7exkbul","slide":5,"name":"footer-label-5","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/j65wr6d0","slide":5,"name":"footer-num-5","text":"05","textPreview":"05","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/dhhp9z","slide":5,"text":"reconciliation本体は30分ごとの読み取り専用観測です。修復は別jobに分離し、allowlist、最新preflight、lease・fencing、postflightという複数のゲートを通過した場合だけ実行します。\n\n[Sources]\n- Local repository: src/reconciliation-service.js\n- Local repository: src/reconciliation-repair-service.js\n- Local models: src/models/reconciliation-observation.js; src/models/reconciliation-repair-job.js\n- Local tests: test/reconciliation.test.js; test/reconciliation-repair.test.js; test/p1-p2-regressions.test.js"}
+{"kind":"slide","id":"sl/tgjtsx","slide":6,"title":"LONG-TERM OPERATIONS","textShapes":26}
+{"kind":"textbox","id":"sh/ypcjmhgf","slide":6,"name":"kicker-6","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/lsn2xcfq","slide":6,"name":"title-6","text":"/setup は30分TTLの下書きから、安全に確定する","textPreview":"/setup は30分TTLの下書きから、安全に確定する","textChars":28,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/kre1o7yl","slide":6,"name":"header-rule-6","bbox":[48,155,1184,0.2]}
+{"kind":"shape","id":"sh/bml0r2xo","slide":6,"name":"setup-ttl-bg","bbox":[966,184,214,96]}
+{"kind":"textbox","id":"sh/alcjixg3","slide":6,"name":"setup-ttl","text":"30 MIN","textPreview":"30 MIN","textChars":6,"textLines":1,"bbox":[996,197,154,40]}
+{"kind":"textbox","id":"sh/xo3itcfu","slide":6,"name":"setup-ttl-sub","text":"draft TTL","textPreview":"draft TTL","textChars":9,"textLines":1,"bbox":[996,240,154,22]}
+{"kind":"shape","id":"sh/wnu1k7y9","slide":6,"name":"setup-flow-line","bbox":[90,366,1042,0.2]}
+{"kind":"shape","id":"sh/ny10n2xs","slide":6,"name":"setup-dot-0","bbox":[88,357,18,18]}
+{"kind":"textbox","id":"sh/mxsjexg7","slide":6,"name":"setup-num-0","text":"01","textPreview":"01","textChars":2,"textLines":1,"bbox":[78,300,80,24]}
+{"kind":"textbox","id":"sh/gf2p8zi1","slide":6,"name":"setup-title-0","text":"開始","textPreview":"開始","textChars":2,"textLines":1,"bbox":[78,326,150,28]}
+{"kind":"textbox","id":"sh/1gb6h4zm","slide":6,"name":"setup-body-0","text":"guild全体で\nactive draftは1件","textPreview":"guild全体で | active draftは1件","textChars":24,"textLines":2,"bbox":[78,392,170,62]}
+{"kind":"shape","id":"sh/ed076p0v","slide":6,"name":"setup-dot-1","bbox":[292,357,18,18]}
+{"kind":"textbox","id":"sh/fe9ofu1g","slide":6,"name":"setup-num-1","text":"02","textPreview":"02","textChars":2,"textLines":1,"bbox":[282,300,80,24]}
+{"kind":"textbox","id":"sh/sbip4zip","slide":6,"name":"setup-title-1","text":"選択","textPreview":"選択","textChars":2,"textLines":1,"bbox":[282,326,150,28]}
+{"kind":"textbox","id":"sh/tcr6dkja","slide":6,"name":"setup-body-1","text":"機能ごとの項目を\n下書きへmerge","textPreview":"機能ごとの項目を | 下書きへmerge","textChars":18,"textLines":2,"bbox":[282,392,170,62]}
+{"kind":"shape","id":"sh/69072p0z","slide":6,"name":"setup-dot-2","bbox":[496,357,18,18]}
+{"kind":"textbox","id":"sh/ra9obu1k","slide":6,"name":"setup-num-2","text":"03","textPreview":"03","textChars":2,"textLines":1,"bbox":[486,300,80,24]}
+{"kind":"textbox","id":"sh/c7mpgji9","slide":6,"name":"setup-title-2","text":"確認","textPreview":"確認","textChars":2,"textLines":1,"bbox":[486,326,150,28]}
+{"kind":"textbox","id":"sh/d8vqpozu","slide":6,"name":"setup-body-2","text":"keep / clearを含む\neffective値をreview","textPreview":"keep / clearを含む | effective値をreview","textChars":33,"textLines":2,"bbox":[486,392,170,62]}
+{"kind":"shape","id":"sh/lor69ory","slide":6,"name":"setup-dot-3","bbox":[700,357,18,18]}
+{"kind":"textbox","id":"sh/k3ip0jad","slide":6,"name":"setup-num-3","text":"04","textPreview":"04","textChars":2,"textLines":1,"bbox":[690,300,80,24]}
+{"kind":"textbox","id":"sh/z29o7e9s","slide":6,"name":"setup-title-3","text":"CAS claim","textPreview":"CAS claim","textChars":9,"textLines":1,"bbox":[690,326,150,28]}
+{"kind":"textbox","id":"sh/y107y9s7","slide":6,"name":"setup-body-3","text":"active → committingを\n原子的に取得","textPreview":"active → committingを | 原子的に取得","textChars":27,"textLines":2,"bbox":[690,392,170,62]}
+{"kind":"shape","id":"sh/x07654rm","slide":6,"name":"setup-dot-4","bbox":[904,357,18,18]}
+{"kind":"textbox","id":"sh/czypwza1","slide":6,"name":"setup-num-4","text":"05","textPreview":"05","textChars":2,"textLines":1,"bbox":[894,300,80,24]}
+{"kind":"textbox","id":"sh/bypo3u9w","slide":6,"name":"setup-title-4","text":"再検証","textPreview":"再検証","textChars":3,"textLines":1,"bbox":[894,326,150,28]}
+{"kind":"textbox","id":"sh/axgnu9sb","slide":6,"name":"setup-body-4","text":"force fetchで削除・\n型変更を検出","textPreview":"force fetchで削除・ | 型変更を検出","textChars":22,"textLines":2,"bbox":[894,392,170,62]}
+{"kind":"textbox","id":"sh/pw7614rq","slide":6,"name":"setup-owner-title","text":"OWNER ISOLATION","textPreview":"OWNER ISOLATION","textChars":15,"textLines":1,"bbox":[48,194,290,24]}
+{"kind":"textbox","id":"sh/ovy5sza5","slide":6,"name":"setup-owner","text":"再開できるのは作成者だけ。\n別管理者は内容を参照・確定できない。","textPreview":"再開できるのは作成者だけ。 | 別管理者は内容を参照・確定できない。","textChars":32,"textLines":2,"bbox":[48,228,420,58]}
+{"kind":"shape","id":"sh/e1c32583","slide":6,"name":"setup-bottom","bbox":[48,506,1132,72]}
+{"kind":"textbox","id":"sh/f254vapo","slide":6,"name":"setup-bottom-label","text":"COMMIT","textPreview":"COMMIT","textChars":6,"textLines":1,"bbox":[72,526,110,22]}
+{"kind":"textbox","id":"sh/03el4vqt","slide":6,"name":"setup-bottom-text","text":"claimed patchと保持中リソースを再検証 → versioned writerを1回だけ呼び出す","textPreview":"claimed patchと保持中リソースを再検証 → versioned writerを1回だけ呼び出す","textChars":53,"textLines":1,"bbox":[190,516,930,38]}
+{"kind":"textbox","id":"sh/14nmx07e","slide":6,"name":"setup-bottom-sub","text":"hidden / clear済みの値はfetch対象外。無効なら設定を書かずに停止する。","textPreview":"hidden / clear済みの値はfetch対象外。無効なら設定を書かずに停止する。","textChars":44,"textLines":1,"bbox":[190,551,930,22]}
+{"kind":"textbox","id":"sh/qdc3yl8r","slide":6,"name":"footer-label-6","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/ryl4rqpc","slide":6,"name":"footer-num-6","text":"06","textPreview":"06","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/tgjtsx","slide":6,"text":"下書きは30分で失効し、サーバー全体で一つだけです。確定時はCAS claimの後に、選択値と保持値をDiscordへforce fetchして再検証します。途中で削除・型変更されたリソースは書き込み前に検出されます。\n\n[Sources]\n- Local repository: src/setup-service.js\n- Local repository: src/features/setup.js\n- Local model: src/models/setup-draft.js\n- Local tests: test/setup.test.js; test/p1-p2-regressions.test.js"}
+{"kind":"slide","id":"sl/dm4les","slide":7,"title":"LONG-TERM OPERATIONS","textShapes":23}
+{"kind":"textbox","id":"sh/rylc3ydw","slide":7,"name":"kicker-7","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/czutc3uh","slide":7,"name":"title-7","text":"/config は、設定の履歴から適用・復旧まで追跡する","textPreview":"/config は、設定の履歴から適用・復旧まで追跡する","textChars":28,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/d03u58v2","slide":7,"name":"header-rule-7","bbox":[48,155,1184,0.2]}
+{"kind":"textbox","id":"sh/2tsb6tcf","slide":7,"name":"config-command-label","text":"OPERATIONS","textPreview":"OPERATIONS","textChars":10,"textLines":1,"bbox":[48,192,200,24]}
+{"kind":"textbox","id":"sh/3u1czyd0","slide":7,"name":"config-command-1","text":"history  /  show  /  diff","textPreview":"history  /  show  /  diff","textChars":25,"textLines":1,"bbox":[48,228,360,32]}
+{"kind":"shape","id":"sh/4vut83ul","slide":7,"name":"config-cr1","bbox":[48,272,360,0.2]}
+{"kind":"textbox","id":"sh/pw3u18vq","slide":7,"name":"config-command-2","text":"rollback","textPreview":"rollback","textChars":8,"textLines":1,"bbox":[48,289,360,32]}
+{"kind":"shape","id":"sh/u5sb29c3","slide":7,"name":"config-cr2","bbox":[48,333,360,0.2]}
+{"kind":"textbox","id":"sh/f61svedo","slide":7,"name":"config-command-3","text":"apply_status  /  apply_retry","textPreview":"apply_status  /  apply_retry","textChars":28,"textLines":1,"bbox":[48,350,360,52]}
+{"kind":"shape","id":"sh/jixgfu5k","slide":7,"name":"config-cr3","bbox":[48,410,360,0.2]}
+{"kind":"textbox","id":"sh/ihofmp4z","slide":7,"name":"config-command-4","text":"reconcile_status","textPreview":"reconcile_status","textChars":16,"textLines":1,"bbox":[48,427,360,32]}
+{"kind":"shape","id":"sh/5kzyh4nq","slide":7,"name":"config-cr4","bbox":[48,471,360,0.2]}
+{"kind":"textbox","id":"sh/kj6xozm5","slide":7,"name":"config-command-5","text":"repair_status  /  repair_retry","textPreview":"repair_status  /  repair_retry","textChars":30,"textLines":1,"bbox":[48,488,370,52]}
+{"kind":"shape","id":"sh/7mhgje5w","slide":7,"name":"config-flow-bg","bbox":[470,190,710,364]}
+{"kind":"textbox","id":"sh/6l8fq94b","slide":7,"name":"config-step1-tag","text":"01","textPreview":"01","textChars":2,"textLines":1,"bbox":[500,217,36,22]}
+{"kind":"textbox","id":"sh/t8zyl4nm","slide":7,"name":"config-step1","text":"MongoDB transaction","textPreview":"MongoDB transaction","textChars":19,"textLines":1,"bbox":[548,210,300,32]}
+{"kind":"textbox","id":"sh/snqxsjm1","slide":7,"name":"config-step1b","text":"CASでrevisionを1回だけ進める","textPreview":"CASでrevisionを1回だけ進める","textChars":20,"textLines":1,"bbox":[548,244,420,22]}
+{"kind":"shape","id":"sh/nqdw7a5c","slide":7,"name":"config-fr1","bbox":[500,281,632,0.2]}
+{"kind":"textbox","id":"sh/mp4fe5or","slide":7,"name":"config-step2-tag","text":"02","textPreview":"02","textChars":2,"textLines":1,"bbox":[500,299,36,22]}
+{"kind":"textbox","id":"sh/q5cjmdof","slide":7,"name":"config-step2","text":"canonical snapshot + diff","textPreview":"canonical snapshot + diff","textChars":25,"textLines":1,"bbox":[548,292,360,32]}
+{"kind":"textbox","id":"sh/b6l0fip0","slide":7,"name":"config-step2b","text":"explicit nullを『未設定』と混同しない","textPreview":"explicit nullを『未設定』と混同しない","textChars":25,"textLines":1,"bbox":[548,326,480,22]}
+{"kind":"shape","id":"sh/c7u1on6l","slide":7,"name":"config-fr2","bbox":[500,363,632,0.2]}
+{"kind":"textbox","id":"sh/d83ihs76","slide":7,"name":"config-step3-tag","text":"03","textPreview":"03","textChars":2,"textLines":1,"bbox":[500,381,36,22]}
+{"kind":"textbox","id":"sh/2hszidoj","slide":7,"name":"config-step3","text":"apply job","textPreview":"apply job","textChars":9,"textLines":1,"bbox":[548,374,250,32]}
+{"kind":"textbox","id":"sh/3210bip4","slide":7,"name":"config-step3b","text":"副作用を同期させ、失敗はstatus/retryへ残す","textPreview":"副作用を同期させ、失敗はstatus/retryへ残す","textChars":27,"textLines":1,"bbox":[548,408,520,22]}
+{"kind":"shape","id":"sh/o3u1kn69","slide":7,"name":"config-fr3","bbox":[500,445,632,0.2]}
+{"kind":"textbox","id":"sh/p43id87u","slide":7,"name":"config-step4-tag","text":"04","textPreview":"04","textChars":2,"textLines":1,"bbox":[500,463,36,22]}
+{"kind":"textbox","id":"sh/udszeto7","slide":7,"name":"config-step4","text":"rollback = 新しいrevision","textPreview":"rollback = 新しいrevision","textChars":22,"textLines":1,"bbox":[548,456,370,32]}
+{"kind":"textbox","id":"sh/fe107yps","slide":7,"name":"config-step4b","text":"preflight後に履歴を戻し、適用jobで再反映","textPreview":"preflight後に履歴を戻し、適用jobで再反映","textChars":26,"textLines":1,"bbox":[548,490,510,22]}
+{"kind":"textbox","id":"sh/xs7mdwra","slide":7,"name":"config-guard","text":"transaction非対応時は、履歴が空と誤認させず明示的に停止","textPreview":"transaction非対応時は、履歴が空と誤認させず明示的に停止","textChars":33,"textLines":1,"bbox":[470,572,710,30]}
+{"kind":"textbox","id":"sh/w7ylkrqp","slide":7,"name":"footer-label-7","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/v6p4b694","slide":7,"name":"footer-num-7","text":"07","textPreview":"07","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/dm4les","slide":7,"text":"設定はMongoDB transaction内でrevision、snapshot、diff、apply jobを整合させます。rollbackは過去の値へ直接巻き戻すのではなく、新しいrevisionとして記録し、再び適用jobを通します。\n\n[Sources]\n- Local repository: src/configuration-service.js\n- Local repository: src/features/configuration.js\n- Local repository: src/settings-apply-service.js\n- Local model: src/models/settings-apply-job.js\n- Local tests: test/configuration-revision.test.js; test/settings-apply.test.js; test/p1-p2-regressions.test.js"}
+{"kind":"slide","id":"sl/byc9ib","slide":8,"title":"LONG-TERM OPERATIONS","textShapes":16}
+{"kind":"textbox","id":"sh/cv6d4zix","slide":8,"name":"kicker-8","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/baxcvuhc","slide":8,"name":"title-8","text":"自動化は『不明なら止まる』を徹底した","textPreview":"自動化は『不明なら止まる』を徹底した","textChars":18,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/q9ov2p0r","slide":8,"name":"header-rule-8","bbox":[48,155,1184,0.2]}
+{"kind":"textbox","id":"sh/l0zu14ze","slide":8,"name":"safety-statement","text":"UNKNOWN ≠ OK","textPreview":"UNKNOWN ≠ OK","textChars":12,"textLines":1,"bbox":[48,184,520,86]}
+{"kind":"textbox","id":"sh/0zqd8zit","slide":8,"name":"safety-sub","text":"成功を推測しない。再試行してよい瞬間も限定する。","textPreview":"成功を推測しない。再試行してよい瞬間も限定する。","textChars":24,"textLines":1,"bbox":[52,270,650,34]}
+{"kind":"textbox","id":"sh/zyhczeh8","slide":8,"name":"safety-allow-title","text":"実行してよい条件","textPreview":"実行してよい条件","textChars":8,"textLines":1,"bbox":[48,350,480,34]}
+{"kind":"shape","id":"sh/yx8v6903","slide":8,"name":"safety-allow-rule","bbox":[48,394,518,0.2]}
+{"kind":"textbox","id":"sh/14vupkza","slide":8,"name":"safety-allow-1","text":"01  actionがallowlistにある","textPreview":"01  actionがallowlistにある","textChars":23,"textLines":1,"bbox":[48,414,500,30]}
+{"kind":"textbox","id":"sh/g3mtwfip","slide":8,"name":"safety-allow-2","text":"02  最新preflightがconfirmed","textPreview":"02  最新preflightがconfirmed","textChars":25,"textLines":1,"bbox":[48,454,500,30]}
+{"kind":"textbox","id":"sh/mtkz25cr","slide":8,"name":"safety-allow-3","text":"03  lease・fencing tokenが有効","textPreview":"03  lease・fencing tokenが有効","textChars":26,"textLines":1,"bbox":[48,494,500,30]}
+{"kind":"textbox","id":"sh/nut0batc","slide":8,"name":"safety-allow-4","text":"04  postflightでdriftが消失","textPreview":"04  postflightでdriftが消失","textChars":23,"textLines":1,"bbox":[48,534,500,30]}
+{"kind":"textbox","id":"sh/8vmh4fux","slide":8,"name":"safety-stop-title","text":"停止する条件","textPreview":"停止する条件","textChars":6,"textLines":1,"bbox":[664,350,480,34]}
+{"kind":"shape","id":"sh/9wvidkbi","slide":8,"name":"safety-stop-rule","bbox":[664,394,516,0.2]}
+{"kind":"textbox","id":"sh/ax4z6pc3","slide":8,"name":"safety-stop-1","text":"01  Discord APIの結果がunknown","textPreview":"01  Discord APIの結果がunknown","textChars":26,"textLines":1,"bbox":[664,414,500,30]}
+{"kind":"textbox","id":"sh/vyd0fato","slide":8,"name":"safety-stop-2","text":"02  target / permissionが欠ける","textPreview":"02  target / permissionが欠ける","textChars":27,"textLines":1,"bbox":[664,454,500,30]}
+{"kind":"textbox","id":"sh/wzmh8fu9","slide":8,"name":"safety-stop-3","text":"03  Discord呼び出し後にlease喪失","textPreview":"03  Discord呼び出し後にlease喪失","textChars":24,"textLines":1,"bbox":[664,494,500,30]}
+{"kind":"textbox","id":"sh/x0vihkbe","slide":8,"name":"safety-stop-4","text":"04  修復後も候補が残る","textPreview":"04  修復後も候補が残る","textChars":13,"textLines":1,"bbox":[664,534,500,30]}
+{"kind":"shape","id":"sh/i14japsz","slide":8,"name":"safety-center","bbox":[592,368,12,208]}
+{"kind":"textbox","id":"sh/jmd0jutk","slide":8,"name":"footer-label-8","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/fqxgru9s","slide":8,"name":"footer-num-8","text":"08","textPreview":"08","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/byc9ib","slide":8,"text":"重要な原則は、unknownを正常扱いしないことです。Discordへの副作用が始まる前だけ限定的にretryし、開始後の結果不明・lease喪失はblockedへ落として人の判断を待ちます。\n\n[Sources]\n- Local repository: src/reconciliation-repair-service.js\n- Local repository: src/configuration-service.js\n- Local repository: src/setup-service.js\n- Local tests: test/reconciliation-repair.test.js; test/configuration-revision.test.js; test/p1-p2-regressions.test.js"}
+{"kind":"slide","id":"sl/9pxy8c","slide":9,"title":"LONG-TERM OPERATIONS","textShapes":13}
+{"kind":"textbox","id":"sh/fq5kby1w","slide":9,"name":"kicker-9","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/gre1k32h","slide":9,"name":"title-9","text":"最終監査で9つの重大境界条件を閉じた","textPreview":"最終監査で9つの重大境界条件を閉じた","textChars":18,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/1sn2d8j2","slide":9,"name":"header-rule-9","bbox":[48,155,1184,0.2]}
+{"kind":"textbox","id":"sh/61cje9kz","slide":9,"name":"audit-intro","text":"正常系だけでなく、削除・競合・不明・明示的nullまで回帰テストに固定。","textPreview":"正常系だけでなく、削除・競合・不明・明示的nullまで回帰テストに固定。","textChars":36,"textLines":1,"bbox":[48,180,1050,30]}
+{"kind":"shape","id":"sh/r2lk7e1k","slide":9,"name":"audit-rail","bbox":[48,238,8,336]}
+{"kind":"textbox","id":"sh/s3u1gj25","slide":9,"name":"audit-theme-1","text":"DATA","textPreview":"DATA","textChars":4,"textLines":1,"bbox":[80,236,130,24]}
+{"kind":"textbox","id":"sh/ton29ojq","slide":9,"name":"audit-text-1","text":"1  explicit nullをsnapshot / diff / rollbackで保持\n2  kokuchiEventTime変更をkokuchiとvc_dmの両方へ伝播","textPreview":"1  explicit nullをsnapshot / diff / rollbackで保持 | 2  kokuchiEventTime変更をkokuchiとvc_dmの両方へ伝播","textChars":88,"textLines":2,"bbox":[222,232,930,64]}
+{"kind":"shape","id":"sh/qxg3qd0j","slide":9,"name":"audit-r1","bbox":[80,308,1072,0.2]}
+{"kind":"textbox","id":"sh/bypkji14","slide":9,"name":"audit-theme-2","text":"DRIFT","textPreview":"DRIFT","textChars":5,"textLines":1,"bbox":[80,325,130,24]}
+{"kind":"textbox","id":"sh/radcbitw","slide":9,"name":"audit-text-2","text":"3  status / profile / Oteboの保存channel driftを候補化し、postflightで厳密確認\n4  status-boardのtarget・message同時欠落はunsafeとして自動修復しない","textPreview":"3  status / profile / Oteboの保存channel driftを候補化し、postflightで厳密確認 | 4  status-boardのtarget・message同時欠落はunsafeとして自動修復しない","textChars":116,"textLines":2,"bbox":[222,320,930,70]}
+{"kind":"shape","id":"sh/q94b2dsb","slide":9,"name":"audit-r2","bbox":[80,402,1072,0.2]}
+{"kind":"textbox","id":"sh/dcvudsbm","slide":9,"name":"audit-theme-3","text":"OUTCOME","textPreview":"OUTCOME","textChars":7,"textLines":1,"bbox":[80,419,130,24]}
+{"kind":"textbox","id":"sh/cbmd4na1","slide":9,"name":"audit-text-3","text":"5  VC DM / profile panelの削除失敗をapplied扱いしない\n6  profileは再試行に必要な状態を保持","textPreview":"5  VC DM / profile panelの削除失敗をapplied扱いしない | 6  profileは再試行に必要な状態を保持","textChars":66,"textLines":2,"bbox":[222,414,930,64]}
+{"kind":"shape","id":"sh/zedcfi9s","slide":9,"name":"audit-r3","bbox":[80,490,1072,0.2]}
+{"kind":"textbox","id":"sh/ed4v6xs7","slide":9,"name":"audit-theme-4","text":"GUARD","textPreview":"GUARD","textChars":5,"textLines":1,"bbox":[80,507,130,24]}
+{"kind":"textbox","id":"sh/1gfuhsry","slide":9,"name":"audit-text-4","text":"7  callwait通知だけManageMessagesを要求\n8  /setup確定後にforce fetch再検証  /  9  DM無効・transaction非対応を明示","textPreview":"7  callwait通知だけManageMessagesを要求 | 8  /setup確定後にforce fetch再検証  /  9  DM無効・transaction非対応を明示","textChars":90,"textLines":2,"bbox":[222,502,930,68]}
+{"kind":"textbox","id":"sh/0fmd8nad","slide":9,"name":"footer-label-9","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/nixcj294","slide":9,"name":"footer-num-9","text":"09","textPreview":"09","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/9pxy8c","slide":9,"text":"最終監査では、設定値の意味、機能間依存、保存先drift、Discord削除失敗、権限差、確定時競合、コマンド公開範囲、DB機能不足を重点的に確認しました。9つの境界条件をコードとテストの両方で閉じています。\n\n[Sources]\n- Local tests: test/configuration-revision.test.js\n- Local tests: test/reconciliation.test.js; test/reconciliation-repair.test.js\n- Local tests: test/setup.test.js; test/checkbot.test.js; test/p1-p2-regressions.test.js\n- Final review results recorded in this Codex task."}
+{"kind":"slide","id":"sl/d872ev","slide":10,"title":"LONG-TERM OPERATIONS","textShapes":21}
+{"kind":"textbox","id":"sh/wr614fel","slide":10,"name":"kicker-10","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/bqx0bad0","slide":10,"name":"title-10","text":"実装と監査を分離し、372件の回帰テストで確認","textPreview":"実装と監査を分離し、372件の回帰テストで確認","textChars":23,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/a5oj2pwf","slide":10,"name":"header-rule-10","bbox":[48,155,1184,0.2]}
+{"kind":"shape","id":"sh/5wzih4v2","slide":10,"name":"metric-1","bbox":[48,190,352,238]}
+{"kind":"textbox","id":"sh/kvq18zex","slide":10,"name":"metric-1-num","text":"372","textPreview":"372","textChars":3,"textLines":1,"bbox":[76,224,294,94]}
+{"kind":"textbox","id":"sh/jux0fudc","slide":10,"name":"metric-1-label","text":"FULL SUITE","textPreview":"FULL SUITE","textChars":10,"textLines":1,"bbox":[78,322,294,26]}
+{"kind":"textbox","id":"sh/ytoj6pwr","slide":10,"name":"metric-1-body","text":"全テスト合格","textPreview":"全テスト合格","textChars":6,"textLines":1,"bbox":[78,360,260,32]}
+{"kind":"shape","id":"sh/10vi50vy","slide":10,"name":"metric-2","bbox":[432,190,352,238]}
+{"kind":"textbox","id":"sh/0zmhwved","slide":10,"name":"metric-2-num","text":"173","textPreview":"173","textChars":3,"textLines":1,"bbox":[460,224,294,94]}
+{"kind":"textbox","id":"sh/y18zm90b","slide":10,"name":"metric-2-label","text":"RELATED TESTS","textPreview":"RELATED TESTS","textChars":13,"textLines":1,"bbox":[462,322,294,26]}
+{"kind":"textbox","id":"sh/j2h0fe1w","slide":10,"name":"metric-2-body","text":"今回の関連テスト合格","textPreview":"今回の関連テスト合格","textChars":10,"textLines":1,"bbox":[462,360,270,32]}
+{"kind":"shape","id":"sh/k3qhojih","slide":10,"name":"metric-3","bbox":[816,190,364,238]}
+{"kind":"textbox","id":"sh/l4zihoj2","slide":10,"name":"metric-3-num","text":"PASS","textPreview":"PASS","textChars":4,"textLines":1,"bbox":[844,234,308,74]}
+{"kind":"textbox","id":"sh/658zqt0n","slide":10,"name":"metric-3-label","text":"STATIC CHECKS","textPreview":"STATIC CHECKS","textChars":13,"textLines":1,"bbox":[846,322,294,26]}
+{"kind":"textbox","id":"sh/76h0jy18","slide":10,"name":"metric-3-body","text":"lint / diff --check","textPreview":"lint / diff --check","textChars":19,"textLines":1,"bbox":[846,360,280,32]}
+{"kind":"shape","id":"sh/8rahsjit","slide":10,"name":"verify-loop","bbox":[91,520,1062,0.2]}
+{"kind":"shape","id":"sh/tsjilojy","slide":10,"name":"verify-dot-0","bbox":[88,511,18,18]}
+{"kind":"textbox","id":"sh/utszut0j","slide":10,"name":"verify-title-0","text":"5.6-luna max","textPreview":"5.6-luna max","textChars":12,"textLines":1,"bbox":[80,458,210,30]}
+{"kind":"textbox","id":"sh/vu10ny14","slide":10,"name":"verify-body-0","text":"実装・修正","textPreview":"実装・修正","textChars":5,"textLines":1,"bbox":[80,544,210,24]}
+{"kind":"shape","id":"sh/rylgbyxc","slide":10,"name":"verify-dot-1","bbox":[344,511,18,18]}
+{"kind":"textbox","id":"sh/qxszitgr","slide":10,"name":"verify-title-1","text":"Primary audit","textPreview":"Primary audit","textChars":13,"textLines":1,"bbox":[336,458,210,30]}
+{"kind":"textbox","id":"sh/d03yd8fi","slide":10,"name":"verify-body-1","text":"独立レビュー","textPreview":"独立レビュー","textChars":6,"textLines":1,"bbox":[336,544,210,24]}
+{"kind":"shape","id":"sh/szuhk3yx","slide":10,"name":"verify-dot-2","bbox":[600,511,18,18]}
+{"kind":"textbox","id":"sh/3u1g7yxg","slide":10,"name":"verify-title-2","text":"Reproduce","textPreview":"Reproduce","textChars":9,"textLines":1,"bbox":[592,458,210,30]}
+{"kind":"textbox","id":"sh/itszetgv","slide":10,"name":"verify-body-2","text":"欠陥を再現","textPreview":"欠陥を再現","textChars":5,"textLines":1,"bbox":[592,544,210,24]}
+{"kind":"shape","id":"sh/5wjy9of6","slide":10,"name":"verify-dot-3","bbox":[856,511,18,18]}
+{"kind":"textbox","id":"sh/4vahg3yl","slide":10,"name":"verify-title-3","text":"Re-run","textPreview":"Re-run","textChars":6,"textLines":1,"bbox":[848,458,210,30]}
+{"kind":"textbox","id":"sh/v6hg3ex4","slide":10,"name":"verify-body-3","text":"全suiteで固定","textPreview":"全suiteで固定","textChars":9,"textLines":1,"bbox":[848,544,210,24]}
+{"kind":"textbox","id":"sh/u58fa9gj","slide":10,"name":"footer-label-10","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/kzm5ova5","slide":10,"name":"footer-num-10","text":"10","textPreview":"10","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/d872ev","slide":10,"text":"実装・修正は5.6-luna maxが担当し、監督役が受入条件の定義、独立レビュー、欠陥再現、再検証を行いました。関連173件、全372件、lint、diffチェックまで通過しています。\n\n[Sources]\n- Final verification recorded in this Codex task: 173 related tests passed; 372 full-suite tests passed; lint passed; git diff --check passed (line-ending warnings only).\n- Local package scripts: package.json"}
+{"kind":"slide","id":"sl/zeuywe","slide":11,"title":"LONG-TERM OPERATIONS","textShapes":17}
+{"kind":"textbox","id":"sh/bi1kvuxs","slide":11,"name":"kicker-11","text":"LONG-TERM OPERATIONS","textPreview":"LONG-TERM OPERATIONS","textChars":20,"textLines":1,"bbox":[48,34,460,24]}
+{"kind":"textbox","id":"sh/cjalozed","slide":11,"name":"title-11","text":"コードレベルのリリースゲートは通過した","textPreview":"コードレベルのリリースゲートは通過した","textChars":19,"textLines":1,"bbox":[48,67,1110,82]}
+{"kind":"shape","id":"sh/xkj2x4fy","slide":11,"name":"header-rule-11","bbox":[48,155,1184,0.2]}
+{"kind":"shape","id":"sh/yls3q9wj","slide":11,"name":"handoff-pass-bg","bbox":[48,188,1132,92]}
+{"kind":"textbox","id":"sh/zmlkzex4","slide":11,"name":"handoff-pass","text":"CODE-LEVEL GATE  /  PASSED","textPreview":"CODE-LEVEL GATE  /  PASSED","textChars":26,"textLines":1,"bbox":[76,205,820,48]}
+{"kind":"textbox","id":"sh/knulszep","slide":11,"name":"handoff-pass-sub","text":"重大な未解決欠陥は、最終レビューでは検出されていない。","textPreview":"重大な未解決欠陥は、最終レビューでは検出されていない。","textChars":27,"textLines":1,"bbox":[880,214,272,40]}
+{"kind":"textbox","id":"sh/lo3214fu","slide":11,"name":"handoff-next-title","text":"次の一手：staging smoke","textPreview":"次の一手：staging smoke","textChars":18,"textLines":1,"bbox":[48,322,520,38]}
+{"kind":"textbox","id":"sh/ep8je5wz","slide":11,"name":"handoff-next-sub","text":"実Discord + replica set MongoDBで以下を確認","textPreview":"実Discord + replica set MongoDBで以下を確認","textChars":36,"textLines":1,"bbox":[48,366,580,28]}
+{"kind":"shape","id":"sh/fqhknaxk","slide":11,"name":"handoff-check-0","bbox":[52,414,18,18]}
+{"kind":"textbox","id":"sh/ju9g7e94","slide":11,"name":"handoff-item-0","text":"/checkbotの登録・ManageGuild・DM非表示","textPreview":"/checkbotの登録・ManageGuild・DM非表示","textChars":30,"textLines":1,"bbox":[86,407,560,30]}
+{"kind":"shape","id":"sh/yt0ze9sz","slide":11,"name":"handoff-check-1","bbox":[52,453,18,18]}
+{"kind":"textbox","id":"sh/lgby9ora","slide":11,"name":"handoff-item-1","text":"30分観測、candidate作成、allowlist repair","textPreview":"30分観測、candidate作成、allowlist repair","textChars":34,"textLines":1,"bbox":[86,446,560,30]}
+{"kind":"shape","id":"sh/kvihgjap","slide":11,"name":"handoff-check-2","bbox":[52,492,18,18]}
+{"kind":"textbox","id":"sh/bq9g3u98","slide":11,"name":"handoff-item-2","text":"意図的な権限不足とAPI unknown時のBLOCK","textPreview":"意図的な権限不足とAPI unknown時のBLOCK","textChars":27,"textLines":1,"bbox":[86,485,560,30]}
+{"kind":"shape","id":"sh/ap0zapsn","slide":11,"name":"handoff-check-3","bbox":[52,531,18,18]}
+{"kind":"textbox","id":"sh/xsry54re","slide":11,"name":"handoff-item-3","text":"/setup確定直前の削除・型変更検出","textPreview":"/setup確定直前の削除・型変更検出","textChars":19,"textLines":1,"bbox":[86,524,560,30]}
+{"kind":"shape","id":"sh/wrihczat","slide":11,"name":"handoff-check-4","bbox":[52,570,18,18]}
+{"kind":"textbox","id":"sh/nmpgzu9w","slide":11,"name":"handoff-item-4","text":"/config rollback・apply_status・retry","textPreview":"/config rollback・apply_status・retry","textChars":35,"textLines":1,"bbox":[86,563,560,30]}
+{"kind":"shape","id":"sh/mlgf6psr","slide":11,"name":"handoff-divider","bbox":[690,322,0.2,266]}
+{"kind":"textbox","id":"sh/qxgzipcj","slide":11,"name":"handoff-limit-label","text":"RESIDUAL LIMITATION","textPreview":"RESIDUAL LIMITATION","textChars":19,"textLines":1,"bbox":[734,326,330,24]}
+{"kind":"textbox","id":"sh/rip0bud4","slide":11,"name":"handoff-limit","text":"実Discord / MongoDB stagingでの\n統合スモークは未実施","textPreview":"実Discord / MongoDB stagingでの | 統合スモークは未実施","textChars":39,"textLines":2,"bbox":[734,366,410,80]}
+{"kind":"textbox","id":"sh/cjyhkzup","slide":11,"name":"handoff-limit-body","text":"コード・単体/回帰テスト・静的検査は完了。\n本番投入前に外部境界だけを実環境で確認する。","textPreview":"コード・単体/回帰テスト・静的検査は完了。 | 本番投入前に外部境界だけを実環境で確認する。","textChars":44,"textLines":2,"bbox":[734,466,410,84]}
+{"kind":"textbox","id":"sh/dk7idkvu","slide":11,"name":"handoff-decision","text":"READY FOR STAGING","textPreview":"READY FOR STAGING","textChars":17,"textLines":1,"bbox":[734,566,410,28]}
+{"kind":"textbox","id":"sh/elgzmpcf","slide":11,"name":"footer-label-11","text":"IMPLEMENTATION REPORT","textPreview":"IMPLEMENTATION REPORT","textChars":21,"textLines":1,"bbox":[48,673,420,20]}
+{"kind":"textbox","id":"sh/zmp0fud0","slide":11,"name":"footer-num-11","text":"11","textPreview":"11","textChars":2,"textLines":1,"bbox":[1187,669,48,24]}
+{"kind":"notes","id":"nt/zeuywe","slide":11,"text":"この時点でコードレベルのゲートは通過しています。残る不確実性は、実DiscordとMongoDB replica setを接続した統合スモークです。ここを通過すれば本番リリース判断に進めます。\n\n[Sources]\n- Final review recorded in this Codex task: no unresolved major defect found in the code-level review.\n- Residual validation limitation recorded in this Codex task: real Discord and MongoDB staging smoke test has not yet been run."}
