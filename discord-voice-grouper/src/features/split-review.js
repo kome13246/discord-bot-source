@@ -227,7 +227,7 @@ export function createSplitReviewFeature({
     const draft = await SplitReviewDraft.findOneAndUpdate(
       { guildId: interaction.guildId, splitSessionId: sessionId, userId: interaction.user.id },
       { $set: { [key]: interaction.values[0], updatedAt: new Date(), expiresAt: checked.session.reviewDeadlineAt } },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     ).lean();
     await interaction.update({
       content: "感想の入力ありがとうございます。この感想は運営に送信されます。\n今後に活かしていくために、遠慮せず送っていただけるとありがたいです。",
@@ -409,4 +409,3 @@ export function createSplitReviewFeature({
     restoreFailedSplitReviewDeliveries,
   };
 }
-

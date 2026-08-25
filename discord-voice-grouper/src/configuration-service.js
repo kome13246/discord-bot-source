@@ -275,7 +275,7 @@ export function createConfigurationService({
         settingsModel,
         filter,
         { $set: { configRevision: 1, configSchemaVersion: CONFIG_SCHEMA_VERSION } },
-        { upsert: false, returnDocument: "after", new: true },
+        { upsert: false, returnDocument: "after" },
         session,
       );
       if (updated) return { status: "existing", revision: 1, document: updated };
@@ -291,7 +291,7 @@ export function createConfigurationService({
       settingsModel,
       filter,
       { $set: { configRevision: 1, configSchemaVersion: CONFIG_SCHEMA_VERSION } },
-      { upsert: false, returnDocument: "after", new: true },
+      { upsert: false, returnDocument: "after" },
       session,
     );
     if (!updated) {
@@ -370,7 +370,7 @@ export function createConfigurationService({
               configSchemaVersion: CONFIG_SCHEMA_VERSION,
             },
           },
-          { upsert: true, returnDocument: "after", new: true, setDefaultsOnInsert: true },
+          { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
           session,
         );
         if (!updated) throw new ConfigurationRevisionConflictError(guildId, expected, actual + 1);
@@ -524,7 +524,7 @@ export function createConfigurationService({
           settingsModel,
           filter,
           update,
-          { upsert: true, returnDocument: "after", new: true, setDefaultsOnInsert: true },
+          { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
           session,
         );
         if (!updated) throw new ConfigurationRevisionConflictError(guildId, expected, actual + 1);

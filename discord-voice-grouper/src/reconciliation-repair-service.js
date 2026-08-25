@@ -312,7 +312,6 @@ export function createReconciliationRepairService({
     };
     const query = repairJobModel.findOneAndUpdate(filter, update, {
       sort: { createdAt: 1, _id: 1 },
-      new: true,
       returnDocument: "after",
     });
     return plain(await executeQuery(query));
@@ -357,7 +356,7 @@ export function createReconciliationRepairService({
         const query = repairJobModel.findOneAndUpdate(
           { _id: job._id, guildId: job.guildId, actionKey: job.actionKey, status: "processing", leaseOwner: owner, leaseId, fencingToken },
           { $set: { leaseExpiresAt: new Date(at.getTime() + Math.max(1, Number(leaseMs) || REPAIR_LEASE_MS)), heartbeatAt: at, updatedAt: at } },
-          { new: true, returnDocument: "after" },
+          { returnDocument: "after" },
         );
         const updated = await executeQuery(query);
         if (!updated) lost = true;
@@ -401,7 +400,7 @@ export function createReconciliationRepairService({
       fencingToken: job.fencingToken,
     };
     if (typeof repairJobModel.findOneAndUpdate === "function") {
-      return plain(await executeQuery(repairJobModel.findOneAndUpdate(filter, update, { new: true, returnDocument: "after" })));
+      return plain(await executeQuery(repairJobModel.findOneAndUpdate(filter, update, { returnDocument: "after" })));
     }
     if (typeof repairJobModel.updateOne === "function") return repairJobModel.updateOne(filter, update);
     return null;
@@ -661,7 +660,7 @@ export function createReconciliationRepairService({
     const retried = plain(await executeQuery(repairJobModel.findOneAndUpdate(
       { _id: job._id, guildId, actionKey, status: job.status, manualRetryCount: job.manualRetryCount ?? 0 },
       { $set: { status: "pending", attemptCount: 0, nextAttemptAt: nowDate(now), lastError: null, result: null, blockedAt: null, leaseOwner: null, leaseId: null, leaseExpiresAt: null, heartbeatAt: null, updatedAt: nowDate(now) }, $inc: { manualRetryCount: 1, fencingToken: 1 } },
-      { new: true, returnDocument: "after" },
+      { returnDocument: "after" },
     )));
     if (!retried) {
       const error = new Error("修復ジョブの状態が競合したため再試行を受け付けませんでした。");
