@@ -433,6 +433,7 @@ test("voice-controlはnot-configured・未知status・サービス結果欠落�
 test("voice-control target helper and apply integration require a configured category", async () => {
   const channel = { id: "target", type: 2, parentId: "category" };
   assert.equal(isVoiceChannelControlTarget(channel, { vcControlCategoryId: "category" }), true);
+  assert.equal(isVoiceChannelControlTarget(channel, { vcControlCategoryId: "category", rtcCategoryId: "category" }), false);
   assert.equal(isVoiceChannelControlTarget(channel, {}), false);
   assert.equal(isVoiceChannelControlTarget(channel, { vcControlCategoryId: null }), false);
   assert.equal(isVoiceChannelControlTarget({ id: "x", type: 2 }, {}), false);

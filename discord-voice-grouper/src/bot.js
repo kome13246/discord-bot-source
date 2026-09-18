@@ -89,6 +89,8 @@ import { VcDmMemberTracking } from "./models/vc-dm-member-tracking.js";
 import { VcDmMigration } from "./models/vc-dm-migration.js";
 import { VcDmPanel } from "./models/vc-dm-panel.js";
 import { VcDmReminder } from "./models/vc-dm-reminder.js";
+import { RtcRoom } from "./models/rtc-room.js";
+import { RtcPanel } from "./models/rtc-panel.js";
 import { BumpReminder } from "./models/bump-reminder.js";
 import { FukyoThemeState } from "./models/fukyo-theme-state.js";
 import { FukyoWeeklyPost } from "./models/fukyo-weekly-post.js";
@@ -131,6 +133,7 @@ import { createSetupFeature } from "./features/setup.js";
 import { createSettingsValidationService } from "./settings-validation-service.js";
 import { createConfigurationService, createEffectiveConfigurationWriter } from "./configuration-service.js";
 import { createSettingsApplyDispatcher, createSettingsApplyService } from "./settings-apply-service.js";
+import { createRtcService } from "./rtc-service.js";
 import { createCallWaitSettingsReconciler } from "./callwait-settings-reconciler.js";
 import { createReconciliationService } from "./reconciliation-service.js";
 import { createReconciliationRepairService } from "./reconciliation-repair-service.js";
@@ -415,7 +418,13 @@ const vcDmService = createVcDmService({
   requestOperationalStatusRefresh,
   logger: console,
 });
-const voiceChannelControlService = createVoiceChannelControlService({ getGuildSettings, sendOperationalLog, setVoiceChannelStatus });
+let rtcService = null;
+const voiceChannelControlService = createVoiceChannelControlService({
+  getGuildSettings,
+  sendOperationalLog,
+  setVoiceChannelStatus,
+  isRtcChannel: (guildId, channelId) => rtcService?.isRtcChannel?.(guildId, channelId) ?? false,
+});
 const profileRegistrationPanelService = createProfileRegistrationPanelService({ getGuildSettings, sendOperationalLog });
 const profileFeature = createProfileFeature({
   getGuildSettings,
@@ -1082,6 +1091,15 @@ function getOteboConfirmationTimerKey(...args) { return recruitmentFeature.getOt
 function getOteboRoleTimerKey(...args) { return recruitmentFeature.getOteboRoleTimerKey(...args); }
 function getOteboVoiceStatusTimerKey(...args) { return recruitmentFeature.getOteboVoiceStatusTimerKey(...args); }
 
+rtcService = createRtcService({
+  client,
+  getGuildSettings,
+  // Use the existing VC collection form's normalized multi-parent setting.
+  getVoiceReminderParentChannelIds,
+  ensureVoiceControlPanel: (channel) => voiceChannelControlService.ensurePanel(channel),
+  logger: console,
+});
+
 const fukyoThemeService = createFukyoThemeService({
   getGuildSettings,
   saveGuildSettings,
@@ -1146,6 +1164,7 @@ const settingsApplyDispatcher = createSettingsApplyDispatcher({
   oteboRecruitmentPanelService,
   vcDmService,
   voiceChannelControlService,
+  rtcService,
   voiceMonitorSessions,
   isVoiceChannelMonitored,
   stopVoiceMonitorSession,
@@ -1256,6 +1275,7 @@ const guildOperationsFeature = createGuildOperationsFeature({
   validateOteboSettings,
   vcDmService,
   voiceChannelControlService,
+  rtcService,
   voiceMonitorSessions,
 });
 function isOteboRecruitmentPanelDisplayAllowed(...args) { return guildOperationsFeature.isOteboRecruitmentPanelDisplayAllowed(...args); }
@@ -1344,6 +1364,7 @@ client.once(Events.ClientReady, createReadyHandler({
     { name: "voice-monitor-sessions", run: restoreVoiceMonitorSessions },
     { name: "call-wait-role-generations", run: restoreCallWaitRoleGenerations },
     { name: "voice-channel-control", run: () => voiceChannelControlService.restore(client) },
+    { name: "rtc", run: () => rtcService.restore(client.guilds.cache.values()) },
     { name: "fukyo-theme", run: () => fukyoThemeService.restore(client) },
   ],
   lateRestoreTasks: [
@@ -1383,6 +1404,7 @@ registerDiscordEventHandlers({
     vcDm: vcDmService,
     oteboRecruitmentPanel: oteboRecruitmentPanelService,
     voiceChannelControl: voiceChannelControlService,
+    rtc: rtcService,
   },
   handlers: {
     handleDisboardBumpMessage: bumpReminderFeature.handleMessage,
@@ -1406,6 +1428,7 @@ client.on(Events.InteractionCreate, createInteractionHandler({
     operationalManagement: operationalManagementService,
     voiceChannelControl: voiceChannelControlService,
     fukyoTheme: fukyoThemeService,
+    rtc: rtcService,
   },
   handlers: {
     handleConfig: configurationFeature.handleConfig,
@@ -1826,6 +1849,8 @@ async function loginDiscordClient() {
       VcDmMigration.createIndexes(),
       VcDmPanel.createIndexes(),
       VcDmReminder.createIndexes(),
+      RtcRoom.createIndexes(),
+      RtcPanel.createIndexes(),
     ]);
     try {
       await configurationService.backfillGuildSettings();
@@ -1848,6 +1873,7 @@ async function loginDiscordClient() {
       () => bumpReminderFeature.shutdown(),
       () => recruitmentFeature.shutdown(),
       () => operationalStatusBoardService.stop(),
+      () => rtcService.shutdown(),
       () => fukyoThemeService.shutdown(),
       () => profileRegistrationPanelService.shutdown(),
     ],

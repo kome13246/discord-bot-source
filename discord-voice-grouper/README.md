@@ -46,6 +46,9 @@
 - ボタン募集は作成者を初期参加者として扱い、別の参加者が参加希望して確認時間を過ぎると、2人以上で集合通知を送ります。
 - ボタン募集の掲載終了時刻、予定通話時間、`@通話` へのメンション、ひとことを作成画面で指定できます。
 - VC未参加者・長期不参加者へ、JST 17:00の日次判定で案内DMを送り、DMからイベント30分前のリマインダーを登録できます。
+- `/setting rtc` でリアルタイムチャットのカテゴリ・親VC・VC移動受付CH・利用中ロールを設定できます。
+- 設定した親VCへ参加するとBot生成のチャットルームへ移動し、ルーム内で全員が「VC行けるよ」を押したときだけ個人メンションで案内します。ready状態はルーム単位の一時情報として扱います。
+- 生成されたRTC子VCにはVCコントロールパネルが設置され、ステータス・人数制限・退出予定だけを利用でき、名前変更はできません。
 
 ## グループ分けのルール
 
@@ -113,6 +116,7 @@ discord-voice-grouper/
 - `src/grouping.js`: 3人組・4人組に分ける計算ロジックです。
 - `src/settings-store.js`: MongoDBのGuildSettingsと、旧形式設定の読み取り時移行を扱います。現在の設定の正本はMongoDBです。
 - `src/settings-configuration.js`、`src/configuration-service.js`: 管理設定のallowlist、正規化、リビジョンCAS、履歴・差分、適用ジョブを扱います。
+- `src/rtc-service.js`、`src/models/rtc-room.js`、`src/models/rtc-panel.js`: リアルタイムチャットの生成ルーム識別、利用中ロール、匿名ready受付、常設パネル、起動時復旧を扱います。
 - `src/reconciliation-service.js`、`src/reconciliation-repair-service.js`: 30分間隔の読み取り専用照合と、確認済み候補だけの安全な修復を扱います。
 - `src/mongodb.js`: MongoDB Atlasへの接続・切断を管理します。
 - `src/register-commands.js`: Discordへスラッシュコマンドを登録します。
@@ -161,6 +165,8 @@ Bot Permissions:
 - チャンネルごとの権限でBotが見えないVCは対象にできません。
 - メンバーをPB親VCや子VCへ移動するため、Move Members権限が必要です。
 - 参加者ロールを付与・解除するため、Manage Roles権限が必要です。
+- リアルタイムチャットを利用する場合は、`/setting rtc` の親VC・カテゴリでチャンネル作成とメンバー移動、受付CHでメッセージ送信・履歴閲覧が必要です。
+- リアルタイムチャット利用中ロールはBotの最上位ロールより下に置いてください。受付CHの閲覧権限は、設定した利用中ロールなどのサーバー側権限で管理してください。
 - 参加者ロールはBotの最上位ロールより下に置いてください。
 - 途中参加用の待機VCを作成・削除するため、Manage Channels権限が必要です。
 - 集合VCの閲覧・接続権限を、告知時刻から算出した時刻に一時開放し、`/splitvc` 転送完了時に元の状態へ戻すため、対象VCのManage Channels権限が必要です。

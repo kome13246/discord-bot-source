@@ -31,24 +31,31 @@ const deletionTimers = new Map();
 const key = (guildId, userId) => `${guildId}:${userId}`;
 const deletionKey = (notice) => `${notice.guildId}:${notice.channelId}:${notice.messageId}`;
 
-const panel = (channel) => ({
-  embeds: [new EmbedBuilder().setTitle("VCコントロールパネル").setDescription(
-    "名前変更：VC名を変更します\n"
-    + "ステータス：VCの下に出る表示を設定します\n"
-    + "人数制限：チャットに参加できる人数を設定します\n"
-    + "退出予定：指定した時間後にVCチャットへお知らせします（自動退出はしません）",
-  )],
-  components: [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`${P}:name:${channel.id}`).setLabel("VC名を変更").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`${P}:limit:${channel.id}`).setLabel("人数制限を設定").setStyle(ButtonStyle.Primary),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`${P}:status:${channel.id}`).setLabel("ステータスを設定").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`${P}:exit_schedule:${channel.id}`).setLabel("退出予定を設定").setStyle(ButtonStyle.Primary),
-    ),
-  ],
-});
+export function buildVoiceControlPanel(channel, { rtc = false } = {}) {
+  const description = rtc
+    ? "ステータス：VCの下に出る表示を設定します\n"
+      + "人数制限：チャットに参加できる人数を設定します\n"
+      + "退出予定：指定した時間後にVCチャットへお知らせします（自動退出はしません）"
+    : "名前変更：VC名を変更します\n"
+      + "ステータス：VCの下に出る表示を設定します\n"
+      + "人数制限：チャットに参加できる人数を設定します\n"
+      + "退出予定：指定した時間後にVCチャットへお知らせします（自動退出はしません）";
+  const firstRow = [];
+  if (!rtc) firstRow.push(new ButtonBuilder().setCustomId(`${P}:name:${channel.id}`).setLabel("VC名を変更").setStyle(ButtonStyle.Primary));
+  firstRow.push(new ButtonBuilder().setCustomId(`${P}:limit:${channel.id}`).setLabel("人数制限を設定").setStyle(ButtonStyle.Primary));
+  return {
+    embeds: [new EmbedBuilder().setTitle("VCコントロールパネル").setDescription(description)],
+    components: [
+      new ActionRowBuilder().addComponents(...firstRow),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`${P}:status:${channel.id}`).setLabel("ステータスを設定").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`${P}:exit_schedule:${channel.id}`).setLabel("退出予定を設定").setStyle(ButtonStyle.Primary),
+      ),
+    ],
+  };
+}
+
+const panel = (channel, options = {}) => buildVoiceControlPanel(channel, options);
 
 function formatDuration(minutes) {
   return EXIT_DURATIONS.find(([value]) => value === minutes)?.[1] ?? `${minutes}分`;
@@ -88,6 +95,8 @@ export function isVoiceChannelControlTarget(channel, settings) {
   return channel?.type === ChannelType.GuildVoice
     && !reminderParents.includes(channel.id)
     && channel.id !== settings?.parentChannelId
+    && channel.id !== settings?.rtcParentChannelId
+    && channel.parentId !== settings?.rtcCategoryId
     && channel.parentId === categoryId;
 }
 
@@ -101,14 +110,26 @@ export function createVoiceChannelControlService({
   getVoiceControlRecord = getVoiceControl,
   upsertVoiceControlRecord = upsertVoiceControl,
   deleteVoiceControlRecord = deleteVoiceControl,
+  getVoiceExitScheduleRecord = getVoiceExitSchedule,
+  cancelVoiceExitScheduleRecord = cancelVoiceExitSchedule,
+  saveVoiceExitScheduleRecord = saveVoiceExitSchedule,
   clearLegacyTimers = clearLegacyVoiceControlTimers,
+  isRtcChannel = () => false,
   leaseMs = 30_000,
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   logger = console,
 } = {}) {
   const getSettings = (guild) => getGuildSettings(guild.id).catch(() => null);
-  const isTarget = isVoiceChannelControlTarget;
+  const isRtcTarget = (channel) => {
+    try {
+      return Boolean(isRtcChannel(channel?.guild?.id ?? channel?.guildId, channel?.id));
+    } catch (error) {
+      logger.warn?.(`RTC VC判定に失敗しました: ${error?.message ?? error}`);
+      return false;
+    }
+  };
+  const isTarget = (channel, settings) => isRtcTarget(channel) || isVoiceChannelControlTarget(channel, settings);
   const logFailure = async (processName, context, error, guild = context?.guild) => {
     if (!guild?.id) {
       console.error(`退出予定 ${processName}に失敗しました。guildId=${context?.guildId ?? "unknown"} userId=${context?.userId ?? "unknown"} voiceChannelId=${context?.voiceChannelId ?? context?.channelId ?? "unknown"} error=${error?.message ?? error}`);
@@ -195,13 +216,13 @@ export function createVoiceChannelControlService({
       await assertLease();
       if (message) {
         try {
-          await message.edit(panel(channel));
+          await message.edit(panel(channel, { rtc: isRtcTarget(channel) }));
         } catch (error) {
           return { status: "unknown", reason: "panel-edit-outcome-unknown", error, unknownOutcome: true };
         }
       } else {
         try {
-          message = await channel.send(panel(channel));
+          message = await channel.send(panel(channel, { rtc: isRtcTarget(channel) }));
           createdMessage = true;
         } catch (error) {
           return { status: "unknown", reason: "panel-send-outcome-unknown", error, unknownOutcome: true };
@@ -306,7 +327,7 @@ export function createVoiceChannelControlService({
     clearScheduleTimer(normalizedSchedule.guildId, normalizedSchedule.userId);
     const delay = new Date(normalizedSchedule.scheduledAt).getTime() - Date.now();
     if (delay < -EXIT_DELAY_GRACE_MS) {
-      return cancelVoiceExitSchedule(normalizedSchedule.guildId, normalizedSchedule.userId).catch((error) => logFailure("期限切れ処理", normalizedSchedule, error, guild));
+      return cancelVoiceExitScheduleRecord(normalizedSchedule.guildId, normalizedSchedule.userId).catch((error) => logFailure("期限切れ処理", normalizedSchedule, error, guild));
     }
     const run = () => {
       scheduleTimers.delete(key(normalizedSchedule.guildId, normalizedSchedule.userId));
@@ -372,7 +393,7 @@ export function createVoiceChannelControlService({
     for (const schedule of await listVoiceExitSchedules()) {
       const guild = client.guilds.cache.get(schedule.guildId);
       if (guild) scheduleVoiceExit(guild, schedule);
-      else await cancelVoiceExitSchedule(schedule.guildId, schedule.userId).catch((error) => logFailure("復旧", schedule, error));
+      else await cancelVoiceExitScheduleRecord(schedule.guildId, schedule.userId).catch((error) => logFailure("復旧", schedule, error));
     }
     for (const notice of await listVoiceExitNoticeDeletions()) {
       const guild = client.guilds.cache.get(notice.guildId);
@@ -398,9 +419,9 @@ export function createVoiceChannelControlService({
     const userId = newState.id ?? oldState.id;
     if (!guild || !userId || oldState.channelId === newState.channelId) return;
     try {
-      const schedule = await getVoiceExitSchedule(guild.id, userId);
+      const schedule = await getVoiceExitScheduleRecord(guild.id, userId);
       if (schedule && newState.channelId !== schedule.voiceChannelId) {
-        const cancelled = await cancelVoiceExitSchedule(guild.id, userId);
+        const cancelled = await cancelVoiceExitScheduleRecord(guild.id, userId);
         if (cancelled) clearScheduleTimer(guild.id, userId);
       }
     } catch (error) {
@@ -413,7 +434,7 @@ export function createVoiceChannelControlService({
   }
 
   async function showExitScheduleMenu(interaction, channel) {
-    const current = await getVoiceExitSchedule(interaction.guildId, interaction.user.id);
+    const current = await getVoiceExitScheduleRecord(interaction.guildId, interaction.user.id);
     const currentText = current
       ? `現在の退出予定：<t:${Math.floor(new Date(current.scheduledAt).getTime() / 1000)}:t>（<t:${Math.floor(new Date(current.scheduledAt).getTime() / 1000)}:R>）\n新しい時間を選ぶと、現在の予定は上書きされます。`
       : "現在、退出予定は登録されていません。";
@@ -427,9 +448,9 @@ export function createVoiceChannelControlService({
   async function handleExitScheduleSelect(interaction, channel) {
     const selected = interaction.values[0];
     if (selected === EXIT_CANCEL) {
-      const cancelled = await cancelVoiceExitSchedule(interaction.guildId, interaction.user.id);
+      const cancelled = await cancelVoiceExitScheduleRecord(interaction.guildId, interaction.user.id);
       if (!cancelled) {
-        const current = await getVoiceExitSchedule(interaction.guildId, interaction.user.id);
+        const current = await getVoiceExitScheduleRecord(interaction.guildId, interaction.user.id);
         return interaction.update({ content: current?.status === "executing" ? "退出予定のお知らせ処理が既に開始されています。" : "現在あなたは退出予定を登録していないようです。", components: [] });
       }
       clearScheduleTimer(interaction.guildId, interaction.user.id);
@@ -441,9 +462,9 @@ export function createVoiceChannelControlService({
     }
     const minutes = Number(selected);
     if (!EXIT_DURATIONS.some(([value]) => value === minutes)) return interaction.update({ content: "選択した時間を確認できませんでした。", components: [] });
-    const existing = await getVoiceExitSchedule(interaction.guildId, interaction.user.id);
+    const existing = await getVoiceExitScheduleRecord(interaction.guildId, interaction.user.id);
     const scheduledAt = new Date(Date.now() + minutes * 60 * 1000);
-    const saved = await saveVoiceExitSchedule({
+    const saved = await saveVoiceExitScheduleRecord({
       guildId: interaction.guildId, userId: interaction.user.id, voiceChannelId: channel.id,
       scheduledAt, durationMinutes: minutes,
     });
@@ -467,11 +488,15 @@ export function createVoiceChannelControlService({
     const channel = interaction.guild?.channels.cache.get(parts[2]);
     const settings = interaction.guild ? await getSettings(interaction.guild) : null;
     if (!isTarget(channel, settings)) return false;
+    if (isRtcTarget(channel) && base === "name") {
+      await interaction.reply({ content: "リアルタイムチャットではVC名を変更できません。", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return true;
+    }
     try {
       if (interaction.isButton() && base === "exit_schedule") {
         if (interaction.member?.voice?.channelId === channel.id) await showExitScheduleMenu(interaction, channel);
         else {
-          const current = await getVoiceExitSchedule(interaction.guildId, interaction.user.id);
+          const current = await getVoiceExitScheduleRecord(interaction.guildId, interaction.user.id);
           if (current?.status === "scheduled") await showExitScheduleMenu(interaction, channel);
           else await replyNotInVoice(interaction);
         }

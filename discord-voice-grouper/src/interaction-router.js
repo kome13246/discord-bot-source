@@ -22,6 +22,7 @@ export function createInteractionHandler({
     try {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith("setup:")) return handlers.handleSetupInteraction(interaction);
+      if (interaction.customId === "rtc:ready" || interaction.customId === "rtc:cancel") return services.rtc?.handleInteraction?.(interaction);
       if (interaction.customId.startsWith("vcdm:")) return services.vcDm.handleInteraction(interaction);
       if (interaction.customId.startsWith("operational:")) return services.operationalManagement.handle(interaction);
       if (

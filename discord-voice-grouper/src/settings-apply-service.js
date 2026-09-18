@@ -107,6 +107,7 @@ export function classifyConfigurationChanges(changedKeys = []) {
     if (/^(vcControl|voiceExitScheduleKeepMessage)/.test(key)) features.add("voice_control");
     if (/^(fukyo|wadaiTopics)/.test(key)) features.add("fukyo");
     if (/^(form|review|logChannelId)/.test(key)) features.add("forms");
+    if (/^rtc(?:CategoryId|ParentChannelId|ReceptionChannelId|ActiveRoleId)$/.test(key)) features.add("rtc");
     if (/^(split|tempRoleId|parentChannelId|childCategoryId|waitingVc|voiceParticipantRoleId|voiceReminder|finishMessage|transferWaitSeconds)/.test(key)) features.add("splitvc");
   }
   return [...features].sort();
@@ -184,6 +185,7 @@ export function createSettingsApplyDispatcher({
   oteboRecruitmentPanelService = null,
   vcDmService = null,
   voiceChannelControlService = null,
+  rtcService = null,
   voiceMonitorSessions = null,
   isVoiceChannelMonitored = null,
   stopVoiceMonitorSession = null,
@@ -272,6 +274,16 @@ export function createSettingsApplyDispatcher({
     }
     if (features.includes("vc_dm")) {
       await runMutating("vc_dm", async () => vcDmService?.onSettingsChanged?.(guild) ?? { status: "applied" });
+    }
+    if (features.includes("rtc")) {
+      await runMutating("rtc", async () => {
+        if (!rtcService) return { status: "applied", noOp: true };
+        const result = await rtcService.onSettingsChanged?.(guild, settings, context.previousSettings ?? context.current ?? null)
+          ?? await rtcService.ensurePanel?.(guild, settings)
+          ?? { status: "applied" };
+        if (!rtcService.onSettingsChanged) await rtcService.syncGuildRoles?.(guild, settings);
+        return result;
+      });
     }
     if (features.includes("voice_control")) {
       await runMutating("voice_control", async () => {

@@ -53,6 +53,7 @@ export function createGuildOperationsFeature(dependencies) {
     releaseMongoLease,
     replyInChunks,
     replyOrFollowUp,
+    rtcService,
     requestOperationalStatusRefresh,
     rescheduleCurrentKokuchiEvent,
     restoreGatheringVcPermissionAfterSplit,
@@ -254,6 +255,11 @@ export function createGuildOperationsFeature(dependencies) {
   
     if (subcommand === "zatudan") {
       await handleShugoSetting(interaction);
+      return;
+    }
+
+    if (subcommand === "rtc") {
+      await handleRtcSetting(interaction);
       return;
     }
   
@@ -689,6 +695,53 @@ export function createGuildOperationsFeature(dependencies) {
     });
   }
   
+  async function handleRtcSetting(interaction) {
+    const category = interaction.options.getChannel("category", false);
+    const parentChannel = interaction.options.getChannel("parent_channel", false);
+    const receptionChannel = interaction.options.getChannel("reception_channel", false);
+    const activeRole = interaction.options.getRole("active_role", false);
+    if (!category && !parentChannel && !receptionChannel && !activeRole) {
+      await replyOrFollowUp(interaction, {
+        content: "category、parent_channel、reception_channel、active_role のいずれかを指定してください。",
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+    if (receptionChannel) {
+      const botMember = interaction.guild.members.me ?? await interaction.guild.members.fetchMe().catch(() => null);
+      const permissions = receptionChannel.permissionsFor?.(botMember);
+      if (!receptionChannel.isTextBased?.()
+        || !permissions?.has(PermissionFlagsBits.ViewChannel)
+        || !permissions?.has(PermissionFlagsBits.SendMessages)
+        || !permissions?.has(PermissionFlagsBits.ReadMessageHistory)) {
+        await replyOrFollowUp(interaction, {
+          content: "VC移動受付CHは、Botが閲覧・送信・履歴閲覧できるテキストチャンネルを指定してください。",
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+    }
+    if (activeRole?.managed || activeRole.id === interaction.guild.id) {
+      await replyOrFollowUp(interaction, { content: "利用中ロールにはBot管理ロールや@everyoneを指定できません。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+      return;
+    }
+    const current = await getGuildSettings(interaction.guildId);
+    const settings = await saveAdminConfiguration(interaction, current, {
+      ...(category ? { rtcCategoryId: category.id } : {}),
+      ...(parentChannel ? { rtcParentChannelId: parentChannel.id } : {}),
+      ...(receptionChannel ? { rtcReceptionChannelId: receptionChannel.id } : {}),
+      ...(activeRole ? { rtcActiveRoleId: activeRole.id } : {}),
+    }, "rtc-setting");
+    if (!settings) return;
+    await replyOrFollowUp(interaction, {
+      content: `リアルタイムチャット設定を保存しました。${applyStatusText(settings)}\n\n${formatSettings(settings)}`,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+  }
+
   async function handleVcDmSetting(interaction) {
     const enabled = interaction.options.getBoolean("enabled", false);
     const panelChannel = interaction.options.getChannel("panel_channel", false);

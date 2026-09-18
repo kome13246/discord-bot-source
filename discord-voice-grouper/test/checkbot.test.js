@@ -121,6 +121,7 @@ test("/checkbot command requires ManageGuild and exposes every supported feature
     "forms",
     "profile",
     "voice_control",
+    "rtc",
     "status_board",
     "fukyo",
   ]);
@@ -144,7 +145,7 @@ test("all and every supported feature filter produce the expected reports", asyn
   const guild = guildFixture();
   const all = await service.validateGuild({ guild, settings: {}, feature: "all" });
   assert.deepEqual(all.reports.map((report) => report.feature), [
-    "splitvc", "kokuchi", "callwait", "vc_dm", "forms", "profile", "voice_control", "status_board", "fukyo",
+    "splitvc", "kokuchi", "callwait", "vc_dm", "forms", "profile", "voice_control", "rtc", "status_board", "fukyo",
   ]);
   for (const feature of all.reports.map((report) => report.feature)) {
     const one = await service.validateGuild({ guild, settings: {}, feature });

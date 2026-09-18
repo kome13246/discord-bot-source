@@ -17,6 +17,7 @@ export const CHECKBOT_FEATURES = Object.freeze([
   "forms",
   "profile",
   "voice_control",
+  "rtc",
   "status_board",
   "fukyo",
 ]);
@@ -104,6 +105,7 @@ const STATUS_LABELS = Object.freeze({
   forms: "forms",
   profile: "profile",
   voice_control: "voice_control",
+  rtc: "rtc",
   status_board: "status_board",
   fukyo: "fukyo",
 });
@@ -890,6 +892,40 @@ async function validateFukyo(ctx) {
   }
 }
 
+async function validateRtc(ctx) {
+  const settings = ctx.settings ?? {};
+  await checkChannel(ctx, {
+    key: "rtc.category",
+    label: "リアルタイムチャットカテゴリ",
+    id: settings.rtcCategoryId,
+    kind: "category",
+    permissions: CATEGORY_CREATE_PERMISSIONS,
+  });
+  await checkChannel(ctx, {
+    key: "rtc.parentChannel",
+    label: "リアルタイムチャット親VC",
+    id: settings.rtcParentChannelId,
+    kind: "voice",
+    permissions: VOICE_MOVE_PERMISSIONS,
+  });
+  await checkChannel(ctx, {
+    key: "rtc.receptionChannel",
+    label: "リアルタイムチャット受付CH",
+    id: settings.rtcReceptionChannelId,
+    kind: "text",
+    permissions: TEXT_PERMISSIONS,
+  });
+  await checkRole(ctx, {
+    key: "rtc.activeRole",
+    label: "リアルタイムチャット利用中ロール",
+    id: settings.rtcActiveRoleId,
+    assign: true,
+  });
+  await checkBotGuildPermission(ctx, "rtc", "ManageChannels");
+  await checkBotGuildPermission(ctx, "rtc", "MoveMembers");
+  await checkBotGuildPermission(ctx, "rtc", "ManageRoles");
+}
+
 async function checkBotGuildPermission(ctx, feature, permissionName) {
   const botMember = await getBotMember(ctx);
   const result = hasPermission(botMember?.permissions, permissionName);
@@ -909,6 +945,7 @@ async function runFeature(ctx, feature, getStatusBoard, statusBoardOverride = nu
     case "forms": return validateForms(ctx);
     case "profile": return validateProfile(ctx);
     case "voice_control": return validateVoiceControl(ctx);
+    case "rtc": return validateRtc(ctx);
     case "status_board": return validateStatusBoard(ctx, getStatusBoard, statusBoardOverride);
     case "fukyo": return validateFukyo(ctx);
     default: return undefined;
