@@ -81,6 +81,11 @@ export function registerDiscordEventHandlers({
       logRecoverableError("Voice participant role processing failed", error);
     }
     try {
+      await services.rtc?.handleVoiceStateUpdate?.(oldState, newState);
+    } catch (error) {
+      logRecoverableError("RTC voice-state processing failed", error);
+    }
+    try {
       await services.voiceChannelControl.handleVoiceState(oldState, newState);
     } catch (error) {
       logRecoverableError("Voice exit schedule processing failed", error);
@@ -103,6 +108,11 @@ export function registerDiscordEventHandlers({
   });
 
   client.on(Events.ChannelDelete, async (channel) => {
+    try {
+      await services.rtc?.handleChannelDelete?.(channel);
+    } catch (error) {
+      logRecoverableError("RTC channel cleanup failed", error);
+    }
     if (channel.type === ChannelType.GuildVoice) {
       await services.voiceChannelControl.cleanup(channel).catch((error) => logRecoverableError("Recoverable asynchronous operation failed", error));
     }

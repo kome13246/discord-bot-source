@@ -173,6 +173,30 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName("rtc")
+      .setDescription("リアルタイムチャット機能のカテゴリ・親VC・受付CH・利用中ロールを設定します")
+      .addChannelOption((option) => option
+        .setName("category")
+        .setDescription("リアルタイムチャット用のVCカテゴリ")
+        .addChannelTypes(ChannelType.GuildCategory)
+        .setRequired(false))
+      .addChannelOption((option) => option
+        .setName("parent_channel")
+        .setDescription("チャットルーム作成用の親VC")
+        .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+        .setRequired(false))
+      .addChannelOption((option) => option
+        .setName("reception_channel")
+        .setDescription("VC移動受付パネルを設置するテキストCH")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(false))
+      .addRoleOption((option) => option
+        .setName("active_role")
+        .setDescription("リアルタイムチャット利用中に付与するロール")
+        .setRequired(false)),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName("kokuchi")
       .setDescription("会話練習会告知の送信先設定を保存します")
       .addChannelOption((option) =>
@@ -492,6 +516,7 @@ export const checkBotCommand = new SlashCommandBuilder()
       { name: "forms", value: "forms" },
       { name: "profile", value: "profile" },
       { name: "voice_control", value: "voice_control" },
+      { name: "rtc", value: "rtc" },
       { name: "status_board", value: "status_board" },
       { name: "fukyo", value: "fukyo" },
     )
