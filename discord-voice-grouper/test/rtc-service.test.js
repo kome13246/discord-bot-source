@@ -55,7 +55,7 @@ function createChannel(id, name = `room-${id}`) {
   };
 }
 
-function createFixture({ now = () => 0, timers = null, ensureVoiceControlPanel = null } = {}) {
+function createFixture({ now = () => 0, timers = null, ensureVoiceControlPanel = null, roomModel: roomModelOverride = null, settings: settingsOverride = {} } = {}) {
   const room = createChannel("room-a", "💬｜チャットルーム-1");
   const channels = new Map([[room.id, room]]);
   const guild = {
@@ -65,12 +65,13 @@ function createFixture({ now = () => 0, timers = null, ensureVoiceControlPanel =
     roles: { cache: new Map() },
   };
   const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
-  const roomModel = createRoomModel([{ guildId: guild.id, channelId: room.id, sourceParentChannelId: "parent", categoryIdAtCreation: "category", name: room.name }]);
+  const roomModel = roomModelOverride ?? createRoomModel([{ guildId: guild.id, channelId: room.id, sourceParentChannelId: "parent", categoryIdAtCreation: "category", name: room.name }]);
   const settings = {
     rtcCategoryId: "category",
     rtcParentChannelId: "parent",
     rtcReceptionChannelId: "reception",
     rtcActiveRoleId: "active",
+    ...settingsOverride,
   };
   const service = createRtcService({
     client,
@@ -183,6 +184,76 @@ test("親VCの重複VoiceStateUpdateは同じ生成ルームを再利用する",
   await fixture.service.handleVoiceStateUpdate({ guild: fixture.guild, channelId: null, member }, state);
   await fixture.service.handleVoiceStateUpdate({ guild: fixture.guild, channelId: null, member }, state);
   assert.equal(created, 1);
+});
+
+test("新規の親VC参加では生成前のRTCルームDB lookupを行わない", async () => {
+  const roomModel = createRoomModel();
+  let lookups = 0;
+  roomModel.findOne = async () => {
+    lookups += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return null;
+  };
+  const fixture = createFixture({ roomModel });
+  const parent = createChannel("parent", "チャットルームを作成");
+  fixture.guild.channels.cache.set(parent.id, parent);
+  fixture.guild.channels.create = async (options) => {
+    const child = createChannel("generated-fast", options.name);
+    child.parentId = options.parent;
+    fixture.guild.channels.cache.set(child.id, child);
+    return child;
+  };
+  const member = createMember("fast-user", parent);
+  member.guild = fixture.guild;
+  member.voice.setChannel = async (channel) => {
+    member.voice.channelId = channel.id;
+    member.voice.channel = channel;
+    channel.members.set(member.id, member);
+  };
+  await fixture.service.handleVoiceStateUpdate(
+    { guild: fixture.guild, channelId: null, member },
+    { guild: fixture.guild, channelId: parent.id, member },
+  );
+  assert.equal(lookups, 0);
+});
+
+test("通常のRTC移動ではold/new room lookupを並行して開始する", async () => {
+  const roomModel = createRoomModel([
+    { guildId: "guild-1", channelId: "old-room", sourceParentChannelId: "parent", categoryIdAtCreation: "category" },
+    { guildId: "guild-1", channelId: "new-room", sourceParentChannelId: "parent", categoryIdAtCreation: "category" },
+  ]);
+  let activeLookups = 0;
+  let maxActiveLookups = 0;
+  const findOne = roomModel.findOne;
+  roomModel.findOne = async (query) => {
+    activeLookups += 1;
+    maxActiveLookups = Math.max(maxActiveLookups, activeLookups);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const row = findOne(query);
+    activeLookups -= 1;
+    return row;
+  };
+  const scheduled = [];
+  const fixture = createFixture({
+    roomModel,
+    timers: {
+      set(callback, delay) { const timer = { callback, delay, cleared: false }; scheduled.push(timer); return timer; },
+      clear(timer) { if (timer) timer.cleared = true; },
+    },
+  });
+  const oldChannel = createChannel("old-room");
+  const newChannel = createChannel("new-room");
+  fixture.guild.channels.cache.set(oldChannel.id, oldChannel);
+  fixture.guild.channels.cache.set(newChannel.id, newChannel);
+  const member = createMember("move-user", newChannel);
+  member.guild = fixture.guild;
+  newChannel.members.set(member.id, member);
+  await fixture.service.handleVoiceStateUpdate(
+    { guild: fixture.guild, channelId: oldChannel.id, member },
+    { guild: fixture.guild, channelId: newChannel.id, member },
+  );
+  assert.equal(maxActiveLookups, 2);
+  assert.deepEqual(scheduled.map((timer) => timer.delay), [5_000]);
 });
 
 test("生成後の移動失敗で空の子VCを削除できた場合は記録も補償削除する", async () => {
@@ -312,6 +383,70 @@ test("退出後の空室は再確認して削除し、RtcRoom記録も掃除す�
   assert.deepEqual(deleted, ["RTC空室の自動削除"]);
   assert.equal(fixture.roomModel.rows.has(`${fixture.guild.id}:${fixture.room.id}`), false);
   assert.equal(fixture.service.isRtcChannel(fixture.guild.id, fixture.room.id), false);
+});
+
+test("Botだけが残ったRTC子VCも人間0人の最終再確認後に削除する", async () => {
+  const fixture = createFixture();
+  const deleted = [];
+  fixture.room.delete = async (reason) => { deleted.push(reason); };
+  fixture.room.members.set("bot", { id: "bot", user: { id: "bot", bot: true } });
+  const result = await fixture.service.maybeNotify(fixture.guild.id, fixture.room.id);
+  assert.equal(result.status, "deleted");
+  assert.deepEqual(deleted, ["RTC空室の自動削除"]);
+  assert.equal(fixture.roomModel.rows.has(`${fixture.guild.id}:${fixture.room.id}`), false);
+});
+
+test("RTC空室削除の再確認で人間が戻った場合はBotだけの判定を成立させない", async () => {
+  const fixture = createFixture();
+  const deleted = [];
+  fixture.room.delete = async (reason) => { deleted.push(reason); };
+  fixture.room.members.set("bot", { id: "bot", user: { id: "bot", bot: true } });
+  const originalGet = fixture.guild.channels.cache.get.bind(fixture.guild.channels.cache);
+  let reads = 0;
+  fixture.guild.channels.cache.get = (id) => {
+    const channel = originalGet(id);
+    if (id === fixture.room.id && ++reads === 2) {
+      const human = createMember("returned", fixture.room);
+      fixture.room.members.set(human.id, human);
+    }
+    return channel;
+  };
+  const result = await fixture.service.maybeNotify(fixture.guild.id, fixture.room.id);
+  assert.equal(result.status, "not-ready");
+  assert.deepEqual(deleted, []);
+  assert.equal(fixture.roomModel.rows.has(`${fixture.guild.id}:${fixture.room.id}`), true);
+});
+
+test("RTC子VCのメンバーコレクション不明時は空室削除を行わない", async () => {
+  const fixture = createFixture();
+  const deleted = [];
+  fixture.room.delete = async (reason) => { deleted.push(reason); };
+  fixture.room.members = undefined;
+  const result = await fixture.service.maybeNotify(fixture.guild.id, fixture.room.id);
+  assert.equal(result.status, "not-ready");
+  assert.deepEqual(deleted, []);
+  assert.equal(fixture.roomModel.rows.has(`${fixture.guild.id}:${fixture.room.id}`), true);
+});
+
+test("起動復旧の空またはBotのみのRTC子VCは5秒後に再確認し、人間復帰なら削除しない", async () => {
+  let current = 0;
+  const scheduled = [];
+  const fixture = createFixture({
+    now: () => current,
+    timers: {
+      set(callback, delay) { const timer = { callback, delay, cleared: false }; scheduled.push(timer); return timer; },
+      clear(timer) { if (timer) timer.cleared = true; },
+    },
+  });
+  fixture.room.members.set("bot", { id: "bot", user: { id: "bot", bot: true } });
+  fixture.room.delete = async () => { throw new Error("should remain when human returns"); };
+  await fixture.service.restore([fixture.guild]);
+  assert.deepEqual(scheduled.map((timer) => timer.delay), [5_000]);
+  const human = createMember("returned-after-restart", fixture.room);
+  fixture.room.members.set(human.id, human);
+  current = 5_000;
+  await scheduled[0].callback();
+  assert.equal(fixture.roomModel.rows.has(`${fixture.guild.id}:${fixture.room.id}`), true);
 });
 
 test("起動復旧は確定欠損VCの孤児記録だけを削除し、一時取得失敗は保持する", async () => {
