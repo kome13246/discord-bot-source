@@ -24,7 +24,7 @@ export const RTC_PANEL_CONTENT = [
   "登録を取り消したい場合は「キャンセル」を押してください。",
 ].join("\n");
 
-const ROOM_NAME_PREFIX = "💬｜チャットルーム-";
+const ROOM_NAME_PREFIX = "💬チャット-";
 const EXIT_RECHECK_MS = 5_000;
 
 function asPlain(value) {
@@ -39,6 +39,10 @@ function isHuman(member) {
 
 function voiceMembers(channel) {
   return [...(channel?.members?.values?.() ?? [])].filter(isHuman);
+}
+
+function hasMemberCollection(channel) {
+  return typeof channel?.members?.values === "function";
 }
 
 function voiceChannel(channel) {
@@ -533,16 +537,16 @@ export function createRtcService({
       for (const memberId of [...state.ready]) {
         if (!members.some((member) => member.id === memberId)) removeReady(guildId, channelId, memberId);
       }
-      // A room created by this service is safe to remove only when the whole
-      // Discord voice-channel member collection is empty (including the bot).
-      // Re-fetch immediately before deletion so a join racing the timer keeps
-      // the room and its durable identity.
-      if (resolved.channel.members && resolved.channel.members.size === 0) {
+      // A room created by this service is safe to remove only when the Discord
+      // voice-channel member collection has no human members. Re-fetch
+      // immediately before deletion so a join racing the timer keeps the room
+      // and its durable identity.
+      if (hasMemberCollection(resolved.channel) && voiceMembers(resolved.channel).length === 0) {
         const rechecked = await getRtcChannel(guild, channelId);
         const stillTracked = rechecked?.row?.guildId === guildId
           && rechecked.row.channelId === channelId
-          && rechecked.channel.members
-          && rechecked.channel.members.size === 0;
+          && hasMemberCollection(rechecked.channel)
+          && voiceMembers(rechecked.channel).length === 0;
         if (stillTracked) {
           try {
             if (typeof rechecked.channel.delete !== "function") return { status: "delete-failed" };
@@ -689,13 +693,25 @@ export function createRtcService({
     const settings = await getGuildSettings(guild.id).catch(() => ({}));
     const oldId = safeId(oldState?.channelId);
     const newId = safeId(newState?.channelId);
+    const rtcParentId = safeId(settings?.rtcParentChannelId);
     const assignmentKey = `${guild.id}:${member.id}`;
     const assignedChannelId = parentAssignments.get(assignmentKey);
     if (assignedChannelId && oldId === assignedChannelId && newId !== assignedChannelId) {
       parentAssignments.delete(assignmentKey);
     }
-    const oldRtc = oldId ? await findRoom(guild.id, oldId) : null;
-    const newRtc = newId ? await findRoom(guild.id, newId) : null;
+    if (newId && newId === rtcParentId && newId !== oldId && !oldId) {
+      // A new join from outside voice cannot belong to an RTC child.  Avoid
+      // two guaranteed-miss room lookups before starting the create/move path.
+      await ensureRoomForMember(oldState, newState, settings);
+      await syncMemberRole(member, settings);
+      return;
+    }
+    // The two room identities are independent.  Resolve them together for
+    // ordinary moves, while the configured parent itself is never a child.
+    const [oldRtc, newRtc] = await Promise.all([
+      oldId ? findRoom(guild.id, oldId) : Promise.resolve(null),
+      newId && newId !== rtcParentId ? findRoom(guild.id, newId) : Promise.resolve(null),
+    ]);
     if (oldRtc && oldId !== newId) {
       getState(roomKey(guild.id, oldId)).generation += 1;
       removeReady(guild.id, oldId, member.id);
@@ -707,7 +723,7 @@ export function createRtcService({
       getState(roomKey(guild.id, newId)).generation += 1;
       removeReady(guild.id, newId, member.id);
     }
-    if (newId && newId === safeId(settings?.rtcParentChannelId) && newId !== oldId) {
+    if (newId && newId === rtcParentId && newId !== oldId) {
       await ensureRoomForMember(oldState, newState, settings);
     }
     await syncMemberRole(member, settings);
@@ -823,6 +839,17 @@ export function createRtcService({
               }
             } catch (error) {
               logger.warn?.(`RTC VCコントロールパネル復旧に失敗しました: guild=${guild.id} channel=${channel.id} error=${error?.message ?? error}`);
+            }
+            if (hasMemberCollection(channel) && voiceMembers(channel).length === 0) {
+              // Startup recovery follows the same five-second recheck as a
+              // human departure; a returning human can keep the room alive.
+              scheduleRoomCheck(guild.id, channel.id);
+            }
+          }
+        } else {
+          for (const channel of validRoomChannels) {
+            if (hasMemberCollection(channel) && voiceMembers(channel).length === 0) {
+              scheduleRoomCheck(guild.id, channel.id);
             }
           }
         }
