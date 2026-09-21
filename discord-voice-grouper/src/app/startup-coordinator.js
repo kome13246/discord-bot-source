@@ -1,5 +1,16 @@
-export async function settleStartupTasks(tasks) {
-  const results = await Promise.allSettled(tasks.map((task) => task.run()));
+export async function settleStartupTasks(tasks, logger = null) {
+  const results = await Promise.allSettled(tasks.map(async (task) => {
+    const startedAt = Date.now();
+    logger?.log?.(`Startup task started: ${task.name}`);
+    try {
+      const result = await task.run();
+      logger?.log?.(`Startup task completed: ${task.name} durationMs=${Date.now() - startedAt}`);
+      return result;
+    } catch (error) {
+      logger?.error?.(`Startup task failed: ${task.name} durationMs=${Date.now() - startedAt}`, error);
+      throw error;
+    }
+  }));
   return results.map((result, index) => ({
     name: tasks[index].name,
     ...result,
@@ -30,21 +41,25 @@ export function createReadyHandler({
   return async function handleReady(readyClient) {
     clearReadyWatchdog();
     logger.log(`Logged in as ${readyClient.user.tag}`);
-    await migrate().catch((error) => logger.error("Failed to migrate kokuchi event state:", error));
+    logger.log("Startup migration started: kokuchi event state");
+    await migrate().then(
+      () => logger.log("Startup migration completed: kokuchi event state"),
+      (error) => logger.error("Failed to migrate kokuchi event state:", error),
+    );
 
     // Configuration apply jobs can touch the same Discord resources as panel
     // and VC restoration.  Run that queue in its own settled phase first;
     // keeping both sets in one Promise.allSettled would reintroduce a startup
     // race where an old revision restores over a just-applied setting.
     const results = [
-      ...await settleStartupTasks(settingsApplyTasks),
-      ...await settleStartupTasks(restoreTasks),
-      ...await settleStartupTasks(lateRestoreTasks),
+      ...await settleStartupTasks(settingsApplyTasks, logger),
+      ...await settleStartupTasks(restoreTasks, logger),
+      ...await settleStartupTasks(lateRestoreTasks, logger),
       // Workers must not start until every Discord-facing restore task has
       // settled.  In particular, start() registers a timer before returning,
       // so putting it in lateRestoreTasks still allows the first worker tick
       // to race a long late restore.
-      ...await settleStartupTasks(workerStartTasks),
+      ...await settleStartupTasks(workerStartTasks, logger),
     ];
     const failures = results
       .filter((result) => result.status === "rejected")
@@ -60,20 +75,29 @@ export function createReadyHandler({
       failed: failures.length > 0,
       failures,
     });
+    logger.log(`Startup restore completed: failed=${failures.length > 0} failureCount=${failures.length}`);
 
+    logger.log("Startup restore health persistence started");
     await recordStartupRestore({
       results: results.map(({ name, ...result }) => ({ ...result, name })),
       completedAt: now(),
-    }).catch((error) => logger.error("Failed to persist startup restore health:", error));
+    }).then(
+      () => logger.log("Startup restore health persistence completed"),
+      (error) => logger.error("Failed to persist startup restore health:", error),
+    );
 
     statusBoard.start(readyClient);
+    logger.log("Startup status board restoration started");
     await statusBoard.restore(readyClient).catch((error) => logger.error("Failed to restore operational status boards:", error));
+    logger.log("Startup status board restoration settled");
 
     if (shouldSendMongoSuccessLog()) {
       clearMongoSuccessLog();
       void (async () => {
+        logger.log("MongoDB startup notification started");
         const sent = await sendMongoStartupEmbed({ success: true });
         if (!sent) logger.warn("MongoDB connected successfully, but startup log channel could not be resolved or used.");
+        else logger.log("MongoDB startup notification sent");
       })().catch((error) => logger.error("Failed to send MongoDB success log embed:", error));
     }
 
