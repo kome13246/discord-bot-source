@@ -32,6 +32,11 @@ export function registerDiscordEventHandlers({
       void handlers.handleOteboRecruitmentPanelMessage(message).catch((error) => {
         logRecoverableError("Otebo recruitment panel message processing failed", error);
       });
+      if (typeof handlers.handleDiaryMessage === "function") {
+        void handlers.handleDiaryMessage(message).catch((error) => {
+          logRecoverableError("Diary message processing failed", error);
+        });
+      }
     } catch (error) {
       logger.error("Message processing failed", {
         guildId: message.guildId ?? null,
@@ -57,6 +62,11 @@ export function registerDiscordEventHandlers({
       await services.vcDm.handleMemberRemove(member);
     } catch (error) {
       logRecoverableError("VC DM member-remove processing failed", error);
+    }
+    try {
+      await services.diary?.handleMemberRemove?.(member);
+    } catch (error) {
+      logRecoverableError("Diary member-remove processing failed", error);
     }
   });
 

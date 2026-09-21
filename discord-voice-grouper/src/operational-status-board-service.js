@@ -106,9 +106,10 @@ export function buildOperationalStatusPayload(snapshot) {
 
   const operationsEmbed = new EmbedBuilder()
     .setTitle("自動投稿・パネル・VC")
-    .setColor(severityColor[aggregateSeverity([modules.automation, modules.panels, modules.voice, modules.vcDm])] ?? severityColor.unknown)
+    .setColor(severityColor[aggregateSeverity([modules.automation, modules.diary, modules.panels, modules.voice, modules.vcDm])] ?? severityColor.unknown)
     .addFields(
       moduleField(modules.automation),
+      ...(modules.diary ? [moduleField(modules.diary)] : []),
       moduleField(modules.panels),
       moduleField(modules.voice),
       ...(modules.vcDm ? [moduleField(modules.vcDm)] : []),

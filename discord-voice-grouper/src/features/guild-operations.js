@@ -220,6 +220,11 @@ export function createGuildOperationsFeature(dependencies) {
       await fukyoThemeService.updateSetting(interaction);
       return;
     }
+
+    if (subcommand === "diary") {
+      await handleDiarySetting(interaction);
+      return;
+    }
   
     if (subcommand === "vc_control") {
       const category = interaction.options.getChannel("category", false);
@@ -737,6 +742,61 @@ export function createGuildOperationsFeature(dependencies) {
     if (!settings) return;
     await replyOrFollowUp(interaction, {
       content: `リアルタイムチャット設定を保存しました。${applyStatusText(settings)}\n\n${formatSettings(settings)}`,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+  }
+
+  async function handleDiarySetting(interaction) {
+    const enabled = interaction.options.getBoolean("enabled", false);
+    const diaryChannel = interaction.options.getChannel("diary_channel", false);
+    const receptionChannel = interaction.options.getChannel("reception_channel", false);
+    const participantRole = interaction.options.getRole("participant_role", false);
+    const maxDaily = interaction.options.getInteger("max_daily", false);
+    const minIntervalDays = interaction.options.getInteger("min_interval_days", false);
+    const patch = {};
+    if (enabled !== null) patch.diaryEnabled = enabled;
+    if (diaryChannel) patch.diaryChannelId = diaryChannel.id;
+    if (receptionChannel) patch.diaryReceptionChannelId = receptionChannel.id;
+    if (participantRole) {
+      const roleError = await validateVoiceParticipantRole(interaction.guild, participantRole);
+      if (roleError) {
+        await replyOrFollowUp(interaction, { content: roleError, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+        return;
+      }
+      patch.diaryParticipantRoleId = participantRole.id;
+    }
+    if (maxDaily !== null) patch.diaryMaxDaily = maxDaily;
+    if (minIntervalDays !== null) patch.diaryMinIntervalDays = minIntervalDays;
+    if (Object.keys(patch).length === 0) {
+      await replyOrFollowUp(interaction, { content: "変更する交換日記設定を1つ以上指定してください。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+      return;
+    }
+    if (diaryChannel || receptionChannel) {
+      const channels = [diaryChannel, receptionChannel].filter(Boolean);
+      const botMember = interaction.guild.members.me ?? await interaction.guild.members.fetchMe().catch(() => null);
+      for (const channel of channels) {
+        const permissions = channel.permissionsFor?.(botMember);
+        const isText = typeof channel.isTextBased === "function"
+          ? channel.isTextBased()
+          : [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type);
+        if (!isText || permissions?.has?.(PermissionFlagsBits.ViewChannel) === false || permissions?.has?.(PermissionFlagsBits.SendMessages) === false || permissions?.has?.(PermissionFlagsBits.ReadMessageHistory) === false) {
+          await replyOrFollowUp(interaction, { content: "交換日記のチャンネルは、Botが閲覧・送信・履歴閲覧できるテキストチャンネルを指定してください。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+          return;
+        }
+      }
+    }
+    const current = await getGuildSettings(interaction.guildId);
+    const prospective = { ...current, ...patch };
+    if (prospective.diaryEnabled === true
+      && (!prospective.diaryChannelId || !prospective.diaryReceptionChannelId || !prospective.diaryParticipantRoleId)) {
+      await replyOrFollowUp(interaction, { content: "交換日記を有効にするには、日記CH・受付CH・参加者ロールをすべて設定してください。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+      return;
+    }
+    const settings = await saveAdminConfiguration(interaction, current, patch, "diary-setting");
+    if (!settings) return;
+    await replyOrFollowUp(interaction, {
+      content: `交換日記設定を保存しました。${applyStatusText(settings)}\n\n機能: ${settings.diaryEnabled ? "有効" : "無効"}\n日記CH: ${settings.diaryChannelId ? `<#${settings.diaryChannelId}>` : "未設定"}\n受付CH: ${settings.diaryReceptionChannelId ? `<#${settings.diaryReceptionChannelId}>` : "未設定"}\n参加者ロール: ${settings.diaryParticipantRoleId ? `<@&${settings.diaryParticipantRoleId}>` : "未設定"}\n1日の最大指名人数: ${settings.diaryMaxDaily}\n最低再指名間隔: ${settings.diaryMinIntervalDays}日`,
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });

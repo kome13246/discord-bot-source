@@ -38,6 +38,7 @@ export function createInteractionHandler({
       if (interaction.customId.startsWith("auto_split:")) return handlers.handleAutoSplitButton(interaction);
       if (interaction.customId.startsWith("suggest_topic:")) return handlers.handleSuggestTopicButton(interaction);
       if (interaction.customId.startsWith("feedback_form_button:")) return handlers.handleFeedbackFormButton(interaction);
+      if (interaction.customId === ids.diaryJoin || interaction.customId === ids.diaryLeave) return handlers.handleDiaryButton(interaction);
 
       if (
         interaction.customId === ids.callWaitJoin
