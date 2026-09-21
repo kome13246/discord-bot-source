@@ -162,3 +162,21 @@ test("Interactionルーターはsetupのチャンネル選択・ロール選択�
   }));
   assert.deepEqual(calls, ["handleSetupInteraction", "handleSetupInteraction"]);
 });
+
+test("ボタン処理の非同期エラーを共通エラー処理へ渡す", async () => {
+  const failure = new Error("reply failed");
+  const errors = [];
+  const route = createInteractionHandler({
+    isShuttingDown: () => false,
+    messageFlags: { Ephemeral: 64 },
+    services: {
+      vcDm: { handleInteraction: async () => { throw failure; } },
+    },
+    handlers: {},
+    ids,
+    onError: async (_interaction, error) => { errors.push(error); },
+  });
+
+  await route(interaction({ customId: "vcdm:panel:1", isButton: () => true }));
+  assert.deepEqual(errors, [failure]);
+});

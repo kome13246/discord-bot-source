@@ -1444,7 +1444,30 @@ registerDiscordEventHandlers({
   },
 });
 
-client.on(Events.InteractionCreate, createInteractionHandler({
+client.rest.on("rateLimited", (limit) => {
+  console.warn("Discord REST rate limited", {
+    method: limit.method,
+    route: limit.route,
+    scope: limit.scope,
+    global: limit.global,
+    retryAfterMs: limit.retryAfter,
+  });
+});
+client.rest.on("response", (request, response) => {
+  if (![401, 403, 429].includes(response.status)) return;
+  const header = (name) => response.headers?.get?.(name) ?? null;
+  console.warn("Discord REST error response", {
+    status: response.status,
+    method: request.method,
+    route: request.route,
+    contentType: header("content-type"),
+    rateLimitScope: header("x-ratelimit-scope"),
+    retryAfter: header("retry-after"),
+    cfRay: header("cf-ray"),
+  });
+});
+
+const interactionHandler = createInteractionHandler({
   isShuttingDown,
   messageFlags: MessageFlags,
   services: {
@@ -1549,7 +1572,12 @@ client.on(Events.InteractionCreate, createInteractionHandler({
         });
       }
     }
-    console.error(error);
+    interaction.__handlingFailed = true;
+    console.error("Interaction handler failed", {
+      interactionId: interaction.id ?? null,
+      command: interaction.commandName ?? interaction.customId?.split(":")[0] ?? null,
+      error: error?.stack ?? String(error),
+    });
     await replySafely(interaction, "処理中にエラーが発生しました。Renderのログを確認してください。");
   },
   onFinally: async (interaction) => {
@@ -1557,7 +1585,44 @@ client.on(Events.InteractionCreate, createInteractionHandler({
       || interaction.customId?.startsWith?.("operational:");
     if (interaction.guildId && !isOperationalInteraction) requestOperationalStatusRefresh(interaction.guildId, "interaction");
   },
-}));
+});
+client.on(Events.InteractionCreate, async (interaction) => {
+  const startedAt = Date.now();
+  const context = {
+    interactionId: interaction.id ?? null,
+    guildId: interaction.guildId ?? null,
+    command: interaction.commandName ?? interaction.customId?.split(":")[0] ?? null,
+    type: interaction.type ?? null,
+  };
+  console.log("Interaction received", context);
+  const slowTimer = setTimeout(() => {
+    console.warn("Interaction still processing", {
+      ...context,
+      durationMs: Date.now() - startedAt,
+      deferred: Boolean(interaction.deferred),
+      replied: Boolean(interaction.replied),
+    });
+  }, 2_500);
+  slowTimer.unref?.();
+  try {
+    await interactionHandler(interaction);
+    console.log("Interaction settled", {
+      ...context,
+      durationMs: Date.now() - startedAt,
+      handlerFailed: Boolean(interaction.__handlingFailed),
+      deferred: Boolean(interaction.deferred),
+      replied: Boolean(interaction.replied),
+    });
+  } catch (error) {
+    console.error("Interaction unhandled failure", {
+      ...context,
+      durationMs: Date.now() - startedAt,
+      error: error?.stack ?? String(error),
+    });
+  } finally {
+    clearTimeout(slowTimer);
+  }
+});
 
   async function resolveStartupLogChannelId() {
     if (PB_LOG_CHANNEL_ID?.trim()) {
@@ -1736,6 +1801,12 @@ async function testDiscordHttp() {
       );
 
       if (!response.ok) {
+        console.warn(`[Discord HTTP Test] ${test.name} response headers:`, {
+          contentType: response.headers.get("content-type"),
+          rateLimitScope: response.headers.get("x-ratelimit-scope"),
+          retryAfter: response.headers.get("retry-after"),
+          cfRay: response.headers.get("cf-ray"),
+        });
         console.log(
           `[Discord HTTP Test] ${test.name} body:`,
           body.slice(0, 500),

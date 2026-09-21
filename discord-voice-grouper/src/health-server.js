@@ -62,6 +62,7 @@ export function startHealthServer({
   getEventLoopLagMs = () => null,
 }) {
   const startedAt = now();
+  let lastHealthState = null;
   const server = createServer(async (request, response) => {
     const path = request.url?.split("?")[0] ?? "/";
 
@@ -98,6 +99,19 @@ export function startHealthServer({
           ? snapshot.body.ready ? 200 : 503
           : snapshot.statusCode;
       const body = snapshot.body;
+      const healthState = JSON.stringify({
+        statusCode,
+        discordReady: body.discordReady,
+        mongoReady: body.mongoReady,
+        startupRestoreCompleted: body.startupRestoreCompleted,
+        startupRestoreFailed: body.startupRestoreFailed,
+        shuttingDown: body.shuttingDown,
+      });
+      if (healthState !== lastHealthState) {
+        lastHealthState = healthState;
+        const log = statusCode === 200 ? logger.log : logger.warn;
+        log?.call(logger, `Health state changed: ${healthState}`);
+      }
 
       response.writeHead(statusCode, {
         "cache-control": "no-store",
