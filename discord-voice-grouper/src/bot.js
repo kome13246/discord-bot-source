@@ -91,6 +91,10 @@ import { VcDmPanel } from "./models/vc-dm-panel.js";
 import { VcDmReminder } from "./models/vc-dm-reminder.js";
 import { RtcRoom } from "./models/rtc-room.js";
 import { RtcPanel } from "./models/rtc-panel.js";
+import { DiaryParticipant } from "./models/diary-participant.js";
+import { DiaryAssignment } from "./models/diary-assignment.js";
+import { DiaryPanel } from "./models/diary-panel.js";
+import { DiaryDailyRun } from "./models/diary-daily-run.js";
 import { BumpReminder } from "./models/bump-reminder.js";
 import { FukyoThemeState } from "./models/fukyo-theme-state.js";
 import { FukyoWeeklyPost } from "./models/fukyo-weekly-post.js";
@@ -138,6 +142,7 @@ import { createCallWaitSettingsReconciler } from "./callwait-settings-reconciler
 import { createReconciliationService } from "./reconciliation-service.js";
 import { createReconciliationRepairService } from "./reconciliation-repair-service.js";
 import { createSetupDraftService } from "./setup-service.js";
+import { createDiaryService, DIARY_JOIN_CUSTOM_ID, DIARY_LEAVE_CUSTOM_ID } from "./diary-service.js";
 import { toCurrentGroupMemberIds } from "./split-waiting-utils.js";
 import {
   canCloseGatheringVcAfterSplit,
@@ -348,6 +353,7 @@ const settingsValidationService = createSettingsValidationService({
 let settingsApplyService = null;
 let reconciliationService = null;
 let reconciliationRepairService = null;
+let diaryService = null;
 const configurationService = createConfigurationService({ logger: console, applyJobModel: SettingsApplyJob });
 const rawSaveVersionedGuildConfiguration = createEffectiveConfigurationWriter({
   updateConfiguration: configurationService.updateConfiguration,
@@ -1172,6 +1178,7 @@ const settingsApplyDispatcher = createSettingsApplyDispatcher({
   rescheduleCurrentKokuchiEvent,
   requestOperationalStatusRefresh,
   fukyoThemeService,
+  diaryService: { onSettingsChanged: (...args) => diaryService?.onSettingsChanged?.(...args) },
   callWaitReconciler: callWaitSettingsReconciler,
   logger: console,
 });
@@ -1278,6 +1285,19 @@ const guildOperationsFeature = createGuildOperationsFeature({
   rtcService,
   voiceMonitorSessions,
 });
+diaryService = createDiaryService({
+  client,
+  getGuildSettings,
+  saveGuildSettings,
+  saveRuntimeGuildSettings: saveGuildSettings,
+  participantModel: DiaryParticipant,
+  assignmentModel: DiaryAssignment,
+  panelModel: DiaryPanel,
+  dailyRunModel: DiaryDailyRun,
+  sendOperationalLog,
+  requestOperationalStatusRefresh,
+  logger: console,
+});
 function isOteboRecruitmentPanelDisplayAllowed(...args) { return guildOperationsFeature.isOteboRecruitmentPanelDisplayAllowed(...args); }
 function handleProfileRegistrationPanelMessage(...args) { return guildOperationsFeature.handleProfileRegistrationPanelMessage(...args); }
 function handleOteboRecruitmentPanelMessage(...args) { return guildOperationsFeature.handleOteboRecruitmentPanelMessage(...args); }
@@ -1366,12 +1386,14 @@ client.once(Events.ClientReady, createReadyHandler({
     { name: "voice-channel-control", run: () => voiceChannelControlService.restore(client) },
     { name: "rtc", run: () => rtcService.restore(client.guilds.cache.values()) },
     { name: "fukyo-theme", run: () => fukyoThemeService.restore(client) },
+    { name: "diary", run: () => diaryService.restore() },
   ],
   lateRestoreTasks: [
     { name: "otebo-recruitment-panel", run: () => oteboRecruitmentPanelService.restore(client) },
   ],
   workerStartTasks: [
     { name: "settings-apply-worker", run: () => settingsApplyService?.start() },
+    { name: "diary-worker", run: () => diaryService.start() },
   ],
   updateRestoreState: ({ completed, failed, failures }) => {
     startupRestoreCompleted = completed;
@@ -1402,6 +1424,7 @@ registerDiscordEventHandlers({
   logRecoverableError,
   services: {
     vcDm: vcDmService,
+    diary: diaryService,
     oteboRecruitmentPanel: oteboRecruitmentPanelService,
     voiceChannelControl: voiceChannelControlService,
     rtc: rtcService,
@@ -1411,6 +1434,7 @@ registerDiscordEventHandlers({
     handleTopicRequestMessage,
     handleProfileRegistrationPanelMessage,
     handleOteboRecruitmentPanelMessage,
+    handleDiaryMessage: (message) => diaryService.handleMessage(message),
     handleProfileVoiceState: (oldState, newState) => handleProfileVoiceState(
       oldState,
       newState,
@@ -1444,6 +1468,7 @@ client.on(Events.InteractionCreate, createInteractionHandler({
     handleAutoSplitButton,
     handleSuggestTopicButton,
     handleFeedbackFormButton: feedbackFormsFeature.handleButton,
+    handleDiaryButton: (interaction) => diaryService.handleButton(interaction),
     handleCallWaitButton,
     handleKokuchiReservationCancel,
     handleOteboButton,
@@ -1488,6 +1513,8 @@ client.on(Events.InteractionCreate, createInteractionHandler({
     callWaitInterestSelect: CALL_WAIT_INTEREST_SELECT_CUSTOM_ID,
     splitReviewModal: SPLIT_REVIEW_MODAL,
     oteboNoteModal: OTEBO_NOTE_MODAL_CUSTOM_ID,
+    diaryJoin: DIARY_JOIN_CUSTOM_ID,
+    diaryLeave: DIARY_LEAVE_CUSTOM_ID,
   },
   onError: async (interaction, error) => {
     if (interaction.commandName === "splitvc") {
@@ -1851,6 +1878,10 @@ async function loginDiscordClient() {
       VcDmReminder.createIndexes(),
       RtcRoom.createIndexes(),
       RtcPanel.createIndexes(),
+      DiaryParticipant.createIndexes(),
+      DiaryAssignment.createIndexes(),
+      DiaryPanel.createIndexes(),
+      DiaryDailyRun.createIndexes(),
     ]);
     try {
       await configurationService.backfillGuildSettings();
@@ -1875,6 +1906,7 @@ async function loginDiscordClient() {
       () => operationalStatusBoardService.stop(),
       () => rtcService.shutdown(),
       () => fukyoThemeService.shutdown(),
+      () => diaryService.stop(),
       () => profileRegistrationPanelService.shutdown(),
     ],
     clearStandaloneTimers: [

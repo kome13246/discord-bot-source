@@ -16,6 +16,7 @@ import { SplitProcessSession } from "./models/split-process-session.js";
 import { VoiceChannelControl } from "./models/voice-channel-control.js";
 import { VoiceExitSchedule } from "./models/voice-exit-schedule.js";
 import { VoiceParticipantRoleGrant } from "./models/voice-participant-role-grant.js";
+import { DiaryParticipant } from "./models/diary-participant.js";
 import { isVoiceChannelControlTarget } from "./voice-channel-control-service.js";
 import { getPermissionOverwriteState } from "./kokuchi-utils.js";
 import {
@@ -31,7 +32,7 @@ const ACTIVE_SPLIT_STATUSES = ["active", "finish_notice_pending", "role_remove_p
 const OBSERVED_SPLIT_STATUSES = [...ACTIVE_SPLIT_STATUSES, "failed", "cleanup_required"];
 const ACTIVE_ACTION_STATUSES = ["pending", "running"];
 const EXPIRED_PROMPT_STATES = ["active", "open", "pending", "processing", "evaluating", "role_granting", "failed"];
-const MODULE_KEYS = ["system", "kokuchi", "splitvc", "recruitment", "automation", "panels", "voice", "vcDm"];
+const MODULE_KEYS = ["system", "kokuchi", "splitvc", "recruitment", "automation", "diary", "panels", "voice", "vcDm"];
 const INCIDENT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_STATUS_RECORDS = 100;
 const STATUS_QUERY_TIMEOUT_MS = 5_000;
@@ -58,6 +59,7 @@ const defaultModels = {
   VoiceChannelControl,
   VoiceExitSchedule,
   VoiceParticipantRoleGrant,
+  DiaryParticipant,
 };
 
 function truncate(value, max = 500) {
@@ -611,6 +613,27 @@ async function collectSnapshot(guild, dependencies, options = {}) {
 
   try {
     if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
+    const participantCount = await readCount(models.DiaryParticipant, { guildId: guild.id });
+    const enabled = settings?.diaryEnabled === true;
+    const issues = [];
+    if (enabled && !settings?.diaryChannelId) issues.push(issue("diary_channel_missing", "交換日記は有効ですが日記CHが未設定です。", true));
+    if (enabled && !settings?.diaryReceptionChannelId) issues.push(issue("diary_reception_missing", "交換日記は有効ですが受付CHが未設定です。", true));
+    if (enabled && !settings?.diaryParticipantRoleId) issues.push(issue("diary_role_missing", "交換日記は有効ですが参加者ロールが未設定です。", true));
+    modules.diary = makeModule({
+      key: "diary",
+      label: "みんなで交換日記",
+      summary: enabled ? `交換日記有効 / 参加者 ${participantCount ?? 0}人` : `交換日記無効 / 参加者 ${participantCount ?? 0}人`,
+      details: { enabled, participantCount: participantCount ?? 0, diaryChannelId: settings?.diaryChannelId ?? null, receptionChannelId: settings?.diaryReceptionChannelId ?? null, participantRoleId: settings?.diaryParticipantRoleId ?? null },
+      issues,
+      disabled: !enabled,
+    });
+  } catch (error) {
+    unknownModule = true;
+    modules.diary = makeModule({ key: "diary", label: "みんなで交換日記", summary: "状態を取得できません。", issues: [issue("read_failed", truncate(error?.message ?? error), true)], unknown: true });
+  }
+
+  try {
+    if (db.status !== "connected") throw new Error(`MongoDB is ${db.status}`);
     const profilePanel = await readOne(models.ProfileRegistrationPanel, { guildId: guild.id });
     const vcPanelCount = await readCount(models.VoiceChannelControl, { guildId: guild.id }).catch(() => null);
     const targetVoiceChannels = [...(guild.channels?.cache?.values?.() ?? [])]
@@ -786,6 +809,7 @@ export function createOperationalStatusService({ getGuildSettings, client, getSt
   if (Object.keys(injectedModels).length > 0) {
     if (!("OteboRecruitmentPanel" in injectedModels)) models.OteboRecruitmentPanel = null;
     if (!("CallWaitRoleGeneration" in injectedModels)) models.CallWaitRoleGeneration = null;
+    if (!("DiaryParticipant" in injectedModels)) models.DiaryParticipant = null;
   }
   const dependencies = { getGuildSettings, client, getStartupState, getVoiceMonitorSessions, getVcDmStatus, models, getDatabaseStatus: getDatabaseStatusOverride, panelPresenceCache };
 
@@ -822,6 +846,7 @@ export async function getOperationalStatusSnapshot(guild, dependencies, options 
   if (Object.keys(injectedModels).length > 0) {
     if (!("OteboRecruitmentPanel" in injectedModels)) models.OteboRecruitmentPanel = null;
     if (!("CallWaitRoleGeneration" in injectedModels)) models.CallWaitRoleGeneration = null;
+    if (!("DiaryParticipant" in injectedModels)) models.DiaryParticipant = null;
   }
   return withTimeout(
     collectSnapshot(guild, { ...dependencies, models, panelPresenceCache: dependencies.panelPresenceCache ?? new Map() }, options),

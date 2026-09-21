@@ -20,6 +20,7 @@ export const CHECKBOT_FEATURES = Object.freeze([
   "rtc",
   "status_board",
   "fukyo",
+  "diary",
 ]);
 
 export const CHECKBOT_STATUSES = Object.freeze({
@@ -108,6 +109,7 @@ const STATUS_LABELS = Object.freeze({
   rtc: "rtc",
   status_board: "status_board",
   fukyo: "fukyo",
+  diary: "diary",
 });
 
 const permissionLabel = (name) => name.replaceAll(/([a-z])([A-Z])/g, "$1 $2");
@@ -892,6 +894,20 @@ async function validateFukyo(ctx) {
   }
 }
 
+async function validateDiary(ctx) {
+  const settings = ctx.settings ?? {};
+  const enabled = settings.diaryEnabled === true;
+  addCheck(ctx, "diary.enabled", "交換日記の有効状態", enabled ? CHECKBOT_STATUSES.OK : CHECKBOT_STATUSES.WARNING, enabled ? "交換日記は有効です。" : "交換日記は無効または未設定です。", { reason: enabled ? "enabled" : "disabled" });
+  await checkChannel(ctx, { key: "diary.channel", label: "交換日記CH", id: settings.diaryChannelId, kind: "text", permissions: TEXT_PERMISSIONS, required: enabled });
+  await checkChannel(ctx, { key: "diary.receptionChannel", label: "交換日記受付CH", id: settings.diaryReceptionChannelId, kind: "text", permissions: TEXT_PERMISSIONS, required: enabled });
+  await checkRole(ctx, { key: "diary.participantRole", label: "交換日記参加者ロール", id: settings.diaryParticipantRoleId, assign: true, required: enabled });
+  const maxDaily = Number(settings.diaryMaxDaily ?? 1);
+  addCheck(ctx, "diary.maxDaily", "1日の最大指名人数", Number.isInteger(maxDaily) && maxDaily >= 1 && maxDaily <= 10 ? CHECKBOT_STATUSES.OK : CHECKBOT_STATUSES.ERROR, `${Number.isFinite(maxDaily) ? maxDaily : "未設定"}人`, { reason: "range" });
+  const minInterval = Number(settings.diaryMinIntervalDays ?? 5);
+  addCheck(ctx, "diary.minIntervalDays", "最低再指名間隔", Number.isInteger(minInterval) && minInterval >= 1 && minInterval <= 30 ? CHECKBOT_STATUSES.OK : CHECKBOT_STATUSES.ERROR, `${Number.isFinite(minInterval) ? minInterval : "未設定"}日`, { reason: "range" });
+  if (enabled) await checkBotGuildPermission(ctx, "diary", "ManageRoles");
+}
+
 async function validateRtc(ctx) {
   const settings = ctx.settings ?? {};
   await checkChannel(ctx, {
@@ -948,6 +964,7 @@ async function runFeature(ctx, feature, getStatusBoard, statusBoardOverride = nu
     case "rtc": return validateRtc(ctx);
     case "status_board": return validateStatusBoard(ctx, getStatusBoard, statusBoardOverride);
     case "fukyo": return validateFukyo(ctx);
+    case "diary": return validateDiary(ctx);
     default: return undefined;
   }
 }

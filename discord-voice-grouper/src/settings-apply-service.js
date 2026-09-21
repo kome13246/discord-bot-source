@@ -106,6 +106,7 @@ export function classifyConfigurationChanges(changedKeys = []) {
     if (/^vcDm/.test(key)) features.add("vc_dm");
     if (/^(vcControl|voiceExitScheduleKeepMessage)/.test(key)) features.add("voice_control");
     if (/^(fukyo|wadaiTopics)/.test(key)) features.add("fukyo");
+    if (/^diary/.test(key)) features.add("diary");
     if (/^(form|review|logChannelId)/.test(key)) features.add("forms");
     if (/^rtc(?:CategoryId|ParentChannelId|ReceptionChannelId|ActiveRoleId)$/.test(key)) features.add("rtc");
     if (/^(split|tempRoleId|parentChannelId|childCategoryId|waitingVc|voiceParticipantRoleId|voiceReminder|finishMessage|transferWaitSeconds)/.test(key)) features.add("splitvc");
@@ -193,6 +194,7 @@ export function createSettingsApplyDispatcher({
   rescheduleCurrentKokuchiEvent = null,
   requestOperationalStatusRefresh = null,
   fukyoThemeService = null,
+  diaryService = null,
   callWaitReconciler = null,
   logger = console,
 } = {}) {
@@ -334,6 +336,13 @@ export function createSettingsApplyDispatcher({
         await requestOperationalStatusRefresh?.(guild.id, "settings-apply:fukyo");
         return { status: "applied", noOp: true };
       });
+    }
+    if (features.includes("diary")) {
+      await runMutating("diary", async () => diaryService?.onSettingsChanged?.(
+        guild,
+        settings,
+        context.previousSettings ?? context.current ?? null,
+      ) ?? { status: "applied", noOp: true });
     }
     if (features.includes("splitvc")) {
       await runMutating("voice-monitor", async () => {

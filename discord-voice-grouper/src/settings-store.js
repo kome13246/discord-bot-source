@@ -121,6 +121,17 @@ export function normalizeGuildSettings(settings = {}) {
     ? result.vcDmPanelChannelId : null;
   result.vcDmTargetCategoryId = typeof result.vcDmTargetCategoryId === "string" && /^\d{5,25}$/.test(result.vcDmTargetCategoryId)
     ? result.vcDmTargetCategoryId : null;
+  result.diaryEnabled = result.diaryEnabled === true;
+  result.diaryChannelId = typeof result.diaryChannelId === "string" && /^\d{5,25}$/.test(result.diaryChannelId)
+    ? result.diaryChannelId : null;
+  result.diaryReceptionChannelId = typeof result.diaryReceptionChannelId === "string" && /^\d{5,25}$/.test(result.diaryReceptionChannelId)
+    ? result.diaryReceptionChannelId : null;
+  result.diaryParticipantRoleId = typeof result.diaryParticipantRoleId === "string" && /^\d{5,25}$/.test(result.diaryParticipantRoleId)
+    ? result.diaryParticipantRoleId : null;
+  const diaryMaxDaily = Number(result.diaryMaxDaily);
+  result.diaryMaxDaily = Number.isInteger(diaryMaxDaily) && diaryMaxDaily >= 1 && diaryMaxDaily <= 10 ? diaryMaxDaily : 1;
+  const diaryMinIntervalDays = Number(result.diaryMinIntervalDays);
+  result.diaryMinIntervalDays = Number.isInteger(diaryMinIntervalDays) && diaryMinIntervalDays >= 1 && diaryMinIntervalDays <= 30 ? diaryMinIntervalDays : 5;
   return result;
 }
 

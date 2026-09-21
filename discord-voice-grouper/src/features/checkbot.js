@@ -53,6 +53,7 @@ function featureLabel(feature) {
     voice_control: "voice_control",
     status_board: "status_board",
     fukyo: "fukyo",
+    diary: "diary",
   }[feature] ?? feature;
 }
 

@@ -381,6 +381,41 @@ export const settingCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName("diary")
+      .setDescription("みんなで交換日記を設定します")
+      .addBooleanOption((option) => option
+        .setName("enabled")
+        .setDescription("交換日記機能を有効または無効にします")
+        .setRequired(false))
+      .addChannelOption((option) => option
+        .setName("diary_channel")
+        .setDescription("指名・日記投稿・雑談に使用するチャンネル")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(false))
+      .addChannelOption((option) => option
+        .setName("reception_channel")
+        .setDescription("参加・離脱ボタンを設置するチャンネル")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(false))
+      .addRoleOption((option) => option
+        .setName("participant_role")
+        .setDescription("交換日記参加者に付与するロール")
+        .setRequired(false))
+      .addIntegerOption((option) => option
+        .setName("max_daily")
+        .setDescription("1日の最大指名人数（1〜10）")
+        .setMinValue(1)
+        .setMaxValue(10)
+        .setRequired(false))
+      .addIntegerOption((option) => option
+        .setName("min_interval_days")
+        .setDescription("最低再指名間隔（日、1〜30）")
+        .setMinValue(1)
+        .setMaxValue(30)
+        .setRequired(false)),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName("profile")
       .setDescription("自己紹介チャンネルを設定します")
       .addChannelOption((option) =>
@@ -519,6 +554,7 @@ export const checkBotCommand = new SlashCommandBuilder()
       { name: "rtc", value: "rtc" },
       { name: "status_board", value: "status_board" },
       { name: "fukyo", value: "fukyo" },
+      { name: "diary", value: "diary" },
     )
     .setRequired(false));
 

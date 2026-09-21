@@ -65,6 +65,12 @@ export const ADMIN_CONFIGURATION_CATALOG = Object.freeze([
   "fukyoThemes",
   "wadaiTopics",
   "wadaiTopicsVersion",
+  "diaryEnabled",
+  "diaryChannelId",
+  "diaryReceptionChannelId",
+  "diaryParticipantRoleId",
+  "diaryMaxDaily",
+  "diaryMinIntervalDays",
 ]);
 
 export const ADMIN_CONFIGURATION_KEYS = new Set(ADMIN_CONFIGURATION_CATALOG);

@@ -10,6 +10,7 @@ import {
   CHECKBOT_STATUSES,
   createSettingsValidationService,
 } from "../src/settings-validation-service.js";
+import { classifyConfigurationChanges } from "../src/settings-apply-service.js";
 import { createCheckbotFeature, buildCheckbotEmbeds, embedTextLength, totalEmbedTextLength } from "../src/features/checkbot.js";
 
 const allPermissions = new PermissionsBitField([
@@ -124,6 +125,7 @@ test("/checkbot command requires ManageGuild and exposes every supported feature
     "rtc",
     "status_board",
     "fukyo",
+    "diary",
   ]);
   assert.ok(commands.some((command) => command.name === "checkbot"));
 });
@@ -145,12 +147,36 @@ test("all and every supported feature filter produce the expected reports", asyn
   const guild = guildFixture();
   const all = await service.validateGuild({ guild, settings: {}, feature: "all" });
   assert.deepEqual(all.reports.map((report) => report.feature), [
-    "splitvc", "kokuchi", "callwait", "vc_dm", "forms", "profile", "voice_control", "rtc", "status_board", "fukyo",
+    "splitvc", "kokuchi", "callwait", "vc_dm", "forms", "profile", "voice_control", "rtc", "status_board", "fukyo", "diary",
   ]);
   for (const feature of all.reports.map((report) => report.feature)) {
     const one = await service.validateGuild({ guild, settings: {}, feature });
     assert.deepEqual(one.reports.map((report) => report.feature), [feature]);
   }
+});
+
+test("diary configuration changes are classified independently and validation requires enabled resources", async () => {
+  assert.deepEqual(classifyConfigurationChanges(["diaryEnabled", "diaryChannelId", "diaryMaxDaily"]), ["diary"]);
+  const channel = textChannel("diary-channel");
+  const reception = textChannel("reception-channel");
+  const participantRole = role("diary-role");
+  const guild = guildFixture({ channels: [channel, reception], roles: [participantRole] });
+  const service = createSettingsValidationService();
+  const result = await service.validateGuild({
+    guild,
+    feature: "diary",
+    settings: {
+      diaryEnabled: true,
+      diaryChannelId: channel.id,
+      diaryReceptionChannelId: reception.id,
+      diaryParticipantRoleId: participantRole.id,
+      diaryMaxDaily: 2,
+      diaryMinIntervalDays: 5,
+    },
+  });
+  assert.equal(result.reports[0].feature, "diary");
+  assert.equal(result.reports[0].checks.find((check) => check.key === "diary.enabled").status, CHECKBOT_STATUSES.OK);
+  assert.equal(result.reports[0].checks.find((check) => check.key === "diary.maxDaily").status, CHECKBOT_STATUSES.OK);
 });
 
 test("fukyo validation checks enabled state, target channel, and effective send permissions", async () => {
