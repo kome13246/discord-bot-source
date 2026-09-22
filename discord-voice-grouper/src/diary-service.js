@@ -1821,6 +1821,47 @@ export function createDiaryService({
     return { status: "assigned", assigned, attempted: prepared.length, partial: assigned < prepared.length, uncertain, unresolved, specialNoPenalty };
   }
 
+  async function assignManualReplacement(guild, currentNow, slotKey) {
+    if (guildLocks.has(guild.id)) return { status: "busy" };
+    guildLocks.add(guild.id);
+    try {
+      const run = await findOne(dailyRunModel, { guildId: guild.id, slotKey });
+      if (run && run.status !== "completed") return { status: "not-settled" };
+      const freshSettings = await getSettings(guild.id);
+      if (freshSettings?.diaryEnabled !== true) return { status: "disabled" };
+      const history = await findMany(assignmentModel, { guildId: guild.id, slotKey });
+      if (history.some((assignment) => assignment.status !== "canceled" || assignment.sendState !== "failed" || !["leave", "guild-member-remove"].includes(assignment.cancelReason))) {
+        return { status: "not-settled" };
+      }
+      const participants = (await findMany(participantModel, { guildId: guild.id }, { joinedAt: 1 }))
+        .filter((participant) => !["pending", "failed"].includes(participant.leaveState));
+      await repairParticipantLastAssignments(guild.id, participants, freshSettings, guild);
+      const slotAt = diaryLatestDueSlot(currentNow).slotAt;
+      const selected = selectDiaryAssignees({
+        participants: participants
+          .filter((participant) => !history.some((assignment) => assignment.userId === participant.userId))
+          .map((participant) => ({
+            ...participant,
+            // Manual recovery may appoint someone who joined after 18:00.
+            // The assignment is still sent only at currentNow below.
+            joinedAt: asDate(participant.joinedAt)?.getTime() > slotAt.getTime() ? slotAt : participant.joinedAt,
+          })),
+        slotAt,
+        maxDaily: freshSettings.diaryMaxDaily,
+        minIntervalDays: freshSettings.diaryMinIntervalDays,
+        quota: 1,
+      });
+      if (selected.length === 0) return { status: "no-target" };
+      const result = await sendAssignments(guild, freshSettings, selected, slotAt, currentNow);
+      if (result.status === "assigned" && result.assigned > 0 && result.unresolved === 0) {
+        await operationalLog(guild, freshSettings, `📖 交換日記の手動指名：${slotKey} の対象者がいないため新しく指名しました。`);
+      }
+      return result;
+    } finally {
+      guildLocks.delete(guild.id);
+    }
+  }
+
   async function processGuild(guild, { at = now(), force = false } = {}) {
     if (!guild?.id || guildLocks.has(guild.id)) return { status: "busy" };
     guildLocks.add(guild.id);
@@ -1934,6 +1975,14 @@ export function createDiaryService({
           await interaction.editReply({ content: "今日の指名処理が確定していません。状態を確認してから再実行してください。", allowedMentions: { parse: [] } });
           return;
         }
+        const activeParticipants = await findMany(participantModel, { guildId: interaction.guild.id });
+        const activeParticipantIds = new Set(activeParticipants
+          .filter((participant) => !["pending", "failed"].includes(participant.leaveState))
+          .map((participant) => participant.userId));
+        if (sent.some((assignment) => assignment.status === "active" && !activeParticipantIds.has(assignment.userId))) {
+          await interaction.editReply({ content: "今日の指名対象者の参加状態を確認できません。再送も新規指名も行いません。", allowedMentions: { parse: [] } });
+          return;
+        }
         if (sent.some((assignment) => assignment.status !== "active" || !assignment.postMessageId)) {
           await interaction.editReply({ content: "今日の指名履歴に確定前または終了済みの回があるため、再送は行いません。", allowedMentions: { parse: [] } });
           return;
@@ -1956,10 +2005,25 @@ export function createDiaryService({
         await interaction.editReply({ content: `今日の指名内容を再送しました。担当者: ${userIds.length}人。期限と指名履歴は変更していません。`, allowedMentions: { parse: [] } });
         return;
       }
+      const completedRun = await findOne(dailyRunModel, { guildId: interaction.guild.id, slotKey });
+      if (settings.diaryLastRunSlot === slotKey || completedRun?.status === "completed") {
+        const replacement = await assignManualReplacement(interaction.guild, currentNow, slotKey);
+        const content = replacement.status === "assigned" && replacement.assigned > 0
+          ? `今日の指名対象者がいないため、新しく${replacement.assigned}人を指名しました。`
+          : replacement.status === "no-target"
+            ? "現在、指名可能な参加者がいません。参加状態・最低再指名間隔を確認してください。"
+            : replacement.status === "busy" || replacement.status === "not-settled"
+              ? "今日の指名状態を確認中です。処理が確定してから再実行してください。"
+              : replacement.status === "disabled"
+                ? "交換日記機能は無効です。指名は行いません。"
+              : `今日の新規指名を完了できませんでした（状態: ${replacement.status}）。運用ログを確認してください。`;
+        await interaction.editReply({ content, allowedMentions: { parse: [] } });
+        return;
+      }
       const result = await processGuild(interaction.guild, { at: currentNow });
       const messages = {
         assigned: `今日の指名処理を実行しました。指名人数: ${result.assigned}人。`,
-        "already-processed": "今日の指名処理は完了していますが、再送できる指名履歴はありません。",
+        "already-processed": "今日の指名処理は完了しています。もう一度実行して新しい対象者の指名を試してください。",
         "already-claimed": "今日の指名処理は別の実行で確保済みです。重複指名は行いません。",
         "already-sent": "今日の指名は送信済みですが、再送可能な履歴を確認できませんでした。もう一度実行してください。",
         "no-target": "今日の指名対象者はいません。参加時刻・指名間隔・日次枠を確認してください。",
