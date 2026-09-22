@@ -295,6 +295,7 @@ test("手動指名の再送は当日確定済みの指名だけを対象とし�
   const dailyRuns = memoryModel([{ guildId: guild.id, slotKey: current.slotKey, status: "claimed" }]);
   const service = createDiaryService({
     getGuildSettings: async () => ({ diaryEnabled: true, diaryChannelId: channel.id, diaryLastRunSlot: current.slotKey }),
+    participantModel: memoryModel([{ guildId: guild.id, userId: "u1", joinedAt: new Date("2026-09-01T00:00:00.000Z") }]),
     assignmentModel: assignments,
     dailyRunModel: dailyRuns,
     sendOperationalLog: async () => {},
@@ -320,6 +321,118 @@ test("手動指名の再送は当日確定済みの指名だけを対象とし�
   assignments.rows[1].status = "completed";
   assert.match(await invoke(), /終了済み/);
   assert.equal(sent.length, 1);
+});
+
+test("対象者ゼロで完了した当日枠は再参加後の手動実行で新しく指名する", async () => {
+  const at = new Date("2026-09-21T10:00:00.000Z");
+  const sent = [];
+  const channel = diaryChannel("diary", { send: async (payload) => {
+    sent.push(payload);
+    return { id: `manual-${sent.length}` };
+  } });
+  const guild = diaryGuild({ channels: [channel] });
+  const settings = { guildId: guild.id, diaryEnabled: true, diaryChannelId: channel.id, diaryMaxDaily: 1, diaryMinIntervalDays: 5 };
+  const participants = memoryModel();
+  const assignments = memoryModel();
+  const dailyRuns = memoryModel();
+  const service = createDiaryService({
+    getGuildSettings: async () => settings,
+    saveRuntimeGuildSettings: async (_guildId, patch) => Object.assign(settings, patch),
+    participantModel: participants,
+    assignmentModel: assignments,
+    dailyRunModel: dailyRuns,
+    sendOperationalLog: async () => {},
+    now: () => at,
+  });
+  const empty = await service.processGuild(guild, { at: new Date("2026-09-21T09:00:00.000Z") });
+  assert.equal(empty.status, "no-target");
+  participants.rows.push({ guildId: guild.id, userId: "u1", joinedAt: new Date("2026-09-21T09:30:00.000Z"), lastAssignedAt: null });
+  const invoke = async () => {
+    const interaction = {
+      guild, guildId: guild.id, inGuild: () => true,
+      memberPermissions: { has: (permission) => permission === PermissionFlagsBits.ManageGuild },
+      deferReply: async () => {},
+      editReply: async function editReply(payload) { this.response = payload; },
+    };
+    await service.handleManualAssignment(interaction);
+    return interaction.response.content;
+  };
+
+  assert.match(await invoke(), /新しく1人を指名しました/);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].allowedMentions.users, ["u1"]);
+  assert.equal(assignments.rows[0].assignedAt.toISOString(), at.toISOString());
+  assert.equal(assignments.rows[0].nominalAt.toISOString(), "2026-09-21T09:00:00.000Z");
+  assert.match(await invoke(), /指名内容を再送しました/);
+  assert.equal(sent.length, 2);
+  assert.equal(assignments.rows.length, 1);
+});
+
+test("当日の旧担当が離脱しても再参加者を手動で新規指名し、元の担当履歴は復活させない", async () => {
+  const at = new Date("2026-09-21T10:00:00.000Z");
+  const sent = [];
+  const channel = diaryChannel("diary", { send: async (payload) => {
+    sent.push(payload);
+    return { id: `replacement-${sent.length}` };
+  } });
+  const guild = diaryGuild({ channels: [channel] });
+  const settings = { guildId: guild.id, diaryEnabled: true, diaryChannelId: channel.id, diaryMaxDaily: 1, diaryMinIntervalDays: 5, diaryLastRunSlot: "2026-09-21" };
+  const participants = memoryModel([{ guildId: guild.id, userId: "new", joinedAt: new Date("2026-09-21T09:30:00.000Z"), lastAssignedAt: null }]);
+  const assignments = memoryModel([{
+    guildId: guild.id, assignmentId: "g1:2026-09-21:old", slotKey: "2026-09-21", userId: "old",
+    status: "canceled", sendState: "failed", cancelReason: "leave",
+  }]);
+  const service = createDiaryService({
+    getGuildSettings: async () => settings,
+    participantModel: participants,
+    assignmentModel: assignments,
+    dailyRunModel: memoryModel([{ guildId: guild.id, slotKey: "2026-09-21", status: "completed" }]),
+    sendOperationalLog: async () => {},
+    now: () => at,
+  });
+  const interaction = {
+    guild, guildId: guild.id, inGuild: () => true,
+    memberPermissions: { has: (permission) => permission === PermissionFlagsBits.ManageGuild },
+    deferReply: async () => {},
+    editReply: async function editReply(payload) { this.response = payload; },
+  };
+
+  await service.handleManualAssignment(interaction);
+  assert.match(interaction.response.content, /新しく1人を指名しました/);
+  assert.deepEqual(sent[0].allowedMentions.users, ["new"]);
+  assert.equal(assignments.rows[0].status, "canceled");
+  assert.equal(assignments.rows[1].userId, "new");
+});
+
+test("当日に離脱した元担当本人の再参加は同じ日の再指名対象にしない", async () => {
+  const at = new Date("2026-09-21T10:00:00.000Z");
+  const sent = [];
+  const channel = diaryChannel("diary", { send: async (payload) => {
+    sent.push(payload);
+    return { id: "unexpected" };
+  } });
+  const guild = diaryGuild({ channels: [channel] });
+  const assignments = memoryModel([{
+    guildId: guild.id, assignmentId: "g1:2026-09-21:u1", slotKey: "2026-09-21", userId: "u1",
+    status: "canceled", sendState: "failed", cancelReason: "leave",
+  }]);
+  const service = createDiaryService({
+    getGuildSettings: async () => ({ guildId: guild.id, diaryEnabled: true, diaryChannelId: channel.id, diaryLastRunSlot: "2026-09-21" }),
+    participantModel: memoryModel([{ guildId: guild.id, userId: "u1", joinedAt: new Date("2026-09-21T09:30:00.000Z"), lastAssignedAt: null }]),
+    assignmentModel: assignments,
+    dailyRunModel: memoryModel([{ guildId: guild.id, slotKey: "2026-09-21", status: "completed" }]),
+    now: () => at,
+  });
+  const interaction = {
+    guild, guildId: guild.id, inGuild: () => true,
+    memberPermissions: { has: (permission) => permission === PermissionFlagsBits.ManageGuild },
+    deferReply: async () => {},
+    editReply: async function editReply(payload) { this.response = payload; },
+  };
+  await service.handleManualAssignment(interaction);
+  assert.match(interaction.response.content, /指名可能な参加者がいません/);
+  assert.equal(sent.length, 0);
+  assert.equal(assignments.rows.length, 1);
 });
 
 test("再参加者は旧セッションの送信履歴を引き継がず初回候補として選ばれる", async () => {
