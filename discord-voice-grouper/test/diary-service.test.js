@@ -221,7 +221,7 @@ test("1名の指名確保でMongoDBの更新パス競合を起こさず、同じ
   assert.equal(assignments.rows[0].sendState, "sent");
 });
 
-test("手動指名コマンドは管理者のみ実行でき、今日の指名を重複させない", async () => {
+test("手動指名コマンドは管理者のみ実行でき、再実行時は今日の指名内容を再送する", async () => {
   const command = commands.find((item) => item.name === "senddiary");
   assert.equal(command?.default_member_permissions, PermissionFlagsBits.ManageGuild.toString());
   const at = new Date("2026-09-21T09:00:00.000Z");
@@ -232,11 +232,13 @@ test("手動指名コマンドは管理者のみ実行でき、今日の指名�
   } });
   const guild = diaryGuild({ channels: [channel] });
   const settings = { guildId: guild.id, diaryEnabled: true, diaryChannelId: channel.id, diaryMaxDaily: 1, diaryMinIntervalDays: 5 };
+  const assignments = memoryModel();
+  const participants = memoryModel([{ guildId: guild.id, userId: "u1", joinedAt: new Date("2026-09-01T00:00:00.000Z"), lastAssignedAt: null }]);
   const service = createDiaryService({
     getGuildSettings: async () => settings,
     saveRuntimeGuildSettings: async (_guildId, patch) => Object.assign(settings, patch),
-    participantModel: memoryModel([{ guildId: guild.id, userId: "u1", joinedAt: new Date("2026-09-01T00:00:00.000Z"), lastAssignedAt: null }]),
-    assignmentModel: memoryModel(),
+    participantModel: participants,
+    assignmentModel: assignments,
     dailyRunModel: memoryModel(),
     sendOperationalLog: async () => {},
     now: () => at,
@@ -260,10 +262,63 @@ test("手動指名コマンドは管理者のみ実行でき、今日の指名�
   await service.handleManualAssignment(first);
   assert.match(first.response.content, /指名人数: 1人/);
   assert.equal(sent.length, 1);
+  const firstAssignment = { ...assignments.rows[0] };
 
   const second = interaction(true);
   await service.handleManualAssignment(second);
-  assert.match(second.response.content, /重複指名は行いません/);
+  assert.match(second.response.content, /指名内容を再送しました/);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].content, sent[0].content);
+  assert.deepEqual(sent[1].allowedMentions, sent[0].allowedMentions);
+  assert.equal(assignments.rows.length, 1);
+  assert.deepEqual(assignments.rows[0], firstAssignment);
+  assert.equal(participants.rows[0].lastAssignedAt.toISOString(), at.toISOString());
+});
+
+test("手動指名の再送は当日確定済みの指名だけを対象とし、別日や未確定回を再送しない", async () => {
+  const at = new Date("2026-09-22T10:00:00.000Z");
+  const sent = [];
+  const channel = diaryChannel("diary", { send: async (payload) => {
+    sent.push(payload);
+    return { id: `resend-${sent.length}` };
+  } });
+  const guild = diaryGuild({ channels: [channel] });
+  const current = {
+    guildId: guild.id, assignmentId: "current", slotKey: "2026-09-22", userId: "u1", channelId: channel.id,
+    assignedAt: new Date("2026-09-22T09:00:00.000Z"), deadlineAt: new Date("2026-09-23T09:00:00.000Z"),
+    status: "active", sendState: "sent", postMessageId: "original", specialNoPenalty: false,
+  };
+  const assignments = memoryModel([
+    { ...current, assignmentId: "old", slotKey: "2026-09-21", userId: "u2" },
+    current,
+  ]);
+  const dailyRuns = memoryModel([{ guildId: guild.id, slotKey: current.slotKey, status: "claimed" }]);
+  const service = createDiaryService({
+    getGuildSettings: async () => ({ diaryEnabled: true, diaryChannelId: channel.id, diaryLastRunSlot: current.slotKey }),
+    assignmentModel: assignments,
+    dailyRunModel: dailyRuns,
+    sendOperationalLog: async () => {},
+    now: () => at,
+  });
+  const invoke = async () => {
+    const interaction = {
+      guild, guildId: guild.id, inGuild: () => true,
+      memberPermissions: { has: (permission) => permission === PermissionFlagsBits.ManageGuild },
+      deferReply: async () => {},
+      editReply: async function editReply(payload) { this.response = payload; },
+    };
+    await service.handleManualAssignment(interaction);
+    return interaction.response.content;
+  };
+
+  assert.match(await invoke(), /確定していません/);
+  assert.equal(sent.length, 0);
+  dailyRuns.rows[0].status = "completed";
+  assert.match(await invoke(), /担当者: 1人/);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].allowedMentions.users, ["u1"]);
+  assignments.rows[1].status = "completed";
+  assert.match(await invoke(), /終了済み/);
   assert.equal(sent.length, 1);
 });
 

@@ -1920,12 +1920,48 @@ export function createDiaryService({
     }
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
-      const result = await processGuild(interaction.guild, { at: now() });
+      const currentNow = asDate(now(), new Date());
+      const slotKey = diaryLatestDueSlot(currentNow).slotKey;
+      const settings = await getSettings(interaction.guild.id);
+      if (settings?.diaryEnabled !== true) {
+        await interaction.editReply({ content: "交換日記機能は無効です。指名は行いません。", allowedMentions: { parse: [] } });
+        return;
+      }
+      const sent = await findMany(assignmentModel, { guildId: interaction.guild.id, slotKey, sendState: "sent" });
+      if (sent.length > 0) {
+        const run = await findOne(dailyRunModel, { guildId: interaction.guild.id, slotKey });
+        if (run && run.status !== "completed") {
+          await interaction.editReply({ content: "今日の指名処理が確定していません。状態を確認してから再実行してください。", allowedMentions: { parse: [] } });
+          return;
+        }
+        if (sent.some((assignment) => assignment.status !== "active" || !assignment.postMessageId)) {
+          await interaction.editReply({ content: "今日の指名履歴に確定前または終了済みの回があるため、再送は行いません。", allowedMentions: { parse: [] } });
+          return;
+        }
+        const channels = [...new Set(sent.map((assignment) => assignment.channelId))];
+        const deadlineAt = asDate(sent[0].deadlineAt);
+        if (channels.length !== 1 || !channels[0] || !deadlineAt || sent.some((assignment) => asDate(assignment.deadlineAt)?.getTime() !== deadlineAt.getTime())) {
+          await interaction.editReply({ content: "今日の指名履歴に複数の送信先または期限があり、安全に再送できません。運用ログを確認してください。", allowedMentions: { parse: [] } });
+          return;
+        }
+        const channel = await resolveChannel(interaction.guild, channels[0]);
+        if (!channel) {
+          await interaction.editReply({ content: "当日の指名先チャンネルを取得できません。再送は行いません。", allowedMentions: { parse: [] } });
+          return;
+        }
+        const userIds = [...new Set(sent.map((assignment) => assignment.userId))];
+        const specialNoPenalty = sent.some((assignment) => assignment.specialNoPenalty === true);
+        const content = formatDiaryAssignmentMessage(userIds, deadlineAt, { now: currentNow, specialNoPenalty });
+        await channel.send({ content, allowedMentions: { users: userIds, roles: [], parse: [] } });
+        await interaction.editReply({ content: `今日の指名内容を再送しました。担当者: ${userIds.length}人。期限と指名履歴は変更していません。`, allowedMentions: { parse: [] } });
+        return;
+      }
+      const result = await processGuild(interaction.guild, { at: currentNow });
       const messages = {
         assigned: `今日の指名処理を実行しました。指名人数: ${result.assigned}人。`,
-        "already-processed": "今日の指名処理はすでに完了しています。重複指名は行いません。",
+        "already-processed": "今日の指名処理は完了していますが、再送できる指名履歴はありません。",
         "already-claimed": "今日の指名処理は別の実行で確保済みです。重複指名は行いません。",
-        "already-sent": "今日の指名は送信済みです。重複指名は行いません。",
+        "already-sent": "今日の指名は送信済みですが、再送可能な履歴を確認できませんでした。もう一度実行してください。",
         "no-target": "今日の指名対象者はいません。参加時刻・指名間隔・日次枠を確認してください。",
         disabled: "交換日記機能は無効です。指名は行いません。",
         busy: "交換日記の処理が進行中です。完了後に再試行してください。",
