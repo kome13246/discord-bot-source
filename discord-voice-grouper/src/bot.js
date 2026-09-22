@@ -1492,6 +1492,7 @@ const interactionHandler = createInteractionHandler({
     handleSuggestTopicButton,
     handleFeedbackFormButton: feedbackFormsFeature.handleButton,
     handleDiaryButton: (interaction) => diaryService.handleButton(interaction),
+    handleSendDiary: (interaction) => diaryService.handleManualAssignment(interaction),
     handleCallWaitButton,
     handleKokuchiReservationCancel,
     handleOteboButton,

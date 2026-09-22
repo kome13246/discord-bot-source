@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ChannelType, PermissionFlagsBits } from "discord.js";
+import { commands } from "../src/commands.js";
 import {
   calculateDiaryDailyQuota,
   createDiaryService,
@@ -51,6 +52,10 @@ function matchesFilter(row, filter = {}) {
 }
 
 function applyUpdate(row, update, isInsert = false) {
+  const setFields = new Set(Object.keys(update.$set ?? {}));
+  for (const field of Object.keys(update.$setOnInsert ?? {})) {
+    if (setFields.has(field)) throw new Error(`Updating the path '${field}' would create a conflict at '${field}'`);
+  }
   if (isInsert) Object.assign(row, update.$setOnInsert ?? {});
   Object.assign(row, update.$set ?? {});
   for (const [key, value] of Object.entries(update.$inc ?? {})) row[key] = (Number(row[key]) || 0) + value;
@@ -185,6 +190,81 @@ test("初回参加者を優先し、最低再指名間隔を破らない", () =>
     participants: [{ userId: "too-soon", joinedAt: "2026-09-01T00:00:00.000Z", lastAssignedAt: "2026-09-06T08:59:59.000Z" }],
   });
   assert.equal(tooSoon.length, 0);
+});
+
+test("1名の指名確保でMongoDBの更新パス競合を起こさず、同じ日には再送しない", async () => {
+  const at = new Date("2026-09-21T09:00:00.000Z");
+  const sent = [];
+  const channel = diaryChannel("diary", { send: async (payload) => {
+    sent.push(payload);
+    return { id: `diary-message-${sent.length}` };
+  } });
+  const guild = diaryGuild({ channels: [channel] });
+  const settings = { guildId: guild.id, diaryEnabled: true, diaryChannelId: channel.id, diaryMaxDaily: 1, diaryMinIntervalDays: 5 };
+  const assignments = memoryModel();
+  const service = createDiaryService({
+    getGuildSettings: async () => settings,
+    saveRuntimeGuildSettings: async (_guildId, patch) => Object.assign(settings, patch),
+    participantModel: memoryModel([{ guildId: guild.id, userId: "u1", joinedAt: new Date("2026-09-01T00:00:00.000Z"), lastAssignedAt: null }]),
+    assignmentModel: assignments,
+    dailyRunModel: memoryModel(),
+    sendOperationalLog: async () => {},
+  });
+
+  const first = await service.processGuild(guild, { at });
+  const second = await service.processGuild(guild, { at });
+  assert.equal(first.status, "assigned");
+  assert.equal(first.assigned, 1);
+  assert.equal(second.status, "already-processed");
+  assert.equal(sent.length, 1);
+  assert.equal(assignments.rows[0].guildId, guild.id);
+  assert.equal(assignments.rows[0].sendState, "sent");
+});
+
+test("手動指名コマンドは管理者のみ実行でき、今日の指名を重複させない", async () => {
+  const command = commands.find((item) => item.name === "senddiary");
+  assert.equal(command?.default_member_permissions, PermissionFlagsBits.ManageGuild.toString());
+  const at = new Date("2026-09-21T09:00:00.000Z");
+  const sent = [];
+  const channel = diaryChannel("diary", { send: async (payload) => {
+    sent.push(payload);
+    return { id: `diary-message-${sent.length}` };
+  } });
+  const guild = diaryGuild({ channels: [channel] });
+  const settings = { guildId: guild.id, diaryEnabled: true, diaryChannelId: channel.id, diaryMaxDaily: 1, diaryMinIntervalDays: 5 };
+  const service = createDiaryService({
+    getGuildSettings: async () => settings,
+    saveRuntimeGuildSettings: async (_guildId, patch) => Object.assign(settings, patch),
+    participantModel: memoryModel([{ guildId: guild.id, userId: "u1", joinedAt: new Date("2026-09-01T00:00:00.000Z"), lastAssignedAt: null }]),
+    assignmentModel: memoryModel(),
+    dailyRunModel: memoryModel(),
+    sendOperationalLog: async () => {},
+    now: () => at,
+  });
+  function interaction(authorized) {
+    return {
+      guild, guildId: guild.id, inGuild: () => true,
+      memberPermissions: { has: (permission) => authorized && permission === PermissionFlagsBits.ManageGuild },
+      reply: async function reply(payload) { this.response = payload; },
+      deferReply: async function deferReply(payload) { this.deferredPayload = payload; },
+      editReply: async function editReply(payload) { this.response = payload; },
+    };
+  }
+
+  const denied = interaction(false);
+  await service.handleManualAssignment(denied);
+  assert.match(denied.response.content, /管理権限/);
+  assert.equal(sent.length, 0);
+
+  const first = interaction(true);
+  await service.handleManualAssignment(first);
+  assert.match(first.response.content, /指名人数: 1人/);
+  assert.equal(sent.length, 1);
+
+  const second = interaction(true);
+  await service.handleManualAssignment(second);
+  assert.match(second.response.content, /重複指名は行いません/);
+  assert.equal(sent.length, 1);
 });
 
 test("再参加者は旧セッションの送信履歴を引き継がず初回候補として選ばれる", async () => {
@@ -614,6 +694,183 @@ test("復旧履歴は古いページまで遡ってBot/Webhookを除外し、送
   assert.equal(assignments.rows.find((row) => row.assignmentId === "a1").status, "completed");
   assert.equal(assignments.rows.find((row) => row.assignmentId === "a2").status, "active");
   assert.ok(page >= 2);
+});
+
+test("履歴の途中ページ取得失敗は未投稿確定せず、進行中回を保留する", async () => {
+  const assignedAt = Date.parse("2026-09-21T09:00:00.000Z");
+  const deadline = Date.parse("2026-09-22T09:00:00.000Z");
+  const assignment = {
+    guildId: "g1",
+    assignmentId: "history-partial",
+    slotKey: "2026-09-21",
+    userId: "u1",
+    channelId: "diary",
+    assignedAt: new Date(assignedAt),
+    nominalAt: new Date(assignedAt),
+    deadlineAt: new Date(deadline),
+    status: "active",
+    sendState: "sent",
+    specialNoPenalty: false,
+  };
+  const assignments = memoryModel([assignment]);
+  const participants = memoryModel([{ guildId: "g1", userId: "u1", joinedAt: new Date("2026-09-01T00:00:00.000Z"), consecutiveMisses: 2 }]);
+  const pageOne = new Map(Array.from({ length: 100 }, (_, index) => {
+    const id = `history-page-one-${index}`;
+    return [id, {
+      id,
+      createdTimestamp: deadline - 60 * 60 * 1_000 - index * 1_000,
+      author: { id: "someone-else", bot: false },
+    }];
+  }));
+  let fetchCalls = 0;
+  const channel = diaryChannel("diary");
+  channel.messages.fetch = async (options) => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) return pageOne;
+    // The old implementation retried this failure without a cursor and then
+    // treated the repeated latest page as a confirmed absence.
+    if (options?.before) throw new Error("history page unavailable");
+    return pageOne;
+  };
+  const guild = diaryGuild({ channels: [channel] });
+  const service = createDiaryService({
+    client: { guilds: { cache: new Map([[guild.id, guild]]) } },
+    getGuildSettings: async () => ({ guildId: guild.id, diaryEnabled: true, diaryChannelId: channel.id, diaryLastRunSlot: "2026-09-22" }),
+    assignmentModel: assignments,
+    participantModel: participants,
+    dailyRunModel: {},
+    sendOperationalLog: async () => {},
+  });
+
+  await service.processGuild(guild, { at: new Date(deadline) });
+
+  assert.equal(fetchCalls, 2);
+  assert.equal(assignments.rows[0].status, "active");
+  assert.equal(participants.rows[0].consecutiveMisses, 2);
+});
+
+test("履歴走査が50ページ上限に達した場合は未投稿確定せず保留する", async () => {
+  const assignedAt = Date.parse("2026-09-01T09:00:00.000Z");
+  const deadline = Date.parse("2026-09-22T09:00:00.000Z");
+  const assignment = {
+    guildId: "g1",
+    assignmentId: "history-page-cap",
+    slotKey: "2026-09-21",
+    userId: "u1",
+    channelId: "diary",
+    assignedAt: new Date(assignedAt),
+    nominalAt: new Date(assignedAt),
+    deadlineAt: new Date(deadline),
+    status: "active",
+    sendState: "sent",
+    specialNoPenalty: false,
+  };
+  const assignments = memoryModel([assignment]);
+  const participants = memoryModel([{ guildId: "g1", userId: "u1", joinedAt: new Date("2026-08-01T00:00:00.000Z"), consecutiveMisses: 1 }]);
+  let fetchCalls = 0;
+  const channel = diaryChannel("diary");
+  channel.messages.fetch = async () => {
+    const page = fetchCalls;
+    fetchCalls += 1;
+    return new Map(Array.from({ length: 100 }, (_, index) => {
+      const id = `history-page-${page}-${index}`;
+      return [id, {
+        id,
+        createdTimestamp: deadline - 60 * 60 * 1_000 - (page * 100 + index) * 1_000,
+        author: { id: "someone-else", bot: false },
+      }];
+    }));
+  };
+  const guild = diaryGuild({ channels: [channel] });
+  const service = createDiaryService({
+    client: { guilds: { cache: new Map([[guild.id, guild]]) } },
+    getGuildSettings: async () => ({ guildId: guild.id, diaryEnabled: true, diaryChannelId: channel.id, diaryLastRunSlot: "2026-09-22" }),
+    assignmentModel: assignments,
+    participantModel: participants,
+    dailyRunModel: {},
+    sendOperationalLog: async () => {},
+  });
+
+  await service.processGuild(guild, { at: new Date(deadline) });
+
+  assert.equal(fetchCalls, 50);
+  assert.equal(assignments.rows[0].status, "active");
+  assert.equal(participants.rows[0].consecutiveMisses, 1);
+});
+
+test("進行中回の投稿受付は設定変更後もassignment保存先だけを受け付ける", async () => {
+  const oldChannel = diaryChannel("old-diary");
+  const newChannel = diaryChannel("new-diary");
+  const assignedAt = Date.parse("2026-09-21T09:00:00.000Z");
+  const assignment = {
+    guildId: "g1",
+    assignmentId: "channel-change-live",
+    slotKey: "2026-09-21",
+    userId: "u1",
+    channelId: oldChannel.id,
+    assignedAt: new Date(assignedAt),
+    nominalAt: new Date(assignedAt),
+    deadlineAt: new Date("2026-09-22T09:00:00.000Z"),
+    status: "active",
+    sendState: "sent",
+    specialNoPenalty: false,
+  };
+  const assignments = memoryModel([assignment]);
+  const participants = memoryModel([{ guildId: "g1", userId: "u1", joinedAt: new Date("2026-09-01T00:00:00.000Z"), consecutiveMisses: 2 }]);
+  const guild = diaryGuild({ channels: [oldChannel, newChannel] });
+  const service = createDiaryService({
+    getGuildSettings: async () => ({ guildId: guild.id, diaryEnabled: true, diaryChannelId: newChannel.id }),
+    assignmentModel: assignments,
+    participantModel: participants,
+    sendOperationalLog: async () => {},
+  });
+
+  await service.handleMessage({ guild, channelId: newChannel.id, author: { id: "u1", bot: false }, createdTimestamp: Date.parse("2026-09-21T10:00:00.000Z") });
+  assert.equal(assignments.rows[0].status, "active");
+  assert.equal(participants.rows[0].consecutiveMisses, 2);
+
+  await service.handleMessage({ guild, channelId: oldChannel.id, author: { id: "u1", bot: false }, createdTimestamp: Date.parse("2026-09-21T11:00:00.000Z") });
+  assert.equal(assignments.rows[0].status, "completed");
+  assert.equal(participants.rows[0].consecutiveMisses, 0);
+});
+
+test("設定変更後の期限判定もassignment保存先の履歴を確認する", async () => {
+  const assignedAt = Date.parse("2026-09-21T09:00:00.000Z");
+  const deadline = Date.parse("2026-09-22T09:00:00.000Z");
+  const oldMessages = new Map([[
+    "old-post",
+    { id: "old-post", createdTimestamp: Date.parse("2026-09-21T10:00:00.000Z"), author: { id: "u1", bot: false } },
+  ]]);
+  const oldChannel = diaryChannel("old-diary", { messages: oldMessages });
+  const newChannel = diaryChannel("new-diary");
+  const assignments = memoryModel([{
+    guildId: "g1",
+    assignmentId: "channel-change-history",
+    slotKey: "2026-09-21",
+    userId: "u1",
+    channelId: oldChannel.id,
+    assignedAt: new Date(assignedAt),
+    nominalAt: new Date(assignedAt),
+    deadlineAt: new Date(deadline),
+    status: "active",
+    sendState: "sent",
+    specialNoPenalty: false,
+  }]);
+  const participants = memoryModel([{ guildId: "g1", userId: "u1", joinedAt: new Date("2026-09-01T00:00:00.000Z"), consecutiveMisses: 1 }]);
+  const guild = diaryGuild({ channels: [oldChannel, newChannel] });
+  const service = createDiaryService({
+    client: { guilds: { cache: new Map([[guild.id, guild]]) } },
+    getGuildSettings: async () => ({ guildId: guild.id, diaryEnabled: true, diaryChannelId: newChannel.id, diaryLastRunSlot: "2026-09-22" }),
+    assignmentModel: assignments,
+    participantModel: participants,
+    dailyRunModel: {},
+    sendOperationalLog: async () => {},
+  });
+
+  await service.processGuild(guild, { at: new Date(deadline) });
+
+  assert.equal(assignments.rows[0].status, "completed");
+  assert.equal(participants.rows[0].consecutiveMisses, 0);
 });
 
 test("DB参加者を正としてロールを再付与し、DB未参加のロール保持者を解除する", async () => {

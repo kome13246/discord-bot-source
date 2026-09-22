@@ -119,6 +119,7 @@ export function createInteractionHandler({
       kokuchi: handlers.handleKokuchi,
       remove: handlers.handleRemoveRole,
       sendcallwait: handlers.handleSendCallWait,
+      senddiary: handlers.handleSendDiary,
       setupforms: handlers.handleSetupForms,
       setting: handlers.handleSetting,
       show: handlers.handleShowReview,

@@ -269,6 +269,10 @@ function retryAt(currentNow, attempts) {
   return new Date(currentNow.getTime() + DIARY_RETRY_BASE_MS * (2 ** exponent));
 }
 
+function diaryAssignmentChannelId(assignment, settings) {
+  return assignment?.channelId || settings?.diaryChannelId || null;
+}
+
 export function createDiaryService({
   client,
   getGuildSettings,
@@ -1121,22 +1125,35 @@ export function createDiaryService({
   }
 
   async function messagesContainPost(channel, assignment, until) {
-    if (!channel?.messages?.fetch) return false;
+    if (!channel?.messages?.fetch) return null;
     const start = asDate(assignment.assignedAt, new Date(0)).getTime();
     const end = asDate(until, new Date()).getTime();
     let before = null;
     const seenCursors = new Set();
-    for (let page = 0; page < 50; page += 1) {
+    let page = 0;
+    for (; page < 50; page += 1) {
       let fetched;
       try {
         fetched = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
       } catch {
-        try {
-          fetched = await channel.messages.fetch();
-        } catch {
-          return null;
-        }
+        // A partial history cannot establish that a post is absent. The
+        // latest page fallback used here previously could skip the missing
+        // middle pages and turn an unknown result into a miss.
+        return null;
       }
+      // Discord returns a Collection for a history request. A null/undefined
+      // result from an adapter is an unavailable history, not an empty page.
+      if (fetched == null) return null;
+      // Test adapters and a few Discord wrappers expose a query-like result
+      // with `lean()`. Resolve it before interpreting the page; otherwise an
+      // empty result object would look like a page containing its helper
+      // methods and become an unknown history.
+      try {
+        if (typeof fetched.lean === "function") fetched = await fetched.lean();
+      } catch {
+        return null;
+      }
+      if (fetched == null) return null;
       const messages = fetched?.values ? [...fetched.values()] : Array.isArray(fetched) ? fetched : fetched ? Object.values(fetched) : [];
       for (const message of messages) {
         const created = Number(message.createdTimestamp ?? asDate(message.createdAt)?.getTime() ?? 0);
@@ -1152,11 +1169,17 @@ export function createDiaryService({
         const timestamp = Number(message.createdTimestamp ?? asDate(message.createdAt)?.getTime() ?? 0);
         return !current || timestamp < current.timestamp ? { message, timestamp } : current;
       }, null);
-      if (!oldest?.message?.id || oldest.timestamp <= start || seenCursors.has(oldest.message.id)) break;
+      if (!oldest?.message?.id) return null;
+      if (oldest.timestamp <= start) break;
+      // Re-seeing a cursor means the adapter/API did not advance through the
+      // history. Treat it as unknown so a repeated page cannot become a miss.
+      if (seenCursors.has(oldest.message.id)) return null;
       seenCursors.add(oldest.message.id);
       before = oldest.message.id;
     }
-    return false;
+    // Reaching the safety cap without reaching the assignment start leaves a
+    // portion of history unexamined. Keep the assignment pending and retry.
+    return page >= 50 ? null : false;
   }
 
   async function findEarlierUnresolvedOutcome(assignment) {
@@ -1387,10 +1410,11 @@ export function createDiaryService({
   async function handleMessage(message) {
     if (!isHumanMessage(message)) return;
     const settings = await getSettings(message.guild.id).catch(() => null);
-    if (!settings?.diaryChannelId || settings.diaryChannelId !== message.channelId) return;
     const assignments = await findMany(assignmentModel, { guildId: message.guild.id, userId: message.author.id, status: "active", sendState: "sent" }, { assignedAt: 1 });
     const createdAt = new Date(message.createdTimestamp ?? message.createdAt ?? now());
     for (const assignment of assignments) {
+      const assignmentChannelId = diaryAssignmentChannelId(assignment, settings);
+      if (!assignmentChannelId || assignmentChannelId !== message.channelId) continue;
       if (createdAt.getTime() < asDate(assignment.assignedAt, createdAt).getTime()) continue;
       if (createdAt.getTime() > asDate(assignment.deadlineAt, createdAt).getTime()) continue;
       if (await completeAssignment(assignment, message, createdAt)) break;
@@ -1592,7 +1616,7 @@ export function createDiaryService({
         );
         continue;
       }
-      const channel = await resolveChannel(guild, settings?.diaryChannelId ?? assignment.channelId);
+      const channel = await resolveChannel(guild, diaryAssignmentChannelId(assignment, settings));
       if (!channel) {
         await operationalLog(guild, settings, `⚠️ 交換日記投稿判定を保留しました。CHを取得できません。assignment=${assignment.assignmentId}`);
         continue;
@@ -1676,7 +1700,6 @@ export function createDiaryService({
             },
             {
               $set: {
-                guildId: guild.id,
                 slotKey: diaryJstDateKey(slotAt),
                 userId: participant.userId,
                 channelId: channel.id,
@@ -1886,6 +1909,36 @@ export function createDiaryService({
     }
   }
 
+  async function handleManualAssignment(interaction) {
+    if (!interaction?.inGuild?.() || !interaction.guild?.id) {
+      await interaction.reply({ content: "このコマンドはサーバー内で使ってください。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+      return;
+    }
+    if (!interaction.memberPermissions?.has?.(PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({ content: "このコマンドにはサーバー管理権限が必要です。", flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+      return;
+    }
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const result = await processGuild(interaction.guild, { at: now() });
+      const messages = {
+        assigned: `今日の指名処理を実行しました。指名人数: ${result.assigned}人。`,
+        "already-processed": "今日の指名処理はすでに完了しています。重複指名は行いません。",
+        "already-claimed": "今日の指名処理は別の実行で確保済みです。重複指名は行いません。",
+        "already-sent": "今日の指名は送信済みです。重複指名は行いません。",
+        "no-target": "今日の指名対象者はいません。参加時刻・指名間隔・日次枠を確認してください。",
+        disabled: "交換日記機能は無効です。指名は行いません。",
+        busy: "交換日記の処理が進行中です。完了後に再試行してください。",
+      };
+      const content = messages[result.status]
+        ?? `今日の指名処理は完了していません（状態: ${result.status}）。運用ログを確認してください。`;
+      await interaction.editReply({ content, allowedMentions: { parse: [] } });
+    } catch (error) {
+      logger.error?.("Manual diary assignment failed:", error);
+      await interaction.editReply({ content: "指名処理を実行できませんでした。運用ログを確認してください。", allowedMentions: { parse: [] } });
+    }
+  }
+
   async function runAll({ at = now(), force = false } = {}) {
     const guilds = client?.guilds?.cache?.values ? [...client.guilds.cache.values()] : [];
     return Promise.all(guilds.map((guild) => processGuild(guild, { at, force })));
@@ -1977,6 +2030,7 @@ export function createDiaryService({
     recoverClaimedDailyRun,
     recoverClaimedDailyRuns,
     processGuild,
+    handleManualAssignment,
     runAll,
     onSettingsChanged,
     restore,

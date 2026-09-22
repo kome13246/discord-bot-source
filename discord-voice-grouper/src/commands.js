@@ -649,6 +649,11 @@ export const sendCallWaitCommand = new SlashCommandBuilder()
   .setName("sendcallwait")
   .setDescription("通話待機システムの募集メッセージを今すぐ送信します");
 
+export const sendDiaryCommand = new SlashCommandBuilder()
+  .setName("senddiary")
+  .setDescription("今日の交換日記の指名処理を今すぐ実行します（テスト用）")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
+
 export const removeCommand = new SlashCommandBuilder()
   .setName("remove")
   .setDescription("Botが付与した参加者ロールを一括で解除します")
@@ -680,5 +685,6 @@ export const commands = [
   kokuchiCommand.toJSON(),
   removeCommand.toJSON(),
   sendCallWaitCommand.toJSON(),
+  sendDiaryCommand.toJSON(),
   setupFormsCommand.toJSON(),
 ];
