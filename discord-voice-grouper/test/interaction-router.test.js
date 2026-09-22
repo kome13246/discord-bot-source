@@ -87,11 +87,13 @@ test("Interactionルーターはコマンドを対応する機能へ渡す", asy
   await route(interaction({ commandName: "botstatus", isChatInputCommand: () => true }));
   await route(interaction({ commandName: "config", isChatInputCommand: () => true }));
   await route(interaction({ commandName: "show", isChatInputCommand: () => true }));
+  await route(interaction({ commandName: "senddiary", isChatInputCommand: () => true }));
   assert.deepEqual(calls, [
     "handleSplitVoice",
     "operationalManagement.handleCommand",
     "handleConfig",
     "handleShowReview",
+    "handleSendDiary",
   ]);
 });
 

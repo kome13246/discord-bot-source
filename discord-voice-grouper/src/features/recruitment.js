@@ -1462,20 +1462,56 @@ export function createRecruitmentFeature(dependencies) {
       return { evaluated: false, memberIds: [] };
     }
   
-    const channel = await resolveConfiguredTextChannel(guild, prompt.channelId);
-  
-    if (!channel || typeof channel.messages?.fetch !== "function") {
-      return { evaluated: true, memberIds: [] };
+    const channelResult = await fetchCallWaitPromptChannel(guild, prompt.channelId);
+    if (channelResult.retry) {
+      // Do not turn a transient Discord failure into a zero-applicant result.
+      // The participant IDs are persisted, but they cannot prove that the
+      // message still exists while its retrieval is uncertain.
+      return { evaluated: false, memberIds: [], retryable: true, reason: channelResult.reason };
     }
-  
-    const message = await channel.messages.fetch(prompt.messageId).catch(() => null);
-  
+
+    if (channelResult.missing) {
+      return { evaluated: true, memberIds: [], mode: CALL_WAIT_MODE_BUTTON };
+    }
+
+    const channel = channelResult.channel;
+    if (typeof channel.messages?.fetch !== "function") {
+      return { evaluated: false, memberIds: [], retryable: true, reason: "prompt-message-fetch-unavailable" };
+    }
+
+    let message;
+    try {
+      message = await channel.messages.fetch(prompt.messageId);
+    } catch (error) {
+      if (!isKnownMissingDiscordResource(error)) {
+        return { evaluated: false, memberIds: [], retryable: true, reason: "prompt-message-fetch-failed" };
+      }
+      message = null;
+    }
+
     if (!message) {
-      return { evaluated: true, memberIds: [] };
+      return { evaluated: true, memberIds: [], mode: CALL_WAIT_MODE_BUTTON };
     }
   
     const memberIds = normalizeCallWaitMemberIds(prompt.memberIds);
     return { evaluated: true, memberIds, mode: CALL_WAIT_MODE_BUTTON };
+  }
+
+  async function fetchCallWaitPromptChannel(guild, channelId) {
+    let channel = guild?.channels?.cache?.get?.(channelId) ?? null;
+    if (!channel) {
+      if (typeof guild?.channels?.fetch !== "function") {
+        return { retry: true, reason: "prompt-channel-fetch-unavailable" };
+      }
+      try {
+        channel = await guild.channels.fetch(channelId);
+      } catch (error) {
+        if (isKnownMissingDiscordResource(error)) return { missing: true };
+        return { retry: true, reason: "prompt-channel-fetch-failed" };
+      }
+    }
+    if (!channel) return { missing: true };
+    return { channel };
   }
   
   function isKnownMissingDiscordResource(error) {

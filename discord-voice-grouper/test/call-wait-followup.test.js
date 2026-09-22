@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { ScheduledAction } from "../src/models/scheduled-action.js";
 import { buildHealthSnapshot } from "../src/health-server.js";
+import { createRecruitmentFeature } from "../src/features/recruitment.js";
 
 test("定時募集フォローアップはギルドごとに未完了アクションを一つに制限する", () => {
   const index = ScheduledAction.schema.indexes().find(([fields, options]) =>
@@ -123,6 +124,33 @@ test("call-wait evaluation preserves the prompt until its durable outcome is sav
   assert.doesNotMatch(evaluator, /message\.delete\(/);
   assert.match(source, /saveGuildSettingsWithCurrent\(guild\.id, roleGranting, \{[\s\S]*?callWaitPrompt: null/);
   assert.match(source, /deleteCallWaitPrompt\(guild, roleGranting\.callWaitPrompt\)/);
+});
+
+test("定時募集のメッセージ取得障害は応募者数を確定せず、次回評価へ回す", async () => {
+  const feature = createRecruitmentFeature({
+    resolveConfiguredTextChannel: async () => ({
+      messages: { fetch: async () => { throw new Error("Discord timeout"); } },
+    }),
+  });
+  const result = await feature.evaluateCallWaitPrompt({
+    channels: {
+      cache: new Map([[
+        "prompt-channel",
+        { messages: { fetch: async () => { throw new Error("Discord timeout"); } } },
+      ]]),
+    },
+  }, {
+    callWaitPrompt: {
+      channelId: "prompt-channel",
+      messageId: "prompt-message",
+      targetAt: "2026-08-01T00:00:00.000Z",
+      memberIds: ["member-1", "member-2"],
+    },
+  }, new Date("2026-08-01T00:01:00.000Z"));
+
+  assert.equal(result.evaluated, false);
+  assert.equal(result.retryable, true);
+  assert.deepEqual(result.memberIds, []);
 });
 
 test("設定不備でも期限到達済みの既存定時募集は終了する", async () => {

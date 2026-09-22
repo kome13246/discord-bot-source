@@ -2807,6 +2807,18 @@ export function createKokuchiFeature(dependencies) {
     const preNoticePending = ["pending", "failed"].includes(previousSettings.kokuchiPreNoticeState);
     const unlockPending = ["pending", "failed"].includes(previousSettings.gatheringVcUnlockState);
     const reminderPending = ["pending", "failed"].includes(previousSettings.kokuchiGatheringReminderState);
+    // The event owns the channel captured at publication time, but a pending
+    // unlock has not changed Discord yet. If the configured gathering VC was
+    // changed before that unlock, move the pending action to the new channel.
+    // Once the VC is already opened, `unlockPending` is false and the event's
+    // original channel remains authoritative for later restoration.
+    const gatheringVcChannelChanged = previousSettings.gatheringVoiceChannelId !== nextSettings.gatheringVoiceChannelId;
+    const rescheduledGatheringVcChannelId = gatheringVcChannelChanged
+      ? (nextSettings.gatheringVoiceChannelId ?? null)
+      : getGatheringVcUnlockChannelId(nextSettings);
+    const rescheduledGatheringVcUnlockState = rescheduledGatheringVcChannelId
+      ? stateFor(previousSettings.gatheringVcUnlockState, getGatheringVcUnlockAt(eventAt))
+      : "skipped";
     const saved = await saveGuildSettingsWithCurrent(guild.id, nextSettings, {
       kokuchiEventAt: eventAt.toISOString(),
       ...(preNoticePending ? {
@@ -2816,8 +2828,8 @@ export function createKokuchiFeature(dependencies) {
       } : {}),
       ...(unlockPending ? {
         gatheringVcUnlockAt: getGatheringVcUnlockAt(eventAt).toISOString(),
-        gatheringVcUnlockChannelId: getGatheringVcUnlockChannelId(nextSettings),
-        gatheringVcUnlockState: stateFor(previousSettings.gatheringVcUnlockState, getGatheringVcUnlockAt(eventAt)),
+        gatheringVcUnlockChannelId: rescheduledGatheringVcChannelId,
+        gatheringVcUnlockState: rescheduledGatheringVcUnlockState,
       } : {}),
       ...(reminderPending ? {
         kokuchiGatheringReminderAt: getKokuchiGatheringReminderAt(eventAt).toISOString(),
@@ -2827,7 +2839,7 @@ export function createKokuchiFeature(dependencies) {
     });
     await KokuchiReservation.updateOne(
       { _id: reservation._id, status: "sent" },
-      { $set: { eventAt, ...(unlockPending ? { gatheringVcUnlockChannelId: getGatheringVcUnlockChannelId(nextSettings) } : {}) } },
+      { $set: { eventAt, ...(unlockPending ? { gatheringVcUnlockChannelId: rescheduledGatheringVcChannelId } : {}) } },
     );
     await Promise.all([
       preNoticePending ? scheduleKokuchiPreNotice(guild, saved) : null,
