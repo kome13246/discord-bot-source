@@ -651,7 +651,7 @@ export const sendCallWaitCommand = new SlashCommandBuilder()
 
 export const sendDiaryCommand = new SlashCommandBuilder()
   .setName("senddiary")
-  .setDescription("今日の交換日記の指名処理を今すぐ実行します（テスト用）")
+  .setDescription("今日の交換日記の指名を実行し、実行済みなら指名内容を再送します（テスト用）")
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
 
 export const removeCommand = new SlashCommandBuilder()
