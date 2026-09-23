@@ -295,6 +295,7 @@ export function createDiaryService({
   const counterRetryFallback = new Map();
   const panelLocks = new Map();
   const panelCleanupFallback = new Map();
+  const panelRefreshPending = new Set();
   const claimToken = `${process.pid}:${Math.random().toString(36).slice(2)}`;
   let workerTimer = null;
 
@@ -380,9 +381,9 @@ export function createDiaryService({
     }
   }
 
-  function panelPayload() {
+  function panelPayload(participantCount) {
     return {
-      content: panelContent ?? [
+      content: `${panelContent ?? [
         "📖 みんなで交換日記",
         "",
         "参加メンバーで順番に、最近あったことなどを書いていく交換日記です！",
@@ -394,7 +395,7 @@ export function createDiaryService({
         "",
         "担当になった際の投稿が3回連続で確認できなかった場合は、自動的に参加状態が解除されます。",
         "解除後もいつでも再参加できます。",
-      ].join("\n"),
+      ].join("\n")}\n\n現在の参加者数：${participantCount}人`,
       components: [new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(DIARY_JOIN_CUSTOM_ID).setLabel("参加する").setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId(DIARY_LEAVE_CUSTOM_ID).setLabel("離脱する").setStyle(ButtonStyle.Secondary),
@@ -512,6 +513,7 @@ export function createDiaryService({
     const currentSettings = settings ?? await getSettings(guild?.id);
     const channelId = currentSettings?.diaryReceptionChannelId;
     if (!channelId) return { status: "not-configured" };
+    const payload = panelPayload(await getParticipantCount(guild.id));
     const previous = await findOne(panelModel, { guildId: guild.id });
     // Keep an immutable copy because a Mongoose update or a test double may
     // mutate the object returned by findOne in place; old-panel cleanup must
@@ -547,7 +549,7 @@ export function createDiaryService({
         message = fetched.message;
         if (message?.edit) {
           try {
-            await message.edit(panelPayload());
+            await message.edit(payload);
             messageWasEdited = true;
           } catch (error) {
             if (!isUnknownMessageError(error)) {
@@ -559,7 +561,7 @@ export function createDiaryService({
         }
       }
     }
-    if (!message) message = await channel.send(panelPayload());
+    if (!message) message = await channel.send(payload);
     const changedReference = !previousReference
       || previousReference.channelId !== channel.id
       || previousReference.messageId !== message.id;
@@ -615,6 +617,18 @@ export function createDiaryService({
   async function ensurePanel(guild, settings = null) {
     if (!guild?.id) return { status: "ignored" };
     return withKeyLock(panelLocks, guild.id, () => ensurePanelUnlocked(guild, settings));
+  }
+
+  async function refreshPanelAfterCountChange(guild, settings = null) {
+    if (!guild?.id || !settings?.diaryReceptionChannelId) return;
+    try {
+      const result = await ensurePanel(guild, settings);
+      if (result.retryable || result.status === "channel-unavailable") panelRefreshPending.add(guild.id);
+      else panelRefreshPending.delete(guild.id);
+    } catch (error) {
+      panelRefreshPending.add(guild.id);
+      logger.warn?.(`Diary participant count panel refresh failed for ${guild.id}: ${safeErrorMessage(error)}`);
+    }
   }
 
   async function syncParticipantRoles(guild, settings = null, { force = false } = {}) {
@@ -730,6 +744,7 @@ export function createDiaryService({
       joinToken: ownershipToken,
       exhausted,
     });
+    if (persisted) await refreshPanelAfterCountChange(guild, await getSettings(guild.id).catch(() => null));
     if (exhausted) {
       const message = reason === "join-role-rollback"
         ? `🚨 交換日記参加ロール失敗後のDB回収を再試行上限で停止しました：<@${userId}> attempts=${attempts}`
@@ -805,6 +820,7 @@ export function createDiaryService({
       await operationalLog(guild, settings, message);
     }
     const count = await getParticipantCount(guild.id);
+    await refreshPanelAfterCountChange(guild, settings);
     await Promise.resolve(requestOperationalStatusRefresh(guild.id, `diary:${reason}`)).catch(() => {});
     if (isAutomaticMiss && sendDm && resolvedMember?.send) {
       const text = `${guild.name ?? "このサーバー"}からのお知らせです。\n\n交換日記で担当になった際の投稿が3回連続で確認できなかったため、参加状態が解除されました。\n\nまた参加したくなった場合は、いつでも「参加する」ボタンから再参加できます！`;
@@ -850,6 +866,7 @@ export function createDiaryService({
         await operationalLog(guild, settings, `⚠️ 交換日記離脱後のロール解除を確認できません：<@${userId}>`);
       }
       const count = await getParticipantCount(guild.id);
+      await refreshPanelAfterCountChange(guild, settings);
       await Promise.resolve(requestOperationalStatusRefresh(guild.id, `diary:${reason}`)).catch(() => {});
       const logText = reason === "guild-member-remove"
         ? `📖 交換日記サーバー退出による離脱：<@${userId}> が離脱しました。現在参加者：${count}人`
@@ -1073,6 +1090,7 @@ export function createDiaryService({
         return { status: "role-failed", message: "参加者ロールを付与できなかったため、参加処理を完了できませんでした。Botの権限を確認してから、もう一度お試しください。" };
       }
       const count = await getParticipantCount(interaction.guildId);
+      await refreshPanelAfterCountChange(guild, settings);
       await operationalLog(guild, settings, `📖 交換日記参加：<@${userId}> が参加しました。現在参加者：${count}人`);
       await Promise.resolve(requestOperationalStatusRefresh(interaction.guildId, "diary:join")).catch(() => {});
       return { status: "joined", message: "交換日記に参加しました！\n\nこれから定期的に日記担当として指名されます。\n指名されたら、翌日の18:00までに交換日記チャンネルへ何か投稿してください！" };
@@ -1870,6 +1888,7 @@ export function createDiaryService({
       const settings = await getSettings(guild.id);
       if (!settings) return { status: "settings-unavailable" };
       const currentNow = asDate(at, new Date());
+      if (panelRefreshPending.has(guild.id)) await refreshPanelAfterCountChange(guild, settings);
       if (settings.diaryEnabled !== true) {
         await cancelAssignments(guild.id, null, "feature-disabled");
         return { status: "disabled" };
