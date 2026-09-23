@@ -803,7 +803,7 @@ test("受付パネルは新規送信・DB保存・旧削除の順で確定し、
     findOne: () => state,
     findOneAndUpdate: async (_filter, update) => { events.push("save"); Object.assign(state, update.$set); return state; },
   };
-  const service = createDiaryService({ panelModel, sendOperationalLog: async () => {} });
+  const service = createDiaryService({ panelModel, participantModel: memoryModel(), sendOperationalLog: async () => {} });
   const result = await service.ensurePanel(guild, { diaryReceptionChannelId: newChannel.id });
   assert.equal(result.status, "applied");
   assert.deepEqual(events.slice(0, 3), ["send", "save", "delete-old"]);
@@ -820,11 +820,66 @@ test("受付パネルは新規送信・DB保存・旧削除の順で確定し、
     findOne: () => rollbackState,
     findOneAndUpdate: async () => { rollbackEvents.push("save"); throw new Error("db unavailable"); },
   };
-  const rollbackService = createDiaryService({ panelModel: rollbackPanel, sendOperationalLog: async () => {} });
+  const rollbackService = createDiaryService({ panelModel: rollbackPanel, participantModel: memoryModel(), sendOperationalLog: async () => {} });
   await assert.rejects(() => rollbackService.ensurePanel(rollbackGuild, { diaryReceptionChannelId: rollbackChannel.id }));
   assert.deepEqual(rollbackEvents, ["send", "save"]);
   assert.equal(rollbackMessages.size, 0);
   assert.equal(rollbackState.messageId, oldMessage.id);
+});
+
+test("受付パネルの参加者数は設置時・参加時・離脱時にDBの有効参加者数へ更新する", async () => {
+  const messages = new Map();
+  const channel = diaryChannel("reception", { messages });
+  let failNextEdit = false;
+  channel.send = async (payload) => {
+    const message = {
+      id: "panel-1", content: payload.content,
+      edit: async (next) => {
+        if (failNextEdit) {
+          failNextEdit = false;
+          throw Object.assign(new Error("temporary failure"), { status: 503 });
+        }
+        message.content = next.content;
+        return message;
+      },
+      delete: async () => { messages.delete(message.id); },
+    };
+    messages.set(message.id, message);
+    return message;
+  };
+  const guild = diaryGuild({ channels: [channel] });
+  const participants = memoryModel();
+  const panels = memoryModel();
+  const settings = { guildId: guild.id, diaryEnabled: true, diaryReceptionChannelId: channel.id, diaryLastRunSlot: "2026-09-21" };
+  const service = createDiaryService({
+    getGuildSettings: async () => settings,
+    participantModel: participants,
+    panelModel: panels,
+    assignmentModel: memoryModel(),
+    dailyRunModel: memoryModel(),
+    sendOperationalLog: async () => {},
+  });
+  await service.ensurePanel(guild, settings);
+  const panel = messages.get("panel-1");
+  assert.match(panel.content, /現在の参加者数：0人$/);
+
+  const button = (customId) => ({
+    customId, guild, guildId: guild.id, channelId: channel.id, message: panel, user: { id: "u1" },
+    deferred: false, replied: false,
+    deferReply: async function deferReply() { this.deferred = true; },
+    editReply: async function editReply(payload) { this.response = payload; },
+  });
+  await service.handleButton(button(DIARY_JOIN_CUSTOM_ID));
+  assert.match(panel.content, /現在の参加者数：1人$/);
+  await service.handleButton(button(DIARY_LEAVE_CUSTOM_ID));
+  assert.match(panel.content, /現在の参加者数：0人$/);
+  await service.handleButton(button(DIARY_JOIN_CUSTOM_ID));
+  failNextEdit = true;
+  await service.handleMemberRemove({ id: "u1", guild });
+  assert.match(panel.content, /現在の参加者数：1人$/);
+  await service.processGuild(guild, { at: new Date("2026-09-21T10:00:00.000Z") });
+  assert.match(panel.content, /現在の参加者数：0人$/);
+  assert.equal(messages.size, 1);
 });
 
 test("復旧履歴は古いページまで遡ってBot/Webhookを除外し、送信前行を期限判定しない", async () => {
@@ -1432,7 +1487,7 @@ test("受付パネル取得の一時障害では重複送信せず、旧削除�
   const panel = memoryModel([{ guildId: guild.id, channelId: oldChannel.id, messageId: oldMessage.id }]);
   const transientMessages = oldChannel.messages.fetch;
   oldChannel.messages.fetch = async () => { throw Object.assign(new Error("rate limited"), { status: 503 }); };
-  const transientService = createDiaryService({ panelModel: panel, sendOperationalLog: async () => {} });
+  const transientService = createDiaryService({ panelModel: panel, participantModel: memoryModel(), sendOperationalLog: async () => {} });
   const transient = await transientService.ensurePanel(guild, { diaryReceptionChannelId: oldChannel.id });
   assert.equal(transient.status, "message-unknown");
   assert.equal(sends, 0);
