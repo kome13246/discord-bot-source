@@ -7,6 +7,9 @@ const schema = new mongoose.Schema(
     guildId: { type: String, required: true },
     configRevision: { type: Number, default: 0, min: 0 },
     configSchemaVersion: { type: Number, default: 1, min: 1 },
+    sengenPanelChannelId: { type: String, default: null },
+    sengenPostChannelId: { type: String, default: null },
+    sengenOverviewChannelId: { type: String, default: null },
   },
   { strict: false, timestamps: true, minimize: false },
 );

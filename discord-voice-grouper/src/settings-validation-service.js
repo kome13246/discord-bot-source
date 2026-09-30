@@ -16,6 +16,7 @@ export const CHECKBOT_FEATURES = Object.freeze([
   "vc_dm",
   "forms",
   "profile",
+  "sengen",
   "voice_control",
   "rtc",
   "status_board",
@@ -105,6 +106,7 @@ const STATUS_LABELS = Object.freeze({
   vc_dm: "vc_dm",
   forms: "forms",
   profile: "profile",
+  sengen: "sengen",
   voice_control: "voice_control",
   rtc: "rtc",
   status_board: "status_board",
@@ -793,6 +795,31 @@ async function validateProfile(ctx) {
   });
 }
 
+async function validateSengen(ctx) {
+  const settings = ctx.settings ?? {};
+  await checkChannel(ctx, {
+    key: "sengen.panelChannel",
+    label: "宣言ボタン設置先",
+    id: settings.sengenPanelChannelId,
+    kind: "text",
+    permissions: ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+  });
+  await checkChannel(ctx, {
+    key: "sengen.postChannel",
+    label: "宣言公開先",
+    id: settings.sengenPostChannelId,
+    kind: "text",
+    permissions: ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+  });
+  await checkChannel(ctx, {
+    key: "sengen.overviewChannel",
+    label: "宣言概要チャンネル",
+    id: settings.sengenOverviewChannelId,
+    kind: "text",
+    permissions: ["ViewChannel"],
+  });
+}
+
 async function validateVoiceControl(ctx) {
   const settings = ctx.settings ?? {};
   await checkChannel(ctx, { key: "voice_control.category", label: "VCコントロール対象カテゴリ", id: settings.vcControlCategoryId, kind: "category", permissions: VOICE_CONTROL_CATEGORY_PERMISSIONS });
@@ -960,6 +987,7 @@ async function runFeature(ctx, feature, getStatusBoard, statusBoardOverride = nu
     case "vc_dm": return validateVcDm(ctx);
     case "forms": return validateForms(ctx);
     case "profile": return validateProfile(ctx);
+    case "sengen": return validateSengen(ctx);
     case "voice_control": return validateVoiceControl(ctx);
     case "rtc": return validateRtc(ctx);
     case "status_board": return validateStatusBoard(ctx, getStatusBoard, statusBoardOverride);

@@ -128,6 +128,11 @@ export function normalizeGuildSettings(settings = {}) {
     ? result.diaryReceptionChannelId : null;
   result.diaryParticipantRoleId = typeof result.diaryParticipantRoleId === "string" && /^\d{5,25}$/.test(result.diaryParticipantRoleId)
     ? result.diaryParticipantRoleId : null;
+  for (const field of ["sengenPanelChannelId", "sengenPostChannelId", "sengenOverviewChannelId"]) {
+    result[field] = typeof result[field] === "string" && /^\d{5,25}$/.test(result[field])
+      ? result[field]
+      : null;
+  }
   const diaryMaxDaily = Number(result.diaryMaxDaily);
   result.diaryMaxDaily = Number.isInteger(diaryMaxDaily) && diaryMaxDaily >= 1 && diaryMaxDaily <= 10 ? diaryMaxDaily : 1;
   const diaryMinIntervalDays = Number(result.diaryMinIntervalDays);

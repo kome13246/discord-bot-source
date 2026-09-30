@@ -51,6 +51,9 @@ import { CallWaitInterest } from "./models/call-wait-interest.js";
 import { KokuchiReservation } from "./models/kokuchi-reservation.js";
 import { MongoLeaseLock } from "./models/mongo-lease-lock.js";
 import { ProfileRegistrationPanel } from "./models/profile-registration-panel.js";
+import { SengenDeclaration } from "./models/sengen-declaration.js";
+import { SengenDraft } from "./models/sengen-draft.js";
+import { SengenPanel } from "./models/sengen-panel.js";
 import { OteboRecruitmentPanel } from "./models/otebo-recruitment-panel.js";
 import { CallWaitRoleGeneration } from "./models/call-wait-role-generation.js";
 import { OperationalActionLog } from "./models/operational-action-log.js";
@@ -64,6 +67,7 @@ import { ReconciliationRepairJob } from "./models/reconciliation-repair-job.js";
 import { acquireMongoLease, releaseMongoLease, renewMongoLease } from "./mongo-lease-lock-store.js";
 import { handleProfileVoiceState, restoreProfiles } from "./profile-service.js";
 import { createProfileRegistrationPanelService } from "./profile-registration-panel-service.js";
+import { createSengenService } from "./sengen-service.js";
 import { createOteboRecruitmentPanelService } from "./otebo-recruitment-panel-service.js";
 import { createCallWaitRoleService } from "./call-wait-role-service.js";
 import {
@@ -432,6 +436,7 @@ const voiceChannelControlService = createVoiceChannelControlService({
   isRtcChannel: (guildId, channelId) => rtcService?.isRtcChannel?.(guildId, channelId) ?? false,
 });
 const profileRegistrationPanelService = createProfileRegistrationPanelService({ getGuildSettings, sendOperationalLog });
+const sengenService = createSengenService({ client, getGuildSettings, logger: console });
 const profileFeature = createProfileFeature({
   getGuildSettings,
   sendOperationalLog,
@@ -1167,6 +1172,7 @@ const settingsApplyDispatcher = createSettingsApplyDispatcher({
   getGuildSettings,
   operationalStatusBoardService,
   profileRegistrationPanelService,
+  sengenService,
   oteboRecruitmentPanelService,
   vcDmService,
   voiceChannelControlService,
@@ -1267,6 +1273,7 @@ const guildOperationsFeature = createGuildOperationsFeature({
   processOteboDeadline,
   profileFeature,
   profileRegistrationPanelService,
+  sengenService,
   randomTopicCooldownByChannel,
   reconcilePersistedVoiceParticipantRoleGrants,
   releaseMongoLease,
@@ -1300,6 +1307,12 @@ diaryService = createDiaryService({
 });
 function isOteboRecruitmentPanelDisplayAllowed(...args) { return guildOperationsFeature.isOteboRecruitmentPanelDisplayAllowed(...args); }
 function handleProfileRegistrationPanelMessage(...args) { return guildOperationsFeature.handleProfileRegistrationPanelMessage(...args); }
+async function handleSengenPanelMessage(message) {
+  if (!message.guild || message.author?.bot || message.webhookId || message.system || message.channel?.isThread?.()) return;
+  const settings = await getGuildSettings(message.guild.id);
+  if (settings?.sengenPanelChannelId !== message.channelId) return;
+  return sengenService.requestPanelMove(message.guild, "human-message");
+}
 function handleOteboRecruitmentPanelMessage(...args) { return guildOperationsFeature.handleOteboRecruitmentPanelMessage(...args); }
 function handleSetting(...args) { return guildOperationsFeature.handleSetting(...args); }
 function handleRemoveRole(...args) { return guildOperationsFeature.handleRemoveRole(...args); }
@@ -1377,6 +1390,7 @@ client.once(Events.ClientReady, createReadyHandler({
     { name: "split-review-deliveries", run: splitReviewFeature.restoreFailedSplitReviewDeliveries },
     { name: "profiles", run: () => restoreProfiles(client, { sendOperationalLog, getGuildSettings }) },
     { name: "profile-registration-panel", run: () => profileRegistrationPanelService.restore(client) },
+    { name: "sengen", run: () => sengenService.restore(client) },
     { name: "vc-dm", run: () => vcDmService.restore(client) },
     { name: "scheduled-actions", run: restoreScheduledActions },
     { name: "bosyu-edit-sessions", run: bosyuFeature.restoreBosyuEditSessions },
@@ -1393,6 +1407,7 @@ client.once(Events.ClientReady, createReadyHandler({
   ],
   workerStartTasks: [
     { name: "settings-apply-worker", run: () => settingsApplyService?.start() },
+    { name: "sengen-worker", run: () => sengenService.start() },
     { name: "diary-worker", run: () => diaryService.start() },
   ],
   updateRestoreState: ({ completed, failed, failures }) => {
@@ -1428,11 +1443,13 @@ registerDiscordEventHandlers({
     oteboRecruitmentPanel: oteboRecruitmentPanelService,
     voiceChannelControl: voiceChannelControlService,
     rtc: rtcService,
+    sengen: sengenService,
   },
   handlers: {
     handleDisboardBumpMessage: bumpReminderFeature.handleMessage,
     handleTopicRequestMessage,
     handleProfileRegistrationPanelMessage,
+    handleSengenPanelMessage,
     handleOteboRecruitmentPanelMessage,
     handleDiaryMessage: (message) => diaryService.handleMessage(message),
     handleProfileVoiceState: (oldState, newState) => handleProfileVoiceState(
@@ -1476,6 +1493,7 @@ const interactionHandler = createInteractionHandler({
     voiceChannelControl: voiceChannelControlService,
     fukyoTheme: fukyoThemeService,
     rtc: rtcService,
+    sengen: sengenService,
   },
   handlers: {
     handleConfig: configurationFeature.handleConfig,
@@ -1931,6 +1949,9 @@ async function loginDiscordClient() {
       KokuchiReservation.createIndexes(),
       MongoLeaseLock.createIndexes(),
       ProfileRegistrationPanel.createIndexes(),
+      SengenPanel.createIndexes(),
+      SengenDraft.createIndexes(),
+      SengenDeclaration.createIndexes(),
       FukyoThemeState.createIndexes(),
       FukyoWeeklyPost.createIndexes(),
       SplitProcessSession.createIndexes(),
@@ -1980,6 +2001,7 @@ async function loginDiscordClient() {
       () => fukyoThemeService.shutdown(),
       () => diaryService.stop(),
       () => profileRegistrationPanelService.shutdown(),
+      () => sengenService.shutdown(),
     ],
     clearStandaloneTimers: [
       () => {

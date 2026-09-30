@@ -50,6 +50,7 @@ function featureLabel(feature) {
     vc_dm: "vc_dm",
     forms: "forms",
     profile: "profile",
+    sengen: "sengen",
     voice_control: "voice_control",
     status_board: "status_board",
     fukyo: "fukyo",

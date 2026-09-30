@@ -60,6 +60,7 @@
         <div class="card"><strong>/splitvc</strong><br>VC参加者を3人組中心にグループ分けし、PB連携や途中参加VCまで処理します。</div>
         <div class="card"><strong>通話待機</strong><br>JST固定スロットの定時募集と、VCの開始・終了に合わせた通知を処理します。</div>
         <div class="card"><strong>ボタン募集</strong><br>常設パネルから匿名の即時募集を作成し、参加確定・ロール世代管理・VC開始を処理します。</div>
+        <div class="card"><strong>宣言</strong><br>期限つきの目標を公開登録し、期限日にDMで結果を確認します。</div>
       </div>
       <p class="small">公開募集には作成者名・参加者一覧・ユーザーIDを表示しません。詳細仕様は同梱の <a href="README.md">README.md</a> を参照してください。</p>
     </section>
@@ -79,6 +80,9 @@
       <h2>コマンドと設定</h2>
       <p><code>/setting callwait</code>で通話待機の共通設定を保存します。</p>
       <pre>/setting callwait call_wait_enabled:true call_wait_interval_minutes:45 call_wait_role:@通話希望者 call_wait_prompt_channel:募集チャンネル call_wait_notice_channel:集合通知チャンネル call_wait_voice_category:VCカテゴリ otebo_quick_confirm_seconds:30 bosyu_mention_role:@募集通知</pre>
+      <p><code>/setting sengen</code>で宣言パネルの設置先、公開先、概要チャンネルを設定します。</p>
+      <pre>/setting sengen panel_channel:#宣言ボタン post_channel:#宣言一覧 overview_channel:#宣言の概要</pre>
+      <p>ユーザーは内容300文字以内、有効期間1〜90日、任意の途中確認間隔を入力し、公開前に具体的な期限を確認します。宣言は登録日の有効期間後にあたる日、JST 18:00が期限です。同じサーバーではユーザー1人につき同時進行3件まで登録でき、期限後に結果未回答の宣言は枠を使いません。期限日に一度だけ結果DMを送り、未回答なら公開表示は期間・期限のままです。回答すると期間表示が達成・失敗に置き換わり、失敗理由は任意で公開投稿の最下部へ追加できます。結果訂正は公開投稿の管理者用ボタンから行います。復旧用の一意IDは投稿末尾に見えない形で保持し、旧形式の無効な宣言ボタンも読み取れます。DM失敗で公開登録は止まらず、宣言の詳細・停止中の通知仕様は同梱の <a href="README.md">README.md</a> を参照してください。</p>
       <table>
         <thead><tr><th>設定</th><th>用途</th></tr></thead>
         <tbody>
