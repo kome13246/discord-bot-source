@@ -425,6 +425,26 @@ export const settingCommand = new SlashCommandBuilder()
           .addChannelTypes(ChannelType.GuildText)
           .setRequired(false),
       ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("sengen")
+      .setDescription("宣言ボタン・公開先・概要チャンネルを設定します")
+      .addChannelOption((option) => option
+        .setName("panel_channel")
+        .setDescription("宣言ボタンの設置先チャンネル")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(true))
+      .addChannelOption((option) => option
+        .setName("post_channel")
+        .setDescription("宣言を公開するチャンネル")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(true))
+      .addChannelOption((option) => option
+        .setName("overview_channel")
+        .setDescription("宣言機能の概要を案内するチャンネル")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(true)),
   );
 
 export const configCommand = new SlashCommandBuilder()
@@ -550,6 +570,7 @@ export const checkBotCommand = new SlashCommandBuilder()
       { name: "vc_dm", value: "vc_dm" },
       { name: "forms", value: "forms" },
       { name: "profile", value: "profile" },
+      { name: "sengen", value: "sengen" },
       { name: "voice_control", value: "voice_control" },
       { name: "rtc", value: "rtc" },
       { name: "status_board", value: "status_board" },

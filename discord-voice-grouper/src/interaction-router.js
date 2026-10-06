@@ -21,6 +21,7 @@ export function createInteractionHandler({
 
     try {
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith("sengen:")) return await services.sengen.handleInteraction(interaction);
       if (interaction.customId.startsWith("setup:")) return await handlers.handleSetupInteraction(interaction);
       if (interaction.customId === "rtc:ready" || interaction.customId === "rtc:cancel") return await services.rtc?.handleInteraction?.(interaction);
       if (interaction.customId.startsWith("vcdm:")) return await services.vcDm.handleInteraction(interaction);
@@ -91,6 +92,7 @@ export function createInteractionHandler({
     }
 
     if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith("sengen:")) return await services.sengen.handleInteraction(interaction);
       if (interaction.customId.startsWith("operational:")) return await services.operationalManagement.handle(interaction);
       if (interaction.customId.startsWith(`${ids.splitReviewModal}:`)) return await handlers.handleSplitReviewModal(interaction);
       if (interaction.customId.startsWith("vc_control:")) return await services.voiceChannelControl.handle(interaction);

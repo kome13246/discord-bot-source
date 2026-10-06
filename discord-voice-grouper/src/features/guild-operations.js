@@ -59,6 +59,7 @@ export function createGuildOperationsFeature(dependencies) {
     restoreGatheringVcPermissionAfterSplit,
     saveGuildSettingsWithCurrent,
     saveVersionedGuildConfiguration,
+    sengenService,
     splitReviewFeature,
     stopVoiceMonitorSession,
     validateOteboSettings,
@@ -218,6 +219,29 @@ export function createGuildOperationsFeature(dependencies) {
   
     if (subcommand === "fukyo") {
       await fukyoThemeService.updateSetting(interaction);
+      return;
+    }
+
+    if (subcommand === "sengen") {
+      const panelChannel = interaction.options.getChannel("panel_channel", true);
+      const postChannel = interaction.options.getChannel("post_channel", true);
+      const overviewChannel = interaction.options.getChannel("overview_channel", true);
+      const validTextTypes = new Set([ChannelType.GuildText, ChannelType.GuildAnnouncement]);
+      if (![panelChannel, postChannel, overviewChannel].every((channel) => validTextTypes.has(channel.type))) {
+        await interaction.editReply({ content: "設置先・宣言投稿先・概要チャンネルにはテキストチャンネルを指定してください。", allowedMentions: { parse: [] } });
+        return;
+      }
+      const current = await getGuildSettings(interaction.guildId);
+      const settings = await saveAdminConfiguration(interaction, current, {
+        sengenPanelChannelId: panelChannel.id,
+        sengenPostChannelId: postChannel.id,
+        sengenOverviewChannelId: overviewChannel.id,
+      }, "sengen-setting");
+      if (!settings) return;
+      await interaction.editReply({
+        content: `宣言機能の設定を保存しました。${applyStatusText(settings)}\n\nボタン設置先：<#${panelChannel.id}>\n宣言投稿先：<#${postChannel.id}>\n概要チャンネル：<#${overviewChannel.id}>\n設定変更は新しい宣言から適用し、既存の宣言は登録時の投稿先に残ります。`,
+        allowedMentions: { parse: [] },
+      });
       return;
     }
 

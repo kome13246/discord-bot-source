@@ -29,6 +29,9 @@ export function registerDiscordEventHandlers({
       void handlers.handleProfileRegistrationPanelMessage(message).catch((error) => {
         logRecoverableError("Profile registration panel message processing failed", error);
       });
+      void handlers.handleSengenPanelMessage?.(message).catch((error) => {
+        logRecoverableError("Sengen panel message processing failed", error);
+      });
       void handlers.handleOteboRecruitmentPanelMessage(message).catch((error) => {
         logRecoverableError("Otebo recruitment panel message processing failed", error);
       });

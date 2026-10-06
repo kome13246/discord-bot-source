@@ -71,6 +71,9 @@ export const ADMIN_CONFIGURATION_CATALOG = Object.freeze([
   "diaryParticipantRoleId",
   "diaryMaxDaily",
   "diaryMinIntervalDays",
+  "sengenPanelChannelId",
+  "sengenPostChannelId",
+  "sengenOverviewChannelId",
 ]);
 
 export const ADMIN_CONFIGURATION_KEYS = new Set(ADMIN_CONFIGURATION_CATALOG);

@@ -97,6 +97,7 @@ export function classifyConfigurationChanges(changedKeys = []) {
   for (const key of keys) {
     if (key === "statusBoardChannelId") features.add("status_board");
     if (/^profileIntroductionChannelId$/.test(key)) features.add("profile");
+    if (/^sengen(?:Panel|Post|Overview)ChannelId$/.test(key)) features.add("sengen");
     if (/^(callWait|bosyu|otebo)/.test(key)) features.add("callwait");
     if (/^(kokuchi|wadaiChannel|splitStartChannelId|gatheringVoiceChannelId)/.test(key)) features.add("kokuchi");
     if (/^kokuchiEventTime(?:Configured)?$/.test(key)) {
@@ -183,6 +184,7 @@ export function createSettingsApplyDispatcher({
   getGuildSettings,
   operationalStatusBoardService = null,
   profileRegistrationPanelService = null,
+  sengenService = null,
   oteboRecruitmentPanelService = null,
   vcDmService = null,
   voiceChannelControlService = null,
@@ -253,6 +255,14 @@ export function createSettingsApplyDispatcher({
       await runMutating("profile", async () => {
         if (!settings.profileIntroductionChannelId) return profileRegistrationPanelService?.removeProfileRegistrationPanel?.(guild) ?? { status: "not-configured" };
         return profileRegistrationPanelService?.ensureProfileRegistrationPanel?.(guild) ?? { status: "applied" };
+      });
+    }
+    if (features.includes("sengen")) {
+      await runMutating("sengen", async () => {
+        if (!settings.sengenPanelChannelId || !settings.sengenPostChannelId || !settings.sengenOverviewChannelId) {
+          return sengenService?.removePanel?.(guild) ?? { status: "not-configured" };
+        }
+        return sengenService?.ensurePanel?.(guild) ?? { status: "applied" };
       });
     }
     if (features.includes("callwait")) {

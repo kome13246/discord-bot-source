@@ -1,7 +1,9 @@
 import { readBotImplementationSource } from "./source-under-test.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ChannelType } from "discord.js";
 import { readFile } from "node:fs/promises";
+import { commands as registeredCommands } from "../src/commands.js";
 import {
   buildProfileRegistrationPanelPayload,
   createProfileRegistrationPanelService,
@@ -252,8 +254,8 @@ test("bot integration shares the setup payload, restores modal values, and ignor
   assert.match(source, /message\.author\?\.bot \|\| message\.webhookId \|\| message\.system \|\| message\.channel\?\.isThread\?\.\(\)/);
   assert.match(source, /void profileRegistrationPanelService\.requestProfileRegistrationPanelMove\(interaction\.guild, "profile-published"\)/);
   assert.match(source, /fallbackChannel: null/);
-  const commands = await readFile(new URL("../src/commands.js", import.meta.url), "utf8");
-  const profileCommand = commands.slice(commands.indexOf('.setName("profile")'), commands.indexOf("export const showReviewCommand"));
-  assert.match(profileCommand, /addChannelTypes\(ChannelType\.GuildText\)/);
-  assert.doesNotMatch(profileCommand, /GuildAnnouncement/);
+  const settingCommand = registeredCommands.find((command) => command.name === "setting");
+  const profileOption = settingCommand.options.find((option) => option.type === 1 && option.name === "profile");
+  const introductionChannel = profileOption.options.find((option) => option.name === "introduction_channel");
+  assert.deepEqual(introductionChannel.channel_types, [ChannelType.GuildText]);
 });
